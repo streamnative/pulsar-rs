@@ -1,0 +1,14 @@
+[package]
+name = "pulsar-client"
+version = "0.1.0"
+authors = ["Alex Mault <amault@developers.wyyerd.com>"]
+
+[dependencies]
+tokio = "0.1.7"
+futures = "0.1.23"
+bytes = "0.4.9"
+prost = "0.4.0"
+prost-derive = "0.4.0"
+
+[build-dependencies]
+prost-build = "0.4.0"
