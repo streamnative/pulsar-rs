@@ -11,7 +11,7 @@ futures = "0.1.23"
 nom = "4.0.0"
 prost = "0.4.0"
 prost-derive = "0.4.0"
-tokio = "0.1.7"
+tokio = "0.1.11"
 
 [build-dependencies]
 prost-build = "0.4.0"
