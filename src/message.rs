@@ -1,24 +1,14 @@
-use bytes::{BufMut, IntoBuf};
+use bytes::{Buf, BufMut, IntoBuf, BytesMut};
 use crc::crc32;
 use nom::{be_u16, be_u32};
 use prost::{self, Message as ImplProtobuf};
+use tokio_codec::{Encoder, Decoder};
+use std::io::Cursor;
+
 use super::Error;
 
 pub use self::proto::BaseCommand;
 pub use self::proto::MessageMetadata as Metadata;
-
-impl From<prost::EncodeError> for Error {
-    fn from(e: prost::EncodeError) -> Self {
-        Error::Encoding(e.to_string())
-    }
-}
-
-impl From<prost::DecodeError> for Error {
-    fn from(e: prost::DecodeError) -> Self {
-        Error::Decoding(e.to_string())
-    }
-}
-
 
 #[derive(Debug)]
 pub struct Message {
@@ -27,39 +17,44 @@ pub struct Message {
 }
 
 impl Message {
-    pub fn decode(buf: &[u8]) -> Result<Message, Error> {
-        let (buf, command_frame) = command_frame(buf)
-            .map_err(|err| Error::Decoding(err.to_string()))?;
-        let command = BaseCommand::decode(command_frame.command)?;
-        let payload =
-            if buf.len() > 0 {
-                let (buf, payload_frame) = payload_frame(buf)
-                    .map_err(|err| Error::Decoding(err.to_string()))?;
-
-                // TODO: Check crc32 of payload data
-
-                let metadata = Metadata::decode(payload_frame.metadata)?;
-                Some(Payload { metadata, data: buf.to_vec() })
-            } else {
-                None
-            };
-
-        Ok(Message { command, payload })
+    pub fn request_id(&self) -> Option<u64> {
+        let command = &self.command;
+        command.subscribe.as_ref().map(|m| m.request_id)
+            .or(command.partition_metadata.as_ref().map(|m| m.request_id))
+            .or(command.partition_metadata_response.as_ref().map(|m| m.request_id))
+            .or(command.lookup_topic.as_ref().map(|m| m.request_id))
+            .or(command.lookup_topic_response.as_ref().map(|m| m.request_id))
+            .or(command.producer.as_ref().map(|m| m.request_id))
+            .or(command.producer_success.as_ref().map(|m| m.request_id))
+            .or(command.unsubscribe.as_ref().map(|m| m.request_id))
+            .or(command.seek.as_ref().map(|m| m.request_id))
+            .or(command.close_producer.as_ref().map(|m| m.request_id))
+            .or(command.close_consumer.as_ref().map(|m| m.request_id))
+            .or(command.success.as_ref().map(|m| m.request_id))
+            .or(command.producer_success.as_ref().map(|m| m.request_id))
+            .or(command.error.as_ref().map(|m| m.request_id))
+            .or(command.consumer_stats.as_ref().map(|m| m.request_id))
+            .or(command.consumer_stats_response.as_ref().map(|m| m.request_id))
+            .or(command.get_last_message_id.as_ref().map(|m| m.request_id))
+            .or(command.get_last_message_id_response.as_ref().map(|m| m.request_id))
+            .or(command.get_topics_of_namespace.as_ref().map(|m| m.request_id))
+            .or(command.get_topics_of_namespace_response.as_ref().map(|m| m.request_id))
+            .or(command.get_schema.as_ref().map(|m| m.request_id))
+            .or(command.get_schema_response.as_ref().map(|m| m.request_id))
     }
+}
 
-    pub fn encoded_size(&self) -> usize {
-        let command_size = self.command.encoded_len();
-        let metadata_size = self.payload.as_ref().map(|p| p.metadata.encoded_len()).unwrap_or(0);
-        let payload_size = self.payload.as_ref().map(|p| p.data.len()).unwrap_or(0);
-        let header_size = if self.payload.is_some() { 18 } else { 8 };
-        command_size + metadata_size + payload_size + header_size
-    }
+pub struct Codec;
 
-    pub fn encode_vec(&self) -> Result<Vec<u8>, Error> {
-        let command_size = self.command.encoded_len();
-        let metadata_size = self.payload.as_ref().map(|p| p.metadata.encoded_len()).unwrap_or(0);
-        let payload_size = self.payload.as_ref().map(|p| p.data.len()).unwrap_or(0);
-        let header_size = if self.payload.is_some() { 18 } else { 8 };
+impl Encoder for Codec {
+    type Item = Message;
+    type Error = Error;
+
+    fn encode(&mut self, item: Message, dst: &mut BytesMut) -> Result<(), Error> {
+        let command_size = item.command.encoded_len();
+        let metadata_size = item.payload.as_ref().map(|p| p.metadata.encoded_len()).unwrap_or(0);
+        let payload_size = item.payload.as_ref().map(|p| p.data.len()).unwrap_or(0);
+        let header_size = if item.payload.is_some() { 18 } else { 8 };
         // Total size does not include the size of the 'totalSize' field, so we subtract 4
         let total_size = command_size + metadata_size + payload_size + header_size - 4;
         let mut buf = Vec::with_capacity(total_size + 4);
@@ -67,10 +62,10 @@ impl Message {
         // Simple command frame
         buf.put_u32_be(total_size as u32);
         buf.put_u32_be(command_size as u32);
-        self.command.encode(&mut buf)?;
+        item.command.encode(&mut buf)?;
 
         // Payload command frame
-        if let Some(payload) = &self.payload {
+        if let Some(payload) = &item.payload {
             buf.put_u16_be(0x0e01);
 
             let crc_offset = buf.len();
@@ -85,7 +80,54 @@ impl Message {
             let crc_buf: &mut [u8] = &mut buf[crc_offset..metdata_offset];
             crc_buf.into_buf().put_u32_be(crc);
         }
-        Ok(buf)
+        if dst.remaining_mut() >= buf.len() {
+            dst.put_slice(&buf);
+            println!("Wrote message {:?}", item);
+            Ok(())
+        } else {
+            Err(Error::Encoding("Insufficient buffer space to encode Message".to_string()))
+        }
+    }
+}
+
+impl Decoder for Codec {
+    type Item = Message;
+    type Error = Error;
+
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Message>, Error> {
+        if src.len() >= 4 {
+            let mut buf = Cursor::new(src);
+            // `messageSize` refers only to _remaining_ message size, so we add 4 to get total frame size
+            let message_size = buf.get_u32_be() as usize + 4;
+            let src = buf.into_inner();
+            if src.len() >= message_size {
+                let msg = {
+                    let (buf, command_frame) = command_frame(src.as_ref())
+                        .map_err(|err| Error::Decoding(err.to_string()))?;
+                    let command = BaseCommand::decode(command_frame.command)?;
+                    let payload =
+                        if buf.len() > 0 {
+                            let (buf, payload_frame) = payload_frame(buf)
+                                .map_err(|err| Error::Decoding(err.to_string()))?;
+
+                            // TODO: Check crc32 of payload data
+
+                            let metadata = Metadata::decode(payload_frame.metadata)?;
+                            Some(Payload { metadata, data: buf.to_vec() })
+                        } else {
+                            None
+                        };
+
+                    Message { command, payload }
+                };
+
+                //TODO advance as we read, rather than this weird post thing
+                src.advance(message_size);
+                println!("Read message {:?}", &msg);
+                return Ok(Some(msg))
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -927,6 +969,18 @@ pub mod proto {
         ///
         /// Schema-registry : added avro schema format for json
         V13 = 13,
+    }
+}
+
+impl From<prost::EncodeError> for Error {
+    fn from(e: prost::EncodeError) -> Self {
+        Error::Encoding(e.to_string())
+    }
+}
+
+impl From<prost::DecodeError> for Error {
+    fn from(e: prost::DecodeError) -> Self {
+        Error::Decoding(e.to_string())
     }
 }
 
