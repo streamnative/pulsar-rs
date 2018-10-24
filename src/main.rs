@@ -98,7 +98,6 @@ mod pulsar {
     }
 }
 
-
 pub struct Producer {
     pub sink: mpsc::UnboundedSender<Message>,
     pub errs: mpsc::UnboundedReceiver<Error>,
@@ -144,17 +143,20 @@ impl Producer {
     /// Builds a future to connect to pulsar, and creates the Producer object to use said connection.
     /// The future returned (second item of tuple) should be ran in an executor to actually start
     /// the connection
-    pub fn new(addr: String, topic: String) -> (Producer, impl Future<Item=(), Error=Error>) {
+    pub fn new(addr: String, topic: String) -> impl Future<Item=(Producer, impl Future<Item=(), Error=()>), Error=Error> {
         let (tx, rx) = mpsc::unbounded();
         let (err_tx, err_rx) = mpsc::unbounded();
-        let producer = Producer {
-            sink: tx.clone(),
-            errs: err_rx,
-            socket_addr: addr,
-            topic: topic.clone(),
-        };
-        let handlers = Producer::connect(&producer.socket_addr, topic, tx, rx, err_tx);
-        (producer, handlers)
+        Producer::connect(&addr, topic.clone())
+            .map(move |stream| {
+                let producer = Producer {
+                    sink: tx.clone(),
+                    errs: err_rx,
+                    socket_addr: addr,
+                    topic: topic.clone(),
+                };
+                let handlers = Producer::build_connection_handlers(stream, tx, rx, err_tx);
+                (producer, handlers)
+            })
     }
 
     /// Attempts to reconnect to pulsar, rebuilding connection machinery
@@ -163,54 +165,59 @@ impl Producer {
         let (err_tx, err_rx) = mpsc::unbounded();
         self.errs = err_rx;
         self.sink = tx.clone();
-        Producer::connect(&self.socket_addr, self.topic.clone(), tx, rx, err_tx)
+        Producer::connect(&self.socket_addr, self.topic.clone())
+            .and_then(move |stream| {
+                Producer::build_connection_handlers(stream, tx, rx, err_tx)
+                    .map_err(|()| Error::Unexpected(String::from("Unexpected error. This is a bug!")))
+            })
     }
 
     /// Connects to pulsar as a producer on a given topic, building send / receive handlers
-    fn connect(
-        addr: &str,
-        topic: String,
-        message_tx: mpsc::UnboundedSender<Message>,
-        message_rx: mpsc::UnboundedReceiver<Message>,
-        err_tx: mpsc::UnboundedSender<Error>,
-    ) -> impl Future<Item=(), Error=Error> {
-        let reader_err_tx = err_tx.clone();
-        let writer_err_tx = err_tx.clone();
-
+    fn connect(addr: &str, topic: String) -> impl Future<Item=Pulsar, Error=Error> {
         let topic_ = topic.clone();
-
         SocketAddr::from_str(addr).into_future().map_err(|e| Error::SocketAddr(e.to_string()))
             .and_then(|addr| pulsar::connect(&addr))
             .and_then(move |stream| pulsar::lookup_topic(stream, topic_))
             .and_then(move |stream| pulsar::create_producer(stream, topic))
-            .map(move |stream: Pulsar| {
-                let (sink, stream) = stream.split();
-                tokio::spawn(message_rx
-                    .map_err(|()| Error::Unexpected(String::from("Unexpected mpsc error")))
-                    .forward(sink)
-                    .map(|_| ())
-                    .map_err(move |err| {
-                        let _ = reader_err_tx.unbounded_send(err);
-                    }));
+    }
 
-                tokio::spawn(stream
-                    .for_each(move |message: Message| {
-                        if message.command.ping.is_some() {
-                            match message_tx.unbounded_send(messages::pong()) {
-                                Ok(_) => Ok(()),
-                                Err(_) => Err(Error::Disconnected)
-                            }
-                        } else if message.command.close_producer.is_some() {
-                            Err(Error::Disconnected)
-                        } else {
-                            println!("Unhandled message: {:?}", message);
-                            Ok(())
-                        }
-                    }.into_future())
-                    .map_err(move |err| {
-                        let _ = writer_err_tx.unbounded_send(err);
-                    }));
-            })
+    fn build_connection_handlers(
+        stream: Pulsar,
+        message_tx: mpsc::UnboundedSender<Message>,
+        message_rx: mpsc::UnboundedReceiver<Message>,
+        err_tx: mpsc::UnboundedSender<Error>,
+    ) -> impl Future<Item=(), Error=()> {
+        let reader_err_tx = err_tx.clone();
+        let writer_err_tx = err_tx.clone();
+
+        let (sink, stream) = stream.split();
+        let receiver = message_rx
+            .map_err(|()| Error::Unexpected(String::from("Unexpected mpsc error")))
+            .forward(sink)
+            .map(|_| ())
+            .map_err(move |err| {
+                let _ = reader_err_tx.unbounded_send(err);
+            });
+
+        let sender = stream
+            .for_each(move |message: Message| {
+                if message.command.ping.is_some() {
+                    match message_tx.unbounded_send(messages::pong()) {
+                        Ok(_) => Ok(()),
+                        Err(_) => Err(Error::Disconnected)
+                    }
+                } else if message.command.close_producer.is_some() {
+                    Err(Error::Disconnected)
+                } else {
+                    println!("Unhandled message: {:?}", message);
+                    Ok(())
+                }
+            }.into_future())
+            .map_err(move |err| {
+                let _ = writer_err_tx.unbounded_send(err);
+            });
+
+        receiver.join(sender).map(|((), ())| ())
     }
 }
 
@@ -278,9 +285,9 @@ mod messages {
 
 
 fn main() {
-    let (producer, pulsar_handler) = Producer::new("127.0.0.1:6650".to_string(), "text".to_string());
+    let (producer, pulsar_handler) = Future::wait(Producer::new("127.0.0.1:6650".to_string(), "text".to_string())).unwrap();
 
-    tokio::run(pulsar_handler.map_err(|e| eprintln!("{}", e)));
+    tokio::run(pulsar_handler);
     tokio::run(producer.errs.for_each(|err| {
         eprintln!("{}", err);
         Ok(()).into_future()
