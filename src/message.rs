@@ -1,12 +1,24 @@
 use bytes::{BufMut, IntoBuf};
 use crc::crc32;
-use failure::Error;
 use nom::{be_u16, be_u32};
-use prost::Message as ImplProtobuf;
-use std::error::Error as StdError;
+use prost::{self, Message as ImplProtobuf};
+use super::Error;
 
 pub use self::proto::BaseCommand;
 pub use self::proto::MessageMetadata as Metadata;
+
+impl From<prost::EncodeError> for Error {
+    fn from(e: prost::EncodeError) -> Self {
+        Error::Encoding(e.to_string())
+    }
+}
+
+impl From<prost::DecodeError> for Error {
+    fn from(e: prost::DecodeError) -> Self {
+        Error::Decoding(e.to_string())
+    }
+}
+
 
 #[derive(Debug)]
 pub struct Message {
@@ -17,12 +29,12 @@ pub struct Message {
 impl Message {
     pub fn decode(buf: &[u8]) -> Result<Message, Error> {
         let (buf, command_frame) = command_frame(buf)
-            .map_err(|err| format_err!("{}: {:?}", err.description(), err))?;
+            .map_err(|err| Error::Decoding(err.to_string()))?;
         let command = BaseCommand::decode(command_frame.command)?;
         let payload =
             if buf.len() > 0 {
                 let (buf, payload_frame) = payload_frame(buf)
-                    .map_err(|err| format_err!("{}: {:?}", err.description(), err))?;
+                    .map_err(|err| Error::Decoding(err.to_string()))?;
 
                 // TODO: Check crc32 of payload data
 
@@ -35,12 +47,21 @@ impl Message {
         Ok(Message { command, payload })
     }
 
+    pub fn encoded_size(&self) -> usize {
+        let command_size = self.command.encoded_len();
+        let metadata_size = self.payload.as_ref().map(|p| p.metadata.encoded_len()).unwrap_or(0);
+        let payload_size = self.payload.as_ref().map(|p| p.data.len()).unwrap_or(0);
+        let header_size = if self.payload.is_some() { 18 } else { 8 };
+        command_size + metadata_size + payload_size + header_size
+    }
+
     pub fn encode_vec(&self) -> Result<Vec<u8>, Error> {
         let command_size = self.command.encoded_len();
         let metadata_size = self.payload.as_ref().map(|p| p.metadata.encoded_len()).unwrap_or(0);
         let payload_size = self.payload.as_ref().map(|p| p.data.len()).unwrap_or(0);
-        let header_size = if self.payload.is_some() { 14 } else { 4 };
-        let total_size = command_size + metadata_size + payload_size + header_size;
+        let header_size = if self.payload.is_some() { 18 } else { 8 };
+        // Total size does not include the size of the 'totalSize' field, so we subtract 4
+        let total_size = command_size + metadata_size + payload_size + header_size - 4;
         let mut buf = Vec::with_capacity(total_size + 4);
 
         // Simple command frame
