@@ -1,5 +1,6 @@
 use std::io;
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+use serde_json;
 
 #[derive(Debug, Fail)]
 pub enum Error {
@@ -18,12 +19,20 @@ pub enum Error {
     #[fail(display = "Error obtaining socket address: {}", _0)]
     SocketAddr(String),
     #[fail(display = "Unexpected response from pulsar: {}", _0)]
-    UnexpectedResponse(String)
+    UnexpectedResponse(String),
+    #[fail(display = "Error serializing value: {}", _0)]
+    Serialization(serde_json::Error),
 }
 
 impl From<io::Error> for Error {
     fn from(err: io::Error) -> Self {
         Error::Io(err)
+    }
+}
+
+impl From<serde_json::Error> for Error {
+    fn from(err: serde_json::Error) -> Self {
+        Error::Serialization(err)
     }
 }
 

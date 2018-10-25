@@ -3,7 +3,6 @@ use error::{Error, SharedError};
 use futures::{self, Async, Future, Stream, Sink, IntoFuture, future::{self, Either}, sync::{mpsc, oneshot},
               AsyncSink};
 use message::{proto, Codec, Message};
-use rand;
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -12,12 +11,19 @@ use tokio_codec;
 
 type Pulsar = tokio_codec::Framed<TcpStream, Codec>;
 
+#[derive(Debug, PartialEq, Ord, PartialOrd, Eq)]
+pub enum RequestKey {
+    RequestId(u64),
+    ProducerSend { producer_id: u64, sequence_id: u64 }
+}
+
 pub struct Receiver<S: Stream<Item=Message, Error=Error>> {
     inbound: S,
     outbound: mpsc::UnboundedSender<Message>,
     error: SharedError,
-    pending_requests: BTreeMap<u64, oneshot::Sender<Message>>,
-    new_requests: mpsc::UnboundedReceiver<(u64, oneshot::Sender<Message>)>,
+    pending_requests: BTreeMap<RequestKey, oneshot::Sender<Message>>,
+    received_messages: BTreeMap<RequestKey, Message>,
+    new_requests: mpsc::UnboundedReceiver<(RequestKey, oneshot::Sender<Message>)>,
     shutdown: oneshot::Receiver<()>,
 }
 
@@ -26,7 +32,7 @@ impl<S: Stream<Item=Message, Error=Error>> Receiver<S> {
         inbound: S,
         outbound: mpsc::UnboundedSender<Message>,
         error: SharedError,
-        new_requests: mpsc::UnboundedReceiver<(u64, oneshot::Sender<Message>)>,
+        new_requests: mpsc::UnboundedReceiver<(RequestKey, oneshot::Sender<Message>)>,
         shutdown: oneshot::Receiver<()>,
     ) -> Receiver<S> {
         Receiver {
@@ -34,6 +40,7 @@ impl<S: Stream<Item=Message, Error=Error>> Receiver<S> {
             outbound,
             error,
             pending_requests: BTreeMap::new(),
+            received_messages: BTreeMap::new(),
             new_requests,
             shutdown,
         }
@@ -53,8 +60,15 @@ impl<S: Stream<Item=Message, Error=Error>> Future for Receiver<S> {
         //Are we worries about starvation here?
         loop {
             match self.new_requests.poll() {
-                Ok(Async::Ready(Some((request_id, resolver)))) => {
-                    self.pending_requests.insert(request_id, resolver);
+                Ok(Async::Ready(Some((request_key, resolver)))) => {
+                    match self.received_messages.remove(&request_key) {
+                        Some(msg) => {
+                            let _ = resolver.send(msg);
+                        },
+                        None => {
+                            self.pending_requests.insert(request_key, resolver);
+                        }
+                    }
                 },
                 Ok(Async::Ready(None)) | Err(_) => {
                     self.error.set(Error::Disconnected);
@@ -70,12 +84,12 @@ impl<S: Stream<Item=Message, Error=Error>> Future for Receiver<S> {
                     if msg.command.ping.is_some() {
                         let _ = self.outbound.unbounded_send(messages::pong());
                     } else {
-                        if let Some(request_id) = msg.request_id() {
-                            if let Some(resolver) = self.pending_requests.remove(&request_id) {
+                        if let Some(request_key) = msg.request_key() {
+                            if let Some(resolver) = self.pending_requests.remove(&request_key) {
                                 // We don't care if the receiver has dropped their future
                                 let _ = resolver.send(msg);
                             } else {
-                                println!("Resolver missing for message {:?}", msg);
+                                self.received_messages.insert(request_key, msg);
                             }
                         } else {
                             println!("Received message with no request_id; dropping. Message: {:?}", msg.command);
@@ -160,17 +174,30 @@ impl<S: Sink<SinkItem=Message, SinkError=Error>> Future for Sender<S> {
     }
 }
 
+pub struct RequestId(u64);
+impl RequestId {
+    pub fn new() -> RequestId {
+        RequestId(0)
+    }
+    pub fn get(&mut self) -> u64 {
+        let next = self.0;
+        self.0 += 1;
+        next
+    }
+}
+
 pub struct Connection {
+    addr: String,
     tx: mpsc::UnboundedSender<Message>,
-    new_requests: mpsc::UnboundedSender<(u64, oneshot::Sender<Message>)>,
-    request_id: u64,
+    new_requests: mpsc::UnboundedSender<(RequestKey, oneshot::Sender<Message>)>,
+    request_id: RequestId,
     error: SharedError,
     sender_shutdown: Option<oneshot::Sender<()>>,
     receiver_shutdown: Option<oneshot::Sender<()>>,
 }
 
 impl Connection {
-    pub fn new(addr: String) -> impl Future<Item=(Connection, impl Future<Item=(), Error=()>), Error=Error> {
+    pub fn new(addr: String) -> impl Future<Item=(Connection, impl Future<Item=(), Error=()>, impl Future<Item=(), Error=()>), Error=Error> {
         SocketAddr::from_str(&addr).into_future()
             .map_err(|e| Error::SocketAddr(e.to_string()))
             .and_then(|addr| {
@@ -207,20 +234,41 @@ impl Connection {
                 );
 
                 let connection = Connection {
+                    addr,
                     tx,
                     new_requests: new_requests_tx,
-                    request_id: 0,
+                    request_id: RequestId::new(),
                     error,
                     sender_shutdown: Some(sender_shutdown_tx),
                     receiver_shutdown: Some(receiver_shutdown_tx),
                 };
 
-                (connection, Future::join(receiver, sender).map(|((),())| ()))
+                (connection, receiver, sender)
             })
+    }
+
+    pub fn error(&mut self) -> Option<Error> {
+        self.error.remove()
     }
 
     pub fn is_valid(&self) -> bool {
         self.error.is_set()
+    }
+
+    pub fn addr(&self) -> &str {
+        &self.addr
+    }
+
+    pub fn send(&mut self,
+                producer_id: u64,
+                producer_name: String,
+                sequence_id: u64,
+                num_messages: Option<i32>,
+                data: Vec<u8>
+    ) -> impl Future<Item=proto::CommandSendReceipt, Error=Error> {
+        let key = RequestKey::ProducerSend { producer_id, sequence_id };
+        let msg = messages::send(producer_id, producer_name, sequence_id, num_messages, data);
+        self.send_message(msg, key, |resp| resp.command.send_receipt)
     }
 
     pub fn send_ping(&self) -> Result<(), Error> {
@@ -229,54 +277,31 @@ impl Connection {
     }
 
     pub fn lookup_topic(&mut self, topic: String) -> impl Future<Item=proto::CommandLookupTopicResponse, Error=Error> {
-        self.send_message(|req_id| messages::lookup_topic(topic, req_id), |resp| resp.command.lookup_topic_response)
+        let request_id = self.request_id.get();
+        let msg = messages::lookup_topic(topic, request_id);
+        self.send_message(msg, RequestKey::RequestId(request_id), |resp| resp.command.lookup_topic_response)
     }
 
     pub fn create_producer(&mut self,
                            topic: String,
+                           producer_id: u64,
                            producer_name: Option<String>,
-                           producer_id: Option<u64>
     ) -> impl Future<Item=proto::CommandProducerSuccess, Error=Error> {
-        self.send_message(
-            move |req_id| messages::create_producer(
-                topic,
-                producer_name,
-                producer_id.unwrap_or_else(rand::random),
-                req_id),
-            |resp| resp.command.producer_success
-        )
+        let request_id = self.request_id.get();
+        let msg = messages::create_producer(topic, producer_name, producer_id, request_id);
+        self.send_message(msg, RequestKey::RequestId(request_id), |resp| resp.command.producer_success)
     }
 
-    fn next_request_id(&mut self) -> u64 {
-        let request_id = self.request_id;
-        self.request_id += 1;
-        request_id
-    }
-
-    fn send_message<R, Build, Extract>(&mut self, build: Build, extract: Extract) -> impl Future<Item=R, Error=Error>
-        where Extract: FnOnce(Message) -> Option<R>,
-              Build: FnOnce(u64) -> Message
+    fn send_message<R, F>(&mut self, msg: Message, key: RequestKey, extract: F) -> impl Future<Item=R, Error=Error>
+        where F: FnOnce(Message) -> Option<R>
     {
-        let request_id = self.next_request_id();
         let (tx, rx) = oneshot::channel();
 
-        let resp = rx.map_err(|oneshot::Canceled| Error::Disconnected)
-            .and_then(|message: Message| {
-                if message.command.error.is_some() {
-                    Err(Error::PulsarError(format!("{:?}", message.command.error.unwrap())))
-                } else if message.command.send_error.is_some() {
-                    Err(Error::PulsarError(format!("{:?}", message.command.error.unwrap())))
-                } else {
-                    let cmd = message.command.clone();
-                    if let Some(extracted) = extract(message) {
-                        Ok(extracted)
-                    } else {
-                        Err(Error::UnexpectedResponse(format!("{:?}", cmd)))
-                    }
-                }
-            });
+        let resp = rx
+            .map_err(|oneshot::Canceled| Error::Disconnected)
+            .and_then(|message: Message| extract_message(message, extract));
 
-        match (self.new_requests.unbounded_send((request_id, tx)), self.tx.unbounded_send(build(request_id))) {
+        match (self.new_requests.unbounded_send((key, tx)), self.tx.unbounded_send(msg)) {
             (Ok(_), Ok(_)) => Either::A(resp),
             _ => Either::B(future::err(Error::Disconnected))
         }
@@ -310,13 +335,32 @@ fn send_single_message<T, F: Fn(Message) -> Option<T>>(
                     .ok_or_else(|| Error::PulsarError(format!("Unexpected message from pulsar: {:?}", cmd)))
                     .map(|msg| (msg, stream))
             },
-            None =>
+            None => {
                 Err(Error::Disconnected)
+            }
         })
 }
 
-mod messages {
-    use message::{Message, proto::{self, base_command::Type as CommandType}};
+fn extract_message<T, F>(message: Message, extract: F) -> Result<T, Error>
+    where F: FnOnce(Message) -> Option<T>
+{
+    if message.command.error.is_some() {
+        Err(Error::PulsarError(format!("{:?}", message.command.error.unwrap())))
+    } else if message.command.send_error.is_some() {
+        Err(Error::PulsarError(format!("{:?}", message.command.error.unwrap())))
+    } else {
+        let cmd = message.command.clone();
+        if let Some(extracted) = extract(message) {
+            Ok(extracted)
+        } else {
+            Err(Error::UnexpectedResponse(format!("{:?}", cmd)))
+        }
+    }
+}
+
+pub(crate) mod messages {
+    use message::{Message, Payload, proto::{self, base_command::Type as CommandType}};
+    use chrono::Utc;
 
     pub fn connect() -> Message {
         Message {
@@ -370,6 +414,35 @@ mod messages {
                 .. Default::default()
             },
             payload: None,
+        }
+    }
+
+    pub fn send(
+        producer_id: u64,
+        producer_name: String,
+        sequence_id: u64,
+        num_messages: Option<i32>,
+        data: Vec<u8>
+    ) -> Message {
+        Message {
+            command: proto::BaseCommand {
+                type_: CommandType::Send as i32,
+                send: Some(proto::CommandSend {
+                    producer_id,
+                    sequence_id,
+                    num_messages
+                }),
+                .. Default::default()
+            },
+            payload: Some(Payload {
+                metadata: proto::MessageMetadata {
+                    producer_name,
+                    sequence_id,
+                    publish_time: Utc::now().timestamp_millis() as u64,
+                    .. Default::default()
+                },
+                data,
+            }),
         }
     }
 

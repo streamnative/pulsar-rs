@@ -4,6 +4,7 @@ use nom::{be_u16, be_u32};
 use prost::{self, Message as ImplProtobuf};
 use tokio_codec::{Encoder, Decoder};
 use std::io::Cursor;
+use connection::RequestKey;
 
 use super::Error;
 
@@ -17,7 +18,7 @@ pub struct Message {
 }
 
 impl Message {
-    pub fn request_id(&self) -> Option<u64> {
+    pub fn request_key(&self) -> Option<RequestKey> {
         let command = &self.command;
         command.subscribe.as_ref().map(|m| m.request_id)
             .or(command.partition_metadata.as_ref().map(|m| m.request_id))
@@ -41,6 +42,15 @@ impl Message {
             .or(command.get_topics_of_namespace_response.as_ref().map(|m| m.request_id))
             .or(command.get_schema.as_ref().map(|m| m.request_id))
             .or(command.get_schema_response.as_ref().map(|m| m.request_id))
+            .map(|request_id| RequestKey::RequestId(request_id))
+            .or(command.send_receipt.as_ref().map(|r| RequestKey::ProducerSend {
+                producer_id: r.producer_id,
+                sequence_id: r.sequence_id
+            }))
+            .or(command.send_error.as_ref().map(|r| RequestKey::ProducerSend {
+                producer_id: r.producer_id,
+                sequence_id: r.sequence_id,
+            }))
     }
 }
 
@@ -51,6 +61,7 @@ impl Encoder for Codec {
     type Error = Error;
 
     fn encode(&mut self, item: Message, dst: &mut BytesMut) -> Result<(), Error> {
+
         let command_size = item.command.encoded_len();
         let metadata_size = item.payload.as_ref().map(|p| p.metadata.encoded_len()).unwrap_or(0);
         let payload_size = item.payload.as_ref().map(|p| p.data.len()).unwrap_or(0);
@@ -80,13 +91,12 @@ impl Encoder for Codec {
             let crc_buf: &mut [u8] = &mut buf[crc_offset..metdata_offset];
             crc_buf.into_buf().put_u32_be(crc);
         }
-        if dst.remaining_mut() >= buf.len() {
-            dst.put_slice(&buf);
-            println!("Wrote message {:?}", item);
-            Ok(())
-        } else {
-            Err(Error::Encoding("Insufficient buffer space to encode Message".to_string()))
+        if dst.remaining_mut() < buf.len() {
+            dst.reserve(buf.len());
         }
+        dst.put_slice(&buf);
+//            println!("Wrote message {:?}", item);
+        Ok(())
     }
 }
 
@@ -103,12 +113,14 @@ impl Decoder for Codec {
             if src.len() >= message_size {
                 let msg = {
                     let (buf, command_frame) = command_frame(src.as_ref())
-                        .map_err(|err| Error::Decoding(err.to_string()))?;
+                        .map_err(|err| Error::Decoding(format!("Error decoding command frame: {}", err)))?;
                     let command = BaseCommand::decode(command_frame.command)?;
+
+                    let remaining_size = message_size as u32 - command_frame.command_size - 8;
                     let payload =
-                        if buf.len() > 0 {
+                        if remaining_size > 0 {
                             let (buf, payload_frame) = payload_frame(buf)
-                                .map_err(|err| Error::Decoding(err.to_string()))?;
+                                .map_err(|err| Error::Decoding(format!("Error decoding payload frame: {}", err)))?;
 
                             // TODO: Check crc32 of payload data
 
@@ -123,7 +135,7 @@ impl Decoder for Codec {
 
                 //TODO advance as we read, rather than this weird post thing
                 src.advance(message_size);
-                println!("Read message {:?}", &msg);
+//                println!("Read message {:?}", &msg);
                 return Ok(Some(msg))
             }
         }
@@ -986,7 +998,9 @@ impl From<prost::DecodeError> for Error {
 
 #[cfg(test)]
 mod tests {
-    use message::Message;
+    use message::Codec;
+    use bytes::BytesMut;
+    use tokio_codec::{Encoder, Decoder};
 
     #[test]
     fn parse_simple_command() {
@@ -996,15 +1010,18 @@ mod tests {
             0x20, 0x0C, 0x2A, 0x04, 0x6E, 0x6F, 0x6E, 0x65
         ];
 
-        let message = Message::decode(input).unwrap();
+        let message = Codec.decode(&mut input.into()).unwrap().unwrap();
 
-        let connect = message.command.connect.as_ref().unwrap();
-        assert_eq!(connect.client_version, "2.0.1-incubating");
-        assert_eq!(connect.auth_method_name.as_ref().unwrap(), "none");
-        assert_eq!(connect.protocol_version.as_ref().unwrap(), &12);
+        {
+            let connect = message.command.connect.as_ref().unwrap();
+            assert_eq!(connect.client_version, "2.0.1-incubating");
+            assert_eq!(connect.auth_method_name.as_ref().unwrap(), "none");
+            assert_eq!(connect.protocol_version.as_ref().unwrap(), &12);
+        }
 
-        let output = message.encode_vec().unwrap();
-        assert_eq!(output.as_slice(), input);
+        let mut output = BytesMut::with_capacity(38);
+        Codec.encode(message, &mut output).unwrap();
+        assert_eq!(&output, input);
     }
 
     #[test]
@@ -1017,17 +1034,22 @@ mod tests {
             0x2D, 0x70, 0x75, 0x6C, 0x73, 0x61, 0x72, 0x2D, 0x38
         ];
 
-        let message = Message::decode(input).unwrap();
-        let send = message.command.send.as_ref().unwrap();
-        assert_eq!(send.producer_id, 0);
-        assert_eq!(send.sequence_id, 8);
+        let message = Codec.decode(&mut input.into()).unwrap().unwrap();
+        {
+            let send = message.command.send.as_ref().unwrap();
+            assert_eq!(send.producer_id, 0);
+            assert_eq!(send.sequence_id, 8);
+        }
 
-        let payload = message.payload.as_ref().unwrap();
-        assert_eq!(payload.metadata.producer_name, "standalone-0-3");
-        assert_eq!(payload.metadata.sequence_id, 8);
-        assert_eq!(payload.metadata.publish_time, 1533850624062);
+        {
+            let payload = message.payload.as_ref().unwrap();
+            assert_eq!(payload.metadata.producer_name, "standalone-0-3");
+            assert_eq!(payload.metadata.sequence_id, 8);
+            assert_eq!(payload.metadata.publish_time, 1533850624062);
+        }
 
-        let output = message.encode_vec().unwrap();
-        assert_eq!(output.as_slice(), input);
+        let mut output = BytesMut::with_capacity(65);
+        Codec.encode(message, &mut output).unwrap();
+        assert_eq!(&output, input);
     }
 }

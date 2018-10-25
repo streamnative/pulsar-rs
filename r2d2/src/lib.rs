@@ -18,9 +18,10 @@ impl r2d2::ManageConnection for ConnectionManager {
     type Error = failure::Compat<Error>;
 
     fn connect(&self) -> Result<Self::Connection, Self::Error> {
-        let (producer, handlers) = Future::wait(Connection::new(self.addr.clone()))
+        let (producer, a, b) = Future::wait(Connection::new(self.addr.clone()))
             .map_err(|e| e.compat())?;
-        thread::spawn(|| tokio::run(handlers));
+        thread::spawn(|| tokio::run(a));
+        thread::spawn(|| tokio::run(b));
         Ok(producer)
     }
 
