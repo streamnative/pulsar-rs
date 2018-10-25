@@ -1,0 +1,11 @@
+[package]
+name = "r2d2_pulsar"
+version = "0.1.0"
+authors = ["Colin Stearns <cstearns@developers.wyyerd.com>"]
+
+[dependencies]
+tokio = "0.1.11"
+failure = "0.1.3"
+futures = "0.1.25"
+r2d2 = "0.8.2"
+pulsar-client = { path = "../client" }
