@@ -1,5 +1,6 @@
 use super::{messages, pulsar, Pulsar, Error};
-use futures::{Future, Stream, IntoFuture, future::{self, Either}, sync::{mpsc, oneshot}};
+use futures::{self, Async, Future, Stream, IntoFuture, future::{self, Either}, sync::{mpsc, oneshot},
+              AsyncSink};
 use std::collections::BTreeMap;
 use message::{proto, Message};
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, AtomicUsize, Ordering}};
@@ -57,16 +58,162 @@ pub enum SendResponse {
     Error(proto::CommandSendError),
 }
 
-pub struct Connection {
+pub struct Receiver<S: Stream<Item=Message, Error=Error>> {
+    inbound: S,
+    outbound: mpsc::UnboundedSender<Message>,
+    error: SharedError,
+    pending_requests: BTreeMap<u64, oneshot::Sender<Message>>,
+    new_requests: mpsc::UnboundedReceiver<(u64, oneshot::Sender<Message>)>,
+    shutdown: oneshot::Receiver<()>,
+}
 
+impl<S: Stream<Item=Message, Error=Error>> Receiver<S> {
+    pub fn new(
+        inbound: S,
+        outbound: mpsc::UnboundedSender<Message>,
+        error: SharedError,
+        new_requests: mpsc::UnboundedReceiver<(u64, oneshot::Sender<Message>)>,
+        shutdown: oneshot::Receiver<()>,
+    ) -> Receiver<S> {
+        Receiver {
+            inbound,
+            outbound,
+            error,
+            pending_requests: BTreeMap::new(),
+            new_requests,
+            shutdown,
+        }
+    }
+}
+
+impl<S: Stream<Item=Message, Error=Error>> Future for Receiver<S> {
+    type Item = ();
+    type Error = ();
+
+    fn poll(&mut self) -> Result<Async<()>, ()> {
+        match self.shutdown.poll() {
+            Ok(Async::Ready(())) | Err(_) => return Err(()),
+            Ok(Async::NotReady) => {}
+        }
+
+        //Are we worries about starvation here?
+        loop {
+            match self.new_requests.poll() {
+                Ok(Async::Ready(Some((request_id, resolver)))) => {
+                    self.pending_requests.insert(request_id, resolver);
+                },
+                Ok(Async::Ready(None)) | Err(_) => {
+                    self.error.set(Error::Disconnected);
+                    return Err(());
+                },
+                Ok(Async::NotReady) => break,
+            }
+        }
+
+        loop {
+            match self.inbound.poll() {
+                Ok(Async::Ready(Some(msg))) => {
+                    if msg.command.ping.is_some() {
+                        let _ = self.outbound.unbounded_send(messages::pong());
+                    } else {
+                        if let Some(request_id) = msg.request_id() {
+                            if let Some(resolver) = self.pending_requests.remove(&request_id) {
+                                // We don't care if the receiver has dropped their future
+                                let _ = resolver.send(msg);
+                            } else {
+                                println!("Resolver missing for message {:?}", msg);
+                            }
+                        } else {
+                            println!("Received message with no request_id; dropping. Message: {:?}", msg.command);
+                        }
+                    }
+                },
+                Ok(Async::Ready(None)) => {
+                    self.error.set(Error::Disconnected);
+                    return Err(())
+                },
+                Ok(Async::NotReady) => return Ok(Async::NotReady),
+                Err(e) => {
+                    self.error.set(e);
+                    return Err(())
+                }
+            }
+        }
+
+    }
+}
+
+pub struct Sender<S: futures::Sink<SinkItem=Message, SinkError=Error>> {
+    sink: S,
+    outbound: mpsc::UnboundedReceiver<Message>,
+    buffered: Option<Message>,
+    error: SharedError,
+    shutdown: oneshot::Receiver<()>,
+}
+
+impl <S: futures::Sink<SinkItem=Message, SinkError=Error>> Sender<S> {
+    pub fn new(
+        sink: S,
+        outbound: mpsc::UnboundedReceiver<Message>,
+        error: SharedError,
+        shutdown: oneshot::Receiver<()>
+    ) -> Sender<S> {
+        Sender {
+            sink,
+            outbound,
+            buffered: None,
+            error,
+            shutdown,
+        }
+    }
+
+    fn try_start_send(&mut self, item: Message) -> futures::Poll<(), Error> {
+        if let AsyncSink::NotReady(item) = self.sink.start_send(item)? {
+            self.buffered = Some(item);
+            return Ok(Async::NotReady)
+        }
+        Ok(Async::Ready(()))
+    }
+}
+
+impl<S: futures::Sink<SinkItem=Message, SinkError=Error>> Future for Sender<S> {
+    type Item = ();
+    type Error = ();
+
+    fn poll(&mut self) -> Result<Async<()>, ()> {
+        match self.shutdown.poll() {
+            Ok(Async::Ready(())) | Err(futures::Canceled) => return Err(()),
+            Ok(Async::NotReady) => {},
+        }
+
+        if let Some(item) = self.buffered.take() {
+            try_ready!(self.try_start_send(item).map_err(|e| self.error.set(e)))
+        }
+
+        loop {
+            match self.outbound.poll()? {
+                Async::Ready(Some(item)) => try_ready!(self.try_start_send(item).map_err(|e| self.error.set(e))),
+                Async::Ready(None) => {
+                    try_ready!(self.sink.close().map_err(|e| self.error.set(e)));
+                    return Ok(Async::Ready(()))
+                }
+                Async::NotReady => {
+                    try_ready!(self.sink.poll_complete().map_err(|e| self.error.set(e)));
+                    return Ok(Async::NotReady)
+                }
+            }
+        }
+    }
 }
 
 pub struct ProducerConnection {
     tx: mpsc::UnboundedSender<Message>,
-    pending: Arc<Mutex<BTreeMap<u64, oneshot::Sender<Message>>>>,
+    new_requests: mpsc::UnboundedSender<(u64, oneshot::Sender<Message>)>,
     producer_id: u64,
     request_id: RequestId,
     error: SharedError,
+    sender_shutdown: Option<oneshot::Sender<()>>,
+    receiver_shutdown: Option<oneshot::Sender<()>>,
 }
 
 impl ProducerConnection {
@@ -76,52 +223,38 @@ impl ProducerConnection {
 
         ProducerConnection::connect(&addr, topic.clone(), producer_id, request_id.clone())
             .map(move |pulsar| {
-                let (tx, rx) = mpsc::unbounded();
-                let pending: Arc<Mutex<BTreeMap<u64, oneshot::Sender<Message>>>> = Arc::new(Mutex::new(BTreeMap::new()));
-
-                let error = SharedError::new();
-
                 let (sink, stream) = pulsar.split();
+                let (tx, rx) = mpsc::unbounded();
+                let (new_requests_tx, new_requests_rx) = mpsc::unbounded();
+                let error = SharedError::new();
+                let (receiver_shutdown_tx, receiver_shutdown_rx) = oneshot::channel();
+                let (sender_shutdown_tx, sender_shutdown_rx) = oneshot::channel();
 
-                let receiver = {
-                    let tx = tx.clone();
-                    let error = error.clone();
-                    let pending = pending.clone();
-                    stream
-                        .for_each(move |msg: Message| {
-                            if msg.command.ping.is_some() {
-                                let _ = tx.send(messages::pong());
-                            } else {
-                                if let Some(request_id) = msg.request_id() {
-                                    let resolver = {
-                                        let mut pending = pending.lock().unwrap();
-                                        pending.remove(&request_id)
-                                    };
-                                    if let Some(resolver) = resolver {
-                                        let _ = resolver.send(msg);
-                                    }
-                                } else {
-                                    eprintln!("Received message with no request_id; dropping. Message: {:?}", msg.command)
-                                }
-                            }
-                            Ok(())
-                        })
-                        .map_err(move |e| error.set(e))
-                };
-                let sender = {
-                    let error = error.clone();
-                    rx.map_err(|e| Error::Disconnected)
-                        .forward(sink)
-                        .map(|_| ())
-                        .map_err(move |e| error.set(e))
-                };
+                let receiver = Receiver::new(
+                    stream,
+                    tx.clone(),
+                    error.clone(),
+                    new_requests_rx,
+                    receiver_shutdown_rx,
+                );
+
+                let sender = Sender::new(
+                    sink,
+                    rx,
+                    error.clone(),
+                    sender_shutdown_rx
+                );
+
                 let producer = ProducerConnection {
                     tx,
-                    pending,
+                    new_requests: new_requests_tx,
                     producer_id,
                     request_id,
                     error,
+                    sender_shutdown: Some(sender_shutdown_tx),
+                    receiver_shutdown: Some(receiver_shutdown_tx),
                 };
+
                 (producer, Future::join(receiver, sender).map(|((),())| ()))
             })
     }
@@ -132,12 +265,9 @@ impl ProducerConnection {
     {
         let request_id = self.request_id.next();
         let (tx, rx) = oneshot::channel();
-        {
-            let mut lock = self.pending.lock().unwrap();
-            lock.insert(request_id, tx);
-        }
+
         let resp = rx.map_err(|oneshot::Canceled| Error::Disconnected)
-            .and_then(|message| {
+            .and_then(|message: Message| {
                 if message.command.error.is_some() {
                     Err(Error::PulsarError(format!("{:?}", message.command.error.unwrap())))
                 } else if message.command.send_error.is_some() {
@@ -152,14 +282,9 @@ impl ProducerConnection {
                 }
             });
 
-        let pending = self.pending.clone();
-        match self.tx.send(build(request_id)) {
-            Ok(_) => Either::A(resp),
-            Err(_) => {
-                let mut lock = pending.lock().unwrap();
-                let _ = lock.remove(&request_id);
-                Either::B(future::err(Error::Disconnected))
-            }
+        match (self.new_requests.unbounded_send((request_id, tx)), self.tx.unbounded_send(build(request_id))) {
+            (Ok(_), Ok(_)) => Either::A(resp),
+            _ => Either::B(future::err(Error::Disconnected))
         }
     }
 
@@ -168,7 +293,7 @@ impl ProducerConnection {
     }
 
     pub fn ping(&self) -> Result<(), Error> {
-        self.tx.send(messages::ping())
+        self.tx.unbounded_send(messages::ping())
             .map_err(|_| Error::Disconnected)
     }
 
@@ -184,5 +309,16 @@ impl ProducerConnection {
             .and_then(|addr| pulsar::connect(&addr))
             .and_then(move |stream| pulsar::lookup_topic(stream, topic_, req_id.next()))
             .and_then(move |stream| pulsar::create_producer(stream, topic, producer_id, another_req_id.next()))
+    }
+}
+
+impl Drop for ProducerConnection {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.sender_shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(shutdown) = self.receiver_shutdown.take() {
+            let _ = shutdown.send(());
+        }
     }
 }

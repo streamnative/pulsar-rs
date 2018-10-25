@@ -1,12 +1,12 @@
 extern crate bytes;
 extern crate crc;
-extern crate futures;
 extern crate prost;
 extern crate rand;
 extern crate serde;
 extern crate serde_json;
 extern crate tokio;
 extern crate tokio_codec;
+#[macro_use] extern crate futures;
 #[macro_use] extern crate failure;
 #[macro_use] extern crate nom;
 #[macro_use] extern crate prost_derive;
@@ -14,12 +14,10 @@ extern crate tokio_codec;
 pub mod message;
 pub mod producer;
 
-use futures::{Sink, Stream, sync::mpsc};
 use tokio::net::TcpStream;
 use tokio::prelude::*;
 use std::io;
 use std::net::SocketAddr;
-use std::str::FromStr;
 
 use message::{Message, proto, Codec};
 
@@ -50,10 +48,6 @@ impl From<io::Error> for Error {
         Error::Io(err)
     }
 }
-
-use futures::sync::oneshot;
-
-
 
 mod pulsar {
     use super::*;
@@ -236,7 +230,6 @@ mod pulsar {
 //}
 
 pub(crate) mod messages {
-    use rand;
     use message::{Message, proto::{self, base_command::Type as CommandType}};
 
     pub fn connect() -> Message {
@@ -277,14 +270,14 @@ pub(crate) mod messages {
         }
     }
 
-    pub fn create_producer(topic: String, producer_id: u64, req_id: u64) -> Message {
+    pub fn create_producer(topic: String, producer_id: u64, request_id: u64) -> Message {
         Message {
             command: proto::BaseCommand {
                 type_: CommandType::Producer as i32,
                 producer: Some(proto::CommandProducer {
                     topic,
-                    producer_id: 0,
-                    request_id: rand::random(),
+                    producer_id,
+                    request_id,
                     .. Default::default()
                 }),
                 .. Default::default()
@@ -293,13 +286,13 @@ pub(crate) mod messages {
         }
     }
 
-    pub fn lookup_topic(topic: String, req_id: u64) -> Message {
+    pub fn lookup_topic(topic: String, request_id: u64) -> Message {
         Message {
             command: proto::BaseCommand {
                 type_: CommandType::Lookup as i32,
                 lookup_topic: Some(proto::CommandLookupTopic {
                     topic,
-                    request_id: rand::random(),
+                    request_id,
                     .. Default::default()
                 }),
                 .. Default::default()
