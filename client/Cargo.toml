@@ -1,7 +1,7 @@
 [package]
 name = "pulsar-client"
 version = "0.1.0"
-authors = ["Alex Mault <amault@developers.wyyerd.com>"]
+authors = ["Colin Stearns <cstearns@developers.wyyerd.com>"]
 
 [dependencies]
 bytes = "0.4.0"
