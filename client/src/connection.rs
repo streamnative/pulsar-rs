@@ -2,19 +2,25 @@ use error::{Error, SharedError};
 
 use futures::{self, Async, Future, Stream, Sink, IntoFuture, future::{self, Either}, sync::{mpsc, oneshot},
               AsyncSink};
-use message::{proto, Codec, Message};
+use message::{proto::{self, command_subscribe::SubType}, Codec, Message};
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::str::FromStr;
+use tokio::runtime::TaskExecutor;
 use tokio::net::TcpStream;
 use tokio_codec;
 
 type Pulsar = tokio_codec::Framed<TcpStream, Codec>;
 
+pub enum Register {
+    Request { key: RequestKey, resolver: oneshot::Sender<Message> },
+    Consumer { consumer_id: u64, resolver: mpsc::UnboundedSender<Message> },
+}
+
 #[derive(Debug, PartialEq, Ord, PartialOrd, Eq)]
 pub enum RequestKey {
     RequestId(u64),
-    ProducerSend { producer_id: u64, sequence_id: u64 }
+    ProducerSend { producer_id: u64, sequence_id: u64 },
 }
 
 pub struct Receiver<S: Stream<Item=Message, Error=Error>> {
@@ -22,8 +28,9 @@ pub struct Receiver<S: Stream<Item=Message, Error=Error>> {
     outbound: mpsc::UnboundedSender<Message>,
     error: SharedError,
     pending_requests: BTreeMap<RequestKey, oneshot::Sender<Message>>,
+    consumers: BTreeMap<u64, mpsc::UnboundedSender<Message>>,
     received_messages: BTreeMap<RequestKey, Message>,
-    new_requests: mpsc::UnboundedReceiver<(RequestKey, oneshot::Sender<Message>)>,
+    registrations: mpsc::UnboundedReceiver<Register>,
     shutdown: oneshot::Receiver<()>,
 }
 
@@ -32,7 +39,7 @@ impl<S: Stream<Item=Message, Error=Error>> Receiver<S> {
         inbound: S,
         outbound: mpsc::UnboundedSender<Message>,
         error: SharedError,
-        new_requests: mpsc::UnboundedReceiver<(RequestKey, oneshot::Sender<Message>)>,
+        registrations: mpsc::UnboundedReceiver<Register>,
         shutdown: oneshot::Receiver<()>,
     ) -> Receiver<S> {
         Receiver {
@@ -41,7 +48,8 @@ impl<S: Stream<Item=Message, Error=Error>> Receiver<S> {
             error,
             pending_requests: BTreeMap::new(),
             received_messages: BTreeMap::new(),
-            new_requests,
+            consumers: BTreeMap::new(),
+            registrations,
             shutdown,
         }
     }
@@ -59,16 +67,19 @@ impl<S: Stream<Item=Message, Error=Error>> Future for Receiver<S> {
 
         //Are we worries about starvation here?
         loop {
-            match self.new_requests.poll() {
-                Ok(Async::Ready(Some((request_key, resolver)))) => {
-                    match self.received_messages.remove(&request_key) {
+            match self.registrations.poll() {
+                Ok(Async::Ready(Some(Register::Request { key, resolver }))) => {
+                    match self.received_messages.remove(&key) {
                         Some(msg) => {
                             let _ = resolver.send(msg);
                         },
                         None => {
-                            self.pending_requests.insert(request_key, resolver);
+                            self.pending_requests.insert(key, resolver);
                         }
                     }
+                },
+                Ok(Async::Ready(Some(Register::Consumer { consumer_id, resolver }))) => {
+                    self.consumers.insert(consumer_id, resolver);
                 },
                 Ok(Async::Ready(None)) | Err(_) => {
                     self.error.set(Error::Disconnected);
@@ -83,6 +94,10 @@ impl<S: Stream<Item=Message, Error=Error>> Future for Receiver<S> {
                 Ok(Async::Ready(Some(msg))) => {
                     if msg.command.ping.is_some() {
                         let _ = self.outbound.unbounded_send(messages::pong());
+                    } else if msg.command.message.is_some() {
+                        if let Some(consumer) = self.consumers.get_mut(&msg.command.message.as_ref().unwrap().consumer_id) {
+                            let _ = consumer.unbounded_send(msg);
+                        }
                     } else {
                         if let Some(request_key) = msg.request_key() {
                             if let Some(resolver) = self.pending_requests.remove(&request_key) {
@@ -189,7 +204,7 @@ impl RequestId {
 pub struct Connection {
     addr: String,
     tx: mpsc::UnboundedSender<Message>,
-    new_requests: mpsc::UnboundedSender<(RequestKey, oneshot::Sender<Message>)>,
+    registrations: mpsc::UnboundedSender<Register>,
     request_id: RequestId,
     error: SharedError,
     sender_shutdown: Option<oneshot::Sender<()>>,
@@ -197,7 +212,7 @@ pub struct Connection {
 }
 
 impl Connection {
-    pub fn new(addr: String) -> impl Future<Item=(Connection, impl Future<Item=(), Error=()>, impl Future<Item=(), Error=()>), Error=Error> {
+    pub fn new(addr: String, executor: TaskExecutor) -> impl Future<Item=Connection, Error=Error> {
         SocketAddr::from_str(&addr).into_future()
             .map_err(|e| Error::SocketAddr(e.to_string()))
             .and_then(|addr| {
@@ -213,41 +228,39 @@ impl Connection {
             .map(move |pulsar| {
                 let (sink, stream) = pulsar.split();
                 let (tx, rx) = mpsc::unbounded();
-                let (new_requests_tx, new_requests_rx) = mpsc::unbounded();
+                let (registrations_tx, registrations_rx) = mpsc::unbounded();
                 let error = SharedError::new();
                 let (receiver_shutdown_tx, receiver_shutdown_rx) = oneshot::channel();
                 let (sender_shutdown_tx, sender_shutdown_rx) = oneshot::channel();
 
-                let receiver = Receiver::new(
+                executor.spawn(Receiver::new(
                     stream,
                     tx.clone(),
                     error.clone(),
-                    new_requests_rx,
+                    registrations_rx,
                     receiver_shutdown_rx,
-                );
+                ));
 
-                let sender = Sender::new(
+                executor.spawn(Sender::new(
                     sink,
                     rx,
                     error.clone(),
                     sender_shutdown_rx
-                );
+                ));
 
-                let connection = Connection {
+                Connection {
                     addr,
                     tx,
-                    new_requests: new_requests_tx,
+                    registrations: registrations_tx,
                     request_id: RequestId::new(),
                     error,
                     sender_shutdown: Some(sender_shutdown_tx),
                     receiver_shutdown: Some(receiver_shutdown_tx),
-                };
-
-                (connection, receiver, sender)
+                }
             })
     }
 
-    pub fn error(&mut self) -> Option<Error> {
+    pub fn error(&self) -> Option<Error> {
         self.error.remove()
     }
 
@@ -292,17 +305,53 @@ impl Connection {
         self.send_message(msg, RequestKey::RequestId(request_id), |resp| resp.command.producer_success)
     }
 
+    pub fn close_producer(&mut self, producer_id: u64) -> impl Future<Item=proto::CommandSuccess, Error=Error> {
+        let request_id = self.request_id.get();
+        let msg = messages::close_producer(producer_id, request_id);
+        self.send_message(msg, RequestKey::RequestId(request_id), |resp| resp.command.success)
+    }
+
+    pub fn subscribe(&mut self,
+                     resolver: mpsc::UnboundedSender<Message>,
+                     topic: String,
+                     subscription: String,
+                     sub_type: SubType,
+                     consumer_id: u64,
+                     consumer_name: Option<String>
+    ) -> impl Future<Item=proto::CommandSuccess, Error=Error> {
+        let request_id = self.request_id.get();
+        let msg = messages::subscribe(topic, subscription, sub_type, consumer_id, request_id, consumer_name);
+        match self.registrations.unbounded_send(Register::Consumer { consumer_id, resolver }) {
+            Ok(_) => {},
+            Err(_) => {
+                self.error.set(Error::Disconnected);
+                return Either::A(future::failed(Error::Disconnected));
+            }
+        }
+        Either::B(self.send_message(msg, RequestKey::RequestId(request_id), |resp| resp.command.success))
+    }
+
+    pub fn send_flow(&self, consumer_id: u64, message_permits: u32) -> Result<(), Error> {
+        self.tx.unbounded_send(messages::flow(consumer_id, message_permits))
+            .map_err(|_| Error::Disconnected)
+    }
+
+    pub fn send_ack(&self, consumer_id: u64, messages: Vec<proto::MessageIdData>) -> Result<(), Error> {
+        self.tx.unbounded_send(messages::ack(consumer_id, messages))
+            .map_err(|_| Error::Disconnected)
+    }
+
     fn send_message<R, F>(&mut self, msg: Message, key: RequestKey, extract: F) -> impl Future<Item=R, Error=Error>
         where F: FnOnce(Message) -> Option<R>
     {
-        let (tx, rx) = oneshot::channel();
+        let (resolver, response) = oneshot::channel();
 
-        let resp = rx
+        let response = response
             .map_err(|oneshot::Canceled| Error::Disconnected)
             .and_then(|message: Message| extract_message(message, extract));
 
-        match (self.new_requests.unbounded_send((key, tx)), self.tx.unbounded_send(msg)) {
-            (Ok(_), Ok(_)) => Either::A(resp),
+        match (self.registrations.unbounded_send(Register::Request { key, resolver, }), self.tx.unbounded_send(msg)) {
+            (Ok(_), Ok(_)) => Either::A(response),
             _ => Either::B(future::err(Error::Disconnected))
         }
     }
@@ -359,7 +408,7 @@ fn extract_message<T, F>(message: Message, extract: F) -> Result<T, Error>
 }
 
 pub(crate) mod messages {
-    use message::{Message, Payload, proto::{self, base_command::Type as CommandType}};
+    use message::{Message, Payload, proto::{self, base_command::Type as CommandType, command_subscribe::SubType}};
     use chrono::Utc;
 
     pub fn connect() -> Message {
@@ -454,6 +503,77 @@ pub(crate) mod messages {
                     topic,
                     request_id,
                     .. Default::default()
+                }),
+                .. Default::default()
+            },
+            payload: None,
+        }
+    }
+
+    pub fn close_producer(producer_id: u64, request_id: u64) -> Message {
+        Message {
+            command: proto::BaseCommand {
+                type_: CommandType::CloseProducer as i32,
+                close_producer: Some(proto::CommandCloseProducer {
+                    producer_id,
+                    request_id,
+                }),
+                .. Default::default()
+            },
+            payload: None,
+        }
+    }
+
+    pub fn subscribe(
+        topic: String,
+        subscription: String,
+        sub_type: SubType,
+        consumer_id: u64,
+        request_id: u64,
+        consumer_name: Option<String>
+    ) -> Message {
+        Message {
+            command: proto::BaseCommand {
+                type_: CommandType::Subscribe as i32,
+                subscribe: Some(proto::CommandSubscribe {
+                    topic,
+                    subscription,
+                    sub_type: sub_type as i32,
+                    consumer_id,
+                    request_id,
+                    consumer_name,
+                    .. Default::default()
+                }),
+                .. Default::default()
+            },
+            payload: None,
+        }
+    }
+
+    pub fn flow(consumer_id: u64, message_permits: u32) -> Message {
+        Message {
+            command: proto::BaseCommand {
+                type_: CommandType::Flow as i32,
+                flow: Some(proto::CommandFlow {
+                    consumer_id,
+                    message_permits,
+                }),
+                .. Default::default()
+            },
+            payload: None,
+        }
+    }
+
+    pub fn ack(consumer_id: u64, message_id: Vec<proto::MessageIdData>) -> Message {
+        Message {
+            command: proto::BaseCommand {
+                type_: CommandType::Ack as i32,
+                ack: Some(proto::CommandAck {
+                    consumer_id,
+                    ack_type: proto::command_ack::AckType::Individual as i32,
+                    message_id,
+                    validation_error: None,
+                    properties: Vec::new(),
                 }),
                 .. Default::default()
             },

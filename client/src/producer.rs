@@ -5,6 +5,7 @@ use rand;
 use serde::Serialize;
 use serde_json;
 use message::proto;
+use tokio::runtime::TaskExecutor;
 
 
 pub struct Producer<T: Serialize> {
@@ -18,15 +19,13 @@ pub struct Producer<T: Serialize> {
 }
 
 impl<T: Serialize> Producer<T> {
-    pub fn new<S1, S2>(addr: S1, topic: S2, name: Option<String>) -> impl Future<Item=(impl Future<Item=Producer<T>, Error=Error>, impl Future<Item=(), Error=()>, impl Future<Item=(), Error=()>), Error=Error>
+    pub fn new<S1, S2>(addr: S1, topic: S2, name: Option<String>, executor: TaskExecutor) -> impl Future<Item=Producer<T>, Error=Error>
         where S1: Into<String>, S2: Into<String>
     {
         let addr = addr.into();
         let topic = topic.into();
-        Connection::new(addr.clone())
-            .map(move |(conn, handler_a, handler_b)| {
-                (Producer::from_connection(conn, topic, name), handler_a, handler_b)
-            })
+        Connection::new(addr.clone(), executor)
+            .and_then(move |conn| Producer::from_connection(conn, topic, name))
     }
 
     pub fn from_connection(mut conn: Connection, topic: String, name: Option<String>) -> impl Future<Item=Producer<T>, Error=Error> {
@@ -35,6 +34,8 @@ impl<T: Serialize> Producer<T> {
 
         conn.lookup_topic(topic.clone())
             .map(move |resp| (resp, conn))
+            // TODO actually respect the broker returned here rather than assuming
+            // we only ever have one broker
             .and_then(move |(_, mut conn)|
                 conn.create_producer(topic_, producer_id, name)
                     .map(move |resp| (resp, conn)))
@@ -77,5 +78,12 @@ impl<T: Serialize> Producer<T> {
 
     pub fn error(&mut self) -> Option<Error> {
         self.connection.error()
+    }
+}
+
+
+impl<T: Serialize> Drop for Producer<T> {
+    fn drop(&mut self) {
+        let _ = self.connection.close_producer(self.id);
     }
 }

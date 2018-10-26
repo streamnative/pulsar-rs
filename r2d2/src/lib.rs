@@ -7,10 +7,10 @@ extern crate tokio;
 use failure::Fail;
 use futures::Future;
 use pulsar_client::{Connection, Error};
-use std::thread;
 
 pub struct ConnectionManager {
     addr: String,
+    executor: tokio::runtime::TaskExecutor
 }
 
 impl r2d2::ManageConnection for ConnectionManager {
@@ -18,11 +18,9 @@ impl r2d2::ManageConnection for ConnectionManager {
     type Error = failure::Compat<Error>;
 
     fn connect(&self) -> Result<Self::Connection, Self::Error> {
-        let (producer, a, b) = Future::wait(Connection::new(self.addr.clone()))
+        let connection = Future::wait(Connection::new(self.addr.clone(), self.executor.clone()))
             .map_err(|e| e.compat())?;
-        thread::spawn(|| tokio::run(a));
-        thread::spawn(|| tokio::run(b));
-        Ok(producer)
+        Ok(connection)
     }
 
     fn is_valid(&self, conn: &mut Self::Connection) -> Result<(), Self::Error> {

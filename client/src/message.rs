@@ -112,13 +112,12 @@ impl Decoder for Codec {
             let src = buf.into_inner();
             if src.len() >= message_size {
                 let msg = {
-                    let (buf, command_frame) = command_frame(src.as_ref())
+                    let (buf, command_frame) = command_frame(&src[..message_size])
                         .map_err(|err| Error::Decoding(format!("Error decoding command frame: {}", err)))?;
                     let command = BaseCommand::decode(command_frame.command)?;
 
-                    let remaining_size = message_size as u32 - command_frame.command_size - 8;
                     let payload =
-                        if remaining_size > 0 {
+                        if buf.len() > 0 {
                             let (buf, payload_frame) = payload_frame(buf)
                                 .map_err(|err| Error::Decoding(format!("Error decoding payload frame: {}", err)))?;
 

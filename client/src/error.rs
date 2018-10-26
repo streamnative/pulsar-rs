@@ -20,8 +20,10 @@ pub enum Error {
     SocketAddr(String),
     #[fail(display = "Unexpected response from pulsar: {}", _0)]
     UnexpectedResponse(String),
-    #[fail(display = "Error serializing value: {}", _0)]
-    Serialization(serde_json::Error),
+    #[fail(display = "Serde Error: {}", _0)]
+    Serde(serde_json::Error),
+    #[fail(display = "Error deserializing message: {}", _0)]
+    Deserialization(serde_json::Error),
 }
 
 impl From<io::Error> for Error {
@@ -32,7 +34,7 @@ impl From<io::Error> for Error {
 
 impl From<serde_json::Error> for Error {
     fn from(err: serde_json::Error) -> Self {
-        Error::Serialization(err)
+        Error::Serde(err)
     }
 }
 
