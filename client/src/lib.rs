@@ -25,15 +25,14 @@ pub use error::Error;
 pub use connection::Connection;
 pub use producer::Producer;
 pub use consumer::{Consumer, ConsumerBuilder};
+pub use message::proto;
+pub use message::proto::command_subscribe::SubType;
 
 
 #[cfg(test)]
 mod tests {
-
-    use std::time::Duration;
     use tokio;
     use futures::{Future, Stream, future};
-    use futures_timer::FutureExt;
     use super::*;
     use message::proto::command_subscribe::SubType;
     use consumer::Ack;
@@ -47,8 +46,7 @@ mod tests {
     fn connect() {
         let addr = "127.0.0.1:6650";
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let mut producer = Producer::new("127.0.0.1:6650", "test", None, runtime.executor())
-            .timeout(Duration::from_secs(2))
+        let mut producer = Producer::new(addr, "test_producer", runtime.executor())
             .wait()
             .unwrap();
 
@@ -64,7 +62,7 @@ mod tests {
         {
             let producer = &mut producer;
             future::join_all((0..5000).map(move |_| {
-                producer.send(&TestData { data: "data".to_string() })
+                producer.send_json("test", &TestData { data: "data".to_string() })
             })).wait().unwrap();
             println!("Sent {} messages", 5000);
         }
@@ -73,8 +71,8 @@ mod tests {
         let consumer_result = consumer.for_each(move |data: Result<(TestData, Ack), Error>| {
             consumed += 1;
             match data {
-                Ok((_msg, mut ack)) => {
-                    let _ = ack.ack();
+                Ok((_msg, ack)) => {
+                    ack.ack();
                     if consumed >= 5000 {
                         println!("Finished consuming");
                         Err(Error::Disconnected)
@@ -88,8 +86,6 @@ mod tests {
                 }
             }
         }).wait();
-
-        ::std::thread::sleep_ms(1000);
 
         println!("Producer Error: {:?}", producer.error());
         println!("Consumer Result: {:?}", consumer_result);

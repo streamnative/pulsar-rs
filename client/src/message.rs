@@ -95,7 +95,7 @@ impl Encoder for Codec {
             dst.reserve(buf.len());
         }
         dst.put_slice(&buf);
-//            println!("Wrote message {:?}", item);
+//        println!("Wrote message {:?}", item);
         Ok(())
     }
 }

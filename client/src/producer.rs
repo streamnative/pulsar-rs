@@ -1,79 +1,90 @@
-use connection::Connection;
+use connection::{Connection, SerialId};
 use error::Error;
-use futures::{Future, future};
+use futures::{Future, future::{self, Either}};
 use rand;
 use serde::Serialize;
 use serde_json;
 use message::proto;
 use tokio::runtime::TaskExecutor;
+use std::collections::BTreeMap;
 
 
-pub struct Producer<T: Serialize> {
+pub struct Producer {
     connection: Connection,
     addr: String,
-    topic: String,
-    id: u64,
+    topics: BTreeMap<String, (u64, SerialId)>,
     name: String,
-    data_type: ::std::marker::PhantomData<T>,
-    sequence_id: u64,
 }
 
-impl<T: Serialize> Producer<T> {
-    pub fn new<S1, S2>(addr: S1, topic: S2, name: Option<String>, executor: TaskExecutor) -> impl Future<Item=Producer<T>, Error=Error>
+impl Producer {
+    pub fn new<S1, S2>(addr: S1, name: S2, executor: TaskExecutor) -> impl Future<Item=Producer, Error=Error>
         where S1: Into<String>, S2: Into<String>
     {
-        let addr = addr.into();
-        let topic = topic.into();
-        Connection::new(addr.clone(), executor)
-            .and_then(move |conn| Producer::from_connection(conn, topic, name))
+        Connection::new(addr.into(), executor)
+            .map(move |conn| Producer::from_connection(conn, name.into()))
     }
 
-    pub fn from_connection(mut conn: Connection, topic: String, name: Option<String>) -> impl Future<Item=Producer<T>, Error=Error> {
-        let topic_= topic.clone();
-        let producer_id = rand::random();
-
-        conn.lookup_topic(topic.clone())
-            .map(move |resp| (resp, conn))
-            // TODO actually respect the broker returned here rather than assuming
-            // we only ever have one broker
-            .and_then(move |(_, mut conn)|
-                conn.create_producer(topic_, producer_id, name)
-                    .map(move |resp| (resp, conn)))
-            .map(move |(resp, conn)| {
-                Producer {
-                    addr: conn.addr().to_string(),
-                    connection: conn,
-                    topic,
-                    id: producer_id,
-                    name: resp.producer_name,
-                    data_type: ::std::marker::PhantomData,
-                    sequence_id: 0
-                }
-            })
+    pub fn from_connection(connection: Connection, name: String) -> Producer {
+        Producer {
+            addr: connection.addr().to_string(),
+            connection,
+            topics: BTreeMap::new(),
+            name,
+        }
     }
 
-    pub fn send(&mut self, msg: &T) -> impl Future<Item=proto::CommandSendReceipt, Error=Error> {
+    pub fn is_valid(&self) -> bool {
+        self.connection.is_valid()
+    }
+
+    pub fn check_connection(&self) -> impl Future<Item=(), Error=Error> {
+        self.connection.sender().lookup_topic("test")
+            .map(|_| ())
+    }
+
+    pub fn send_json<S: Into<String>, T: Serialize>(&mut self, topic: S, msg: &T) -> impl Future<Item=proto::CommandSendReceipt, Error=Error> {
         let data = match serde_json::to_vec(msg) {
             Ok(data) => data,
-            Err(e) => return future::Either::A(future::failed(e.into()))
+            Err(e) => return Either::A(future::failed(e.into()))
         };
-        let sequence_id = self.sequence_id;
-        self.sequence_id += 1;
-        future::Either::B(self.connection.send(
-            self.id,
-            self.name.clone(),
-            sequence_id,
-            None,
-            data
-        ))
+        Either::B(self.send_raw(topic, data))
+    }
+
+    pub fn send_raw<S: Into<String>>(&mut self, topic: S, data: Vec<u8>) -> impl Future<Item=proto::CommandSendReceipt, Error=Error> {
+        let topic = topic.into();
+        let producer_name = self.name.clone();
+
+        let producer = self.topics.get(&topic)
+            .map(|(producer_id, sequence_id)| Either::A(future::finished((*producer_id, sequence_id.get()))))
+            .unwrap_or_else(|| {
+                let producer_id = rand::random();
+                let sequence_ids = SerialId::new();
+                let sequence_id = sequence_ids.get();
+                self.topics.insert(topic.clone(), (producer_id, sequence_ids));
+
+                let producer_name = producer_name.clone();
+                let sender = self.connection.sender().clone();
+                Either::B(
+                    self.connection.sender().lookup_topic(topic.clone())
+                        .and_then(move |_| sender.create_producer(topic, producer_id, Some(producer_name)))
+                        .map(move |_| (producer_id, sequence_id))
+                )
+            });
+
+        let mut sender = self.connection.sender().clone();
+        producer.and_then(move |(producer_id, sequence_id)| {
+            sender.send(
+                producer_id,
+                producer_name,
+                sequence_id,
+                None,
+                data
+            )
+        })
     }
 
     pub fn addr(&self) -> &str {
         &self.addr
-    }
-
-    pub fn topic(&self) -> &str {
-        &self.topic
     }
 
     pub fn error(&mut self) -> Option<Error> {
@@ -82,8 +93,10 @@ impl<T: Serialize> Producer<T> {
 }
 
 
-impl<T: Serialize> Drop for Producer<T> {
+impl Drop for Producer {
     fn drop(&mut self) {
-        let _ = self.connection.close_producer(self.id);
+        for (producer_id, _) in self.topics.values() {
+            let _ = self.connection.sender().close_producer(*producer_id);
+        }
     }
 }

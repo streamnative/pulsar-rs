@@ -6,11 +6,10 @@ use message::{proto::{self, command_subscribe::SubType}, Codec, Message};
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::str::FromStr;
+use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 use tokio::runtime::TaskExecutor;
 use tokio::net::TcpStream;
 use tokio_codec;
-
-type Pulsar = tokio_codec::Framed<TcpStream, Codec>;
 
 pub enum Register {
     Request { key: RequestKey, resolver: oneshot::Sender<Message> },
@@ -189,87 +188,40 @@ impl<S: Sink<SinkItem=Message, SinkError=Error>> Future for Sender<S> {
     }
 }
 
-pub struct RequestId(u64);
-impl RequestId {
-    pub fn new() -> RequestId {
-        RequestId(0)
+#[derive(Clone)]
+pub struct SerialId(Arc<AtomicUsize>);
+
+impl SerialId {
+    pub fn new() -> SerialId {
+        SerialId(Arc::new(AtomicUsize::new(0)))
     }
-    pub fn get(&mut self) -> u64 {
-        let next = self.0;
-        self.0 += 1;
-        next
+    pub fn get(&self) -> u64 {
+        self.0.fetch_add(1, Ordering::Relaxed) as u64
     }
 }
 
-pub struct Connection {
-    addr: String,
+/// An owned type that can send messages like a connection
+#[derive(Clone)]
+pub struct ConnectionSender {
     tx: mpsc::UnboundedSender<Message>,
     registrations: mpsc::UnboundedSender<Register>,
-    request_id: RequestId,
+    request_id: SerialId,
     error: SharedError,
-    sender_shutdown: Option<oneshot::Sender<()>>,
-    receiver_shutdown: Option<oneshot::Sender<()>>,
 }
 
-impl Connection {
-    pub fn new(addr: String, executor: TaskExecutor) -> impl Future<Item=Connection, Error=Error> {
-        SocketAddr::from_str(&addr).into_future()
-            .map_err(|e| Error::SocketAddr(e.to_string()))
-            .and_then(|addr| {
-                TcpStream::connect(&addr)
-                    .map_err(|e| e.into())
-                    .map(|stream| tokio_codec::Framed::new(stream, Codec))
-                    .and_then(|stream| send_single_message(stream, messages::connect(), |r| r.command.connected))
-                    .map(|(_success, stream)| {
-                        println!("Connection established");
-                        stream
-                    })
-            })
-            .map(move |pulsar| {
-                let (sink, stream) = pulsar.split();
-                let (tx, rx) = mpsc::unbounded();
-                let (registrations_tx, registrations_rx) = mpsc::unbounded();
-                let error = SharedError::new();
-                let (receiver_shutdown_tx, receiver_shutdown_rx) = oneshot::channel();
-                let (sender_shutdown_tx, sender_shutdown_rx) = oneshot::channel();
-
-                executor.spawn(Receiver::new(
-                    stream,
-                    tx.clone(),
-                    error.clone(),
-                    registrations_rx,
-                    receiver_shutdown_rx,
-                ));
-
-                executor.spawn(Sender::new(
-                    sink,
-                    rx,
-                    error.clone(),
-                    sender_shutdown_rx
-                ));
-
-                Connection {
-                    addr,
-                    tx,
-                    registrations: registrations_tx,
-                    request_id: RequestId::new(),
-                    error,
-                    sender_shutdown: Some(sender_shutdown_tx),
-                    receiver_shutdown: Some(receiver_shutdown_tx),
-                }
-            })
-    }
-
-    pub fn error(&self) -> Option<Error> {
-        self.error.remove()
-    }
-
-    pub fn is_valid(&self) -> bool {
-        self.error.is_set()
-    }
-
-    pub fn addr(&self) -> &str {
-        &self.addr
+impl ConnectionSender {
+    pub fn new(
+        tx: mpsc::UnboundedSender<Message>,
+        registrations: mpsc::UnboundedSender<Register>,
+        request_id: SerialId,
+        error: SharedError
+    ) -> ConnectionSender {
+        ConnectionSender {
+            tx,
+            registrations,
+            request_id,
+            error,
+        }
     }
 
     pub fn send(&mut self,
@@ -289,13 +241,13 @@ impl Connection {
             .map_err(|_| Error::Disconnected)
     }
 
-    pub fn lookup_topic(&mut self, topic: String) -> impl Future<Item=proto::CommandLookupTopicResponse, Error=Error> {
+    pub fn lookup_topic<S: Into<String>>(&self, topic: S) -> impl Future<Item=proto::CommandLookupTopicResponse, Error=Error> {
         let request_id = self.request_id.get();
-        let msg = messages::lookup_topic(topic, request_id);
+        let msg = messages::lookup_topic(topic.into(), request_id);
         self.send_message(msg, RequestKey::RequestId(request_id), |resp| resp.command.lookup_topic_response)
     }
 
-    pub fn create_producer(&mut self,
+    pub fn create_producer(&self,
                            topic: String,
                            producer_id: u64,
                            producer_name: Option<String>,
@@ -305,13 +257,13 @@ impl Connection {
         self.send_message(msg, RequestKey::RequestId(request_id), |resp| resp.command.producer_success)
     }
 
-    pub fn close_producer(&mut self, producer_id: u64) -> impl Future<Item=proto::CommandSuccess, Error=Error> {
+    pub fn close_producer(&self, producer_id: u64) -> impl Future<Item=proto::CommandSuccess, Error=Error> {
         let request_id = self.request_id.get();
         let msg = messages::close_producer(producer_id, request_id);
         self.send_message(msg, RequestKey::RequestId(request_id), |resp| resp.command.success)
     }
 
-    pub fn subscribe(&mut self,
+    pub fn subscribe(&self,
                      resolver: mpsc::UnboundedSender<Message>,
                      topic: String,
                      subscription: String,
@@ -341,7 +293,13 @@ impl Connection {
             .map_err(|_| Error::Disconnected)
     }
 
-    fn send_message<R, F>(&mut self, msg: Message, key: RequestKey, extract: F) -> impl Future<Item=R, Error=Error>
+    pub fn close_consumer(&self, consumer_id: u64) -> impl Future<Item=proto::CommandSuccess, Error=Error> {
+        let request_id = self.request_id.get();
+        let msg = messages::close_consumer(consumer_id, request_id);
+        self.send_message(msg, RequestKey::RequestId(request_id), |resp| resp.command.success)
+    }
+
+    fn send_message<R, F>(&self, msg: Message, key: RequestKey, extract: F) -> impl Future<Item=R, Error=Error>
         where F: FnOnce(Message) -> Option<R>
     {
         let (resolver, response) = oneshot::channel();
@@ -355,6 +313,91 @@ impl Connection {
             _ => Either::B(future::err(Error::Disconnected))
         }
     }
+
+}
+
+pub struct Connection {
+    addr: String,
+    sender: ConnectionSender,
+    sender_shutdown: Option<oneshot::Sender<()>>,
+    receiver_shutdown: Option<oneshot::Sender<()>>,
+}
+
+impl Connection {
+    pub fn new(addr: String, executor: TaskExecutor) -> impl Future<Item=Connection, Error=Error> {
+        SocketAddr::from_str(&addr).into_future()
+            .map_err(|e| Error::SocketAddr(e.to_string()))
+            .and_then(|addr| {
+                TcpStream::connect(&addr)
+                    .map_err(|e| e.into())
+                    .map(|stream| tokio_codec::Framed::new(stream, Codec))
+                    .and_then(|stream|
+                        stream.send(messages::connect())
+                            .and_then(|stream| stream.into_future().map_err(|(err, _)| err))
+                            .and_then(move |(msg, stream)| match msg {
+                                Some(Message { command: proto::BaseCommand { error: Some(error), .. }, .. }) =>
+                                    Err(Error::PulsarError(format!("{:?}", error))),
+                                Some(msg) => {
+                                    let cmd = msg.command.clone();
+                                    msg.command.connected
+                                        .ok_or_else(|| Error::PulsarError(format!("Unexpected message from pulsar: {:?}", cmd)))
+                                        .map(|_msg| stream)
+                                },
+                                None => {
+                                    Err(Error::Disconnected)
+                                }
+                            }))
+            })
+            .map(move |pulsar| {
+                let (sink, stream) = pulsar.split();
+                let (tx, rx) = mpsc::unbounded();
+                let (registrations_tx, registrations_rx) = mpsc::unbounded();
+                let error = SharedError::new();
+                let (receiver_shutdown_tx, receiver_shutdown_rx) = oneshot::channel();
+                let (sender_shutdown_tx, sender_shutdown_rx) = oneshot::channel();
+
+                executor.spawn(Receiver::new(
+                    stream,
+                    tx.clone(),
+                    error.clone(),
+                    registrations_rx,
+                    receiver_shutdown_rx,
+                ));
+
+                executor.spawn(Sender::new(
+                    sink,
+                    rx,
+                    error.clone(),
+                    sender_shutdown_rx
+                ));
+
+                let sender = ConnectionSender::new(tx, registrations_tx, SerialId::new(), error);
+
+                Connection {
+                    addr,
+                    sender,
+                    sender_shutdown: Some(sender_shutdown_tx),
+                    receiver_shutdown: Some(receiver_shutdown_tx),
+                }
+            })
+    }
+
+    pub fn error(&self) -> Option<Error> {
+        self.sender.error.remove()
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.sender.error.is_set()
+    }
+
+    pub fn addr(&self) -> &str {
+        &self.addr
+    }
+
+    /// Chain to send a message, e.g. conn.sender().send_ping()
+    pub fn sender(&self) -> &ConnectionSender {
+        &self.sender
+    }
 }
 
 impl Drop for Connection {
@@ -366,28 +409,6 @@ impl Drop for Connection {
             let _ = shutdown.send(());
         }
     }
-}
-
-fn send_single_message<T, F: Fn(Message) -> Option<T>>(
-    stream: Pulsar,
-    message: Message,
-    extract_resp: F
-) -> impl Future<Item=(T, Pulsar), Error=Error> {
-    stream.send(message)
-        .and_then(|stream| stream.into_future().map_err(|(err, _)| err))
-        .and_then(move |(msg, stream)| match msg {
-            Some(Message { command: proto::BaseCommand { error: Some(error), .. }, .. }) =>
-                Err(Error::PulsarError(format!("{:?}", error))),
-            Some(msg) => {
-                let cmd = msg.command.clone();
-                extract_resp(msg)
-                    .ok_or_else(|| Error::PulsarError(format!("Unexpected message from pulsar: {:?}", cmd)))
-                    .map(|msg| (msg, stream))
-            },
-            None => {
-                Err(Error::Disconnected)
-            }
-        })
 }
 
 fn extract_message<T, F>(message: Message, extract: F) -> Result<T, Error>
@@ -574,6 +595,20 @@ pub(crate) mod messages {
                     message_id,
                     validation_error: None,
                     properties: Vec::new(),
+                }),
+                .. Default::default()
+            },
+            payload: None,
+        }
+    }
+
+    pub fn close_consumer(consumer_id: u64, request_id: u64) -> Message {
+        Message {
+            command: proto::BaseCommand {
+                type_: CommandType::CloseConsumer as i32,
+                close_consumer: Some(proto::CommandCloseConsumer {
+                    consumer_id,
+                    request_id,
                 }),
                 .. Default::default()
             },

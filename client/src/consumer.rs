@@ -35,11 +35,11 @@ impl<T: DeserializeOwned> Consumer<T> {
         let batch_size = batch_size.unwrap_or(1000);
 
         Connection::new(addr, executor.clone())
-            .and_then(move |mut conn|
-                conn.subscribe(resolver, topic, subscription, sub_type, consumer_id, consumer_name)
+            .and_then(move |conn|
+                conn.sender().subscribe(resolver, topic, subscription, sub_type, consumer_id, consumer_name)
                     .map(move |resp| (resp, conn)))
             .and_then(move |(_, conn)| {
-                conn.send_flow(consumer_id, batch_size)
+                conn.sender().send_flow(consumer_id, batch_size)
                     .map(move |()| conn)
             })
             .map(move |connection| {
@@ -76,10 +76,8 @@ impl Ack {
         self
     }
 
-    pub fn ack(&mut self) -> Result<(), Error> {
-        let mut messages = Vec::new();
-        ::std::mem::swap(&mut messages, &mut self.message_id);
-        self.connection.send_ack(self.consumer_id, messages)
+    pub fn ack(self) {
+        let _ = self.connection.sender().send_ack(self.consumer_id, self.message_id);
     }
 }
 
@@ -95,7 +93,7 @@ impl<T> Stream for Consumer<T> {
         }
 
         if self.remaining_messages <= self.batch_size / 2 {
-            self.connection.send_flow(self.id, self.batch_size - self.remaining_messages)?;
+            self.connection.sender().send_flow(self.id, self.batch_size - self.remaining_messages)?;
             self.remaining_messages = self.batch_size;
         }
 
@@ -124,6 +122,12 @@ impl<T> Stream for Consumer<T> {
         }
     }
 
+}
+
+impl<T> Drop for Consumer<T> {
+    fn drop(&mut self) {
+        let _ = self.connection.sender().close_consumer(self.id);
+    }
 }
 
 pub struct Set<T>(T);
