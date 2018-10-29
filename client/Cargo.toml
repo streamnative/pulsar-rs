@@ -1,5 +1,5 @@
 [package]
-name = "pulsar-client"
+name = "pulsar_client"
 version = "0.1.0"
 authors = ["Colin Stearns <cstearns@developers.wyyerd.com>"]
 
