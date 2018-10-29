@@ -1,0 +1,24 @@
+[package]
+name = "pulsar-client"
+version = "0.1.0"
+authors = ["Colin Stearns <cstearns@developers.wyyerd.com>"]
+
+[dependencies]
+bytes = "0.4.0"
+crc = "1.0.0"
+failure = "0.1.0"
+futures = "0.1.23"
+nom = "4.0.0"
+prost = "0.4.0"
+prost-derive = "0.4.0"
+tokio = "0.1.11"
+tokio-codec = "0.1.1"
+rand = "0.5.5"
+serde = "1.0.80"
+serde_derive = "1.0"
+serde_json = "1.0.32"
+chrono = "0.4.6"
+futures-timer = "0.1.1"
+
+[build-dependencies]
+prost-build = "0.4.0"
