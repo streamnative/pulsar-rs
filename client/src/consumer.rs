@@ -13,7 +13,7 @@ pub struct Consumer<T> {
     connection: Arc<Connection>,
     id: u64,
     messages: mpsc::UnboundedReceiver<Message>,
-    deserialize: Box<dyn Fn(Payload) -> Result<T, Error>>,
+    deserialize: Box<dyn Fn(Payload) -> Result<T, Error> + Send>,
     batch_size: u32,
     remaining_messages: u32,
 }
@@ -27,7 +27,7 @@ impl<T: DeserializeOwned> Consumer<T> {
         consumer_id: Option<u64>,
         consumer_name: Option<String>,
         executor: TaskExecutor,
-        deserialize: Box<dyn Fn(Payload) -> Result<T, Error>>,
+        deserialize: Box<dyn Fn(Payload) -> Result<T, Error> + Send>,
         batch_size: Option<u32>,
     ) -> impl Future<Item=Consumer<T>, Error=Error> {
         let consumer_id = consumer_id.unwrap_or_else(rand::random);
@@ -141,7 +141,7 @@ pub struct ConsumerBuilder<Topic, Subscription, SubscriptionType, DataType> {
     consumer_id: Option<u64>,
     consumer_name: Option<String>,
     executor: TaskExecutor,
-    deserialize: Option<Box<dyn Fn(Payload) -> Result<DataType, Error>>>,
+    deserialize: Option<Box<dyn Fn(Payload) -> Result<DataType, Error> + Send>>,
     batch_size: Option<u32>,
 }
 
@@ -211,7 +211,7 @@ impl<Topic, Subscription, DataType> ConsumerBuilder<Topic, Subscription, Unset, 
 
 impl<Topic, Subscription, SubscriptionType> ConsumerBuilder<Topic, Subscription, SubscriptionType, Unset> {
     pub fn with_deserializer<T, F>(self, deserializer: F) -> ConsumerBuilder<Topic, Subscription, SubscriptionType, T>
-        where F: Fn(Payload) -> Result<T, Error> + 'static
+        where F: Fn(Payload) -> Result<T, Error> + Send + 'static
     {
         ConsumerBuilder {
             deserialize: Some(Box::new(deserializer)),
