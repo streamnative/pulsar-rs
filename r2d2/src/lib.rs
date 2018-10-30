@@ -1,6 +1,6 @@
 extern crate failure;
 extern crate futures;
-extern crate pulsar_client;
+extern crate pulsar;
 extern crate r2d2;
 extern crate tokio;
 
@@ -13,7 +13,7 @@ extern crate serde_derive;
 
 use failure::Fail;
 use futures::Future;
-use pulsar_client::{Connection, Producer, Error};
+use pulsar::{Connection, Producer, Error};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub struct ConnectionManager {
@@ -86,7 +86,7 @@ mod tests {
     use super::*;
     use r2d2;
     use futures::Stream;
-    use pulsar_client::{Consumer, ConsumerBuilder, SubType};
+    use pulsar::{Consumer, ConsumerBuilder, SubType};
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     struct TestData {
