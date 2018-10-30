@@ -49,6 +49,13 @@ mod tests {
             .wait()
             .unwrap();
 
+        let produce = {
+            let producer = &mut producer;
+            future::join_all((0..5000).map(move |_| {
+                producer.send_json("test", &TestData { data: "data".to_string() })
+            }))
+        };
+
         let consumer = ConsumerBuilder::new(addr, runtime.executor())
             .with_topic("test")
             .with_consumer_name("test_consumer")
@@ -58,13 +65,7 @@ mod tests {
             .wait()
             .unwrap();
 
-        {
-            let producer = &mut producer;
-            future::join_all((0..5000).map(move |_| {
-                producer.send_json("test", &TestData { data: "data".to_string() })
-            })).wait().unwrap();
-            println!("Sent {} messages", 5000);
-        }
+        produce.wait().unwrap();
 
         let mut consumed = 0;
         let consumer_result = consumer.for_each(move |data: Result<(TestData, Ack), Error>| {
@@ -86,7 +87,7 @@ mod tests {
             }
         }).wait();
 
-        println!("Producer Error: {:?}", producer.error());
+//        println!("Producer Error: {:?}", producer.error());
         println!("Consumer Result: {:?}", consumer_result);
         runtime.shutdown_now().wait().unwrap();
     }

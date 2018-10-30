@@ -108,14 +108,14 @@ mod tests {
 
         let dataz = TestData { data: String::from("dataz") };
 
-        let send_1 = a.send_json("test", &dataz.clone());
-        let send_2 = b.send_json("test", &dataz.clone());
+        let send_1 = a.send_json("r2d2_test", &dataz.clone());
+        let send_2 = b.send_json("r2d2_test", &dataz.clone());
 
         send_1.join(send_2).wait().unwrap();
 
         let consumer: Consumer<TestData> = ConsumerBuilder::new(addr, runtime.executor())
             .with_subscription("r2d2_test")
-            .with_topic("test")
+            .with_topic("r2d2_test")
             .with_subscription_type(SubType::Exclusive)
             .build()
             .wait()
