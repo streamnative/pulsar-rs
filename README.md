@@ -13,6 +13,7 @@ tokio = "0.1.11"
 
 # If you want connection pooling
 r2d2 = "0.8.2"
+r2d2_pulsar = { git = "git@github.com:wyyerd/pulsar-rs.git" }
 
 # If you want to use serde
 serde = "1.0.80"
@@ -24,7 +25,7 @@ main.rs
 extern crate pulsar;
 
 // if you want connection pooling
-extern crate pulsar_r2d2;
+extern crate r2d2_pulsar;
 extern crate r2d2;
 
 // if you want serde
