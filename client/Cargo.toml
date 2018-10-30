@@ -1,7 +1,20 @@
 [package]
 name = "pulsar"
 version = "0.1.0"
-authors = ["Colin Stearns <cstearns@developers.wyyerd.com>"]
+authors = [
+    "Colin Stearns <cstearns@developers.wyyerd.com>",
+    "Kevin Stenerson <kstenerson@developers.wyyerd.com>"
+]
+
+license = "MIT/Apache-2.0"
+readme = "../README.md"
+repository = "https://github.com/wyyerd/pulsar-rs"
+documentation = "https://docs.rs/pulsar"
+keywords = ["pulsar", "api"]
+categories = ["api-bindings"]
+
+[badges]
+travis-ci = {repository = "wyyerd/pulsar-rs"}
 
 [dependencies]
 bytes = "0.4.0"

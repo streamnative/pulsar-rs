@@ -1,7 +1,7 @@
 ## Pulsar
 #### Future-based Rust bindings for [Apache Pulsar](https://pulsar.apache.org/)
 
-[Documentation]()
+[Documentation](https://docs.rs/pulsar)
 
 Current status: Rough pass of simplest functionality. Should be in a good place to add additional features, but nothing but the barest of basics is implemented yet.
 ### Getting Started
