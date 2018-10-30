@@ -42,6 +42,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn connect() {
         let addr = "127.0.0.1:6650";
         let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -68,7 +69,7 @@ mod tests {
         produce.wait().unwrap();
 
         let mut consumed = 0;
-        let consumer_result = consumer.for_each(move |data: Result<(TestData, Ack), Error>| {
+        let _ = consumer.for_each(move |data: Result<(TestData, Ack), Error>| {
             consumed += 1;
             match data {
                 Ok((_msg, ack)) => {
@@ -87,8 +88,6 @@ mod tests {
             }
         }).wait();
 
-//        println!("Producer Error: {:?}", producer.error());
-        println!("Consumer Result: {:?}", consumer_result);
         runtime.shutdown_now().wait().unwrap();
     }
 }

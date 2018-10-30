@@ -94,6 +94,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn it_works() {
         let addr = "127.0.0.1:6650";
         let runtime = tokio::runtime::Runtime::new().unwrap();
