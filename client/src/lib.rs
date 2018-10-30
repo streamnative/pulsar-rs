@@ -24,7 +24,7 @@ mod connection;
 pub use error::Error;
 pub use connection::Connection;
 pub use producer::Producer;
-pub use consumer::{Consumer, ConsumerBuilder};
+pub use consumer::{Consumer, ConsumerBuilder, Ack};
 pub use message::proto;
 pub use message::proto::command_subscribe::SubType;
 
@@ -35,7 +35,6 @@ mod tests {
     use futures::{Future, Stream, future};
     use super::*;
     use message::proto::command_subscribe::SubType;
-    use consumer::Ack;
 
     #[derive(Debug, Serialize, Deserialize)]
     struct TestData {
