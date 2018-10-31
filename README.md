@@ -21,7 +21,7 @@ serde_derive = "1.0"
 serde_json = "1.0.32"
 ```
 main.rs
-```
+```rust
 extern crate pulsar;
 
 // if you want connection pooling
@@ -34,7 +34,7 @@ extern crate serde_json;
 #[macro_use] extern crate serde_derive;
 ```
 #### Producing
-```
+```rust
 use tokio::runtime::Runtime;
 use futures::future;
 use pulsar::Producer;
@@ -68,7 +68,7 @@ fn main() {
 
 ```
 #### Consuming
-```
+```rust
 use tokio::runtime::Runtime;
 use futures::{Stream, future};
 use pulsar::{Ack, Consumer, Error, SubType};
@@ -115,7 +115,7 @@ fn main() {
 }
 ```
 ### Connection Pooling
-```
+```rust
 use r2d2_pulsar::ProducerConnectionManager;
 
 let addr = "127.0.0.1:6650";
@@ -141,7 +141,7 @@ send_1.join(send_2).wait().unwrap();
 runtime.shutdown_now().wait().unwrap();
 ```
 ### Serde
-```
+```rust
 #[derive(Debug, Serialize, Deserialize)
 struct SomeData {
     ...
