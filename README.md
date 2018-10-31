@@ -8,12 +8,12 @@ Current status: Rough pass of simplest functionality. Should be in a good place 
 Cargo.toml
 ```
 futures = "0.1.23"
-pulsar = { git = "git@github.com:wyyerd/pulsar-rs.git" }
+pulsar = "0.1.0"
 tokio = "0.1.11"
 
 # If you want connection pooling
 r2d2 = "0.8.2"
-r2d2_pulsar = { git = "git@github.com:wyyerd/pulsar-rs.git" }
+r2d2_pulsar = "0.1.0"
 
 # If you want to use serde
 serde = "1.0.80"
