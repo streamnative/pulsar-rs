@@ -6,14 +6,14 @@
 Current status: Rough pass of simplest functionality. Should be in a good place to add additional features, but nothing but the barest of basics is implemented yet.
 ### Getting Started
 Cargo.toml
-```
+```toml
 futures = "0.1.23"
-pulsar = "0.1.0"
+pulsar = "0.1.1"
 tokio = "0.1.11"
 
 # If you want connection pooling
 r2d2 = "0.8.2"
-r2d2_pulsar = "0.1.0"
+r2d2_pulsar = "0.1.1"
 
 # If you want to use serde
 serde = "1.0.80"
