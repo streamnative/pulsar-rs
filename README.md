@@ -142,7 +142,8 @@ runtime.shutdown_now().wait().unwrap();
 ```
 ### Serde
 ```rust
-#[derive(Debug, Serialize, Deserialize)
+
+#[derive(Debug, Serialize, Deserialize)]
 struct SomeData {
     ...
 }
@@ -167,9 +168,9 @@ fn main() {
         .wait()
         .unwrap();
 
-    let send_1 = producer.send_json(&SomeData { ... }, serialized);
-    let send_2 = producer.send_json(&SomeData { ... }, serialized);
-    let send_3 = producer.send_json(&SomeData { ... }, serialized);
+    let send_1 = producer.send_json("some_topic", &SomeData { ... });
+    let send_2 = producer.send_json("some_topic", &SomeData { ... });
+    let send_3 = producer.send_json("some_topic", &SomeData { ... });
 
     future::join_all(vec![send_1, send_2, send_3]).wait().unwrap();
 
