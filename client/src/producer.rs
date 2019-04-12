@@ -1,4 +1,4 @@
-use connection::{Connection, SerialId};
+use connection::{Connection, SerialId, Authentication};
 use error::Error;
 use futures::{Future, future::{self, Either}};
 use rand;
@@ -17,10 +17,10 @@ pub struct Producer {
 }
 
 impl Producer {
-    pub fn new<S1, S2>(addr: S1, name: S2, executor: TaskExecutor) -> impl Future<Item=Producer, Error=Error>
+    pub fn new<S1, S2>(addr: S1, name: S2, auth: Option<Authentication>, executor: TaskExecutor) -> impl Future<Item=Producer, Error=Error>
         where S1: Into<String>, S2: Into<String>
     {
-        Connection::new(addr.into(), executor)
+        Connection::new(addr.into(), auth, executor)
             .map(move |conn| Producer::from_connection(conn, name.into()))
     }
 

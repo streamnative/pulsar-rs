@@ -22,6 +22,12 @@ pub enum RequestKey {
     ProducerSend { producer_id: u64, sequence_id: u64 },
 }
 
+#[derive(Clone)]
+pub struct Authentication {
+  pub name: String,
+  pub data: Vec<u8>,
+}
+
 pub struct Receiver<S: Stream<Item=Message, Error=Error>> {
     inbound: S,
     outbound: mpsc::UnboundedSender<Message>,
@@ -324,7 +330,7 @@ pub struct Connection {
 }
 
 impl Connection {
-    pub fn new(addr: String, executor: TaskExecutor) -> impl Future<Item=Connection, Error=Error> {
+    pub fn new(addr: String, auth_data: Option<Authentication>, executor: TaskExecutor) -> impl Future<Item=Connection, Error=Error> {
         SocketAddr::from_str(&addr).into_future()
             .map_err(|e| Error::SocketAddr(e.to_string()))
             .and_then(|addr| {
@@ -332,7 +338,7 @@ impl Connection {
                     .map_err(|e| e.into())
                     .map(|stream| tokio_codec::Framed::new(stream, Codec))
                     .and_then(|stream|
-                        stream.send(messages::connect())
+                        stream.send(messages::connect(auth_data))
                             .and_then(|stream| stream.into_future().map_err(|(err, _)| err))
                             .and_then(move |(msg, stream)| match msg {
                                 Some(Message { command: proto::BaseCommand { error: Some(error), .. }, .. }) =>
@@ -431,13 +437,20 @@ fn extract_message<T, F>(message: Message, extract: F) -> Result<T, Error>
 pub(crate) mod messages {
     use message::{Message, Payload, proto::{self, base_command::Type as CommandType, command_subscribe::SubType}};
     use chrono::Utc;
+    use connection::Authentication;
 
-    pub fn connect() -> Message {
+    pub fn connect(auth: Option<Authentication>) -> Message {
+        let (auth_method_name, auth_data) = match auth {
+          Some(auth) => (Some(auth.name), Some(auth.data)),
+          None => (None, None),
+        };
+
         Message {
             command: proto::BaseCommand {
                 type_: CommandType::Connect as i32,
                 connect: Some(proto::CommandConnect {
-                    auth_data: None,
+                    auth_method_name,
+                    auth_data,
                     client_version: String::from("2.0.1-incubating"),
                     protocol_version: Some(12),
                     .. Default::default()

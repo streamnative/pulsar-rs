@@ -46,7 +46,7 @@ mod tests {
     fn connect() {
         let addr = "127.0.0.1:6650";
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let mut producer = Producer::new(addr, "test_producer", runtime.executor())
+        let mut producer = Producer::new(addr, "test_producer", None, runtime.executor())
             .wait()
             .unwrap();
 
