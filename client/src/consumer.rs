@@ -1,4 +1,4 @@
-use connection::Connection;
+use connection::{Connection, Authentication};
 use error::Error;
 use futures::Future;
 use serde::de::DeserializeOwned;
@@ -26,6 +26,7 @@ impl<T: DeserializeOwned> Consumer<T> {
         sub_type: SubType,
         consumer_id: Option<u64>,
         consumer_name: Option<String>,
+        auth_data: Option<Authentication>,
         executor: TaskExecutor,
         deserialize: Box<dyn Fn(Payload) -> Result<T, Error> + Send>,
         batch_size: Option<u32>,
@@ -34,7 +35,7 @@ impl<T: DeserializeOwned> Consumer<T> {
         let (resolver, messages) = mpsc::unbounded();
         let batch_size = batch_size.unwrap_or(1000);
 
-        Connection::new(addr, executor.clone())
+        Connection::new(addr, auth_data, executor.clone())
             .and_then(move |conn|
                 conn.sender().subscribe(resolver, topic, subscription, sub_type, consumer_id, consumer_name)
                     .map(move |resp| (resp, conn)))
@@ -140,6 +141,7 @@ pub struct ConsumerBuilder<Topic, Subscription, SubscriptionType, DataType> {
     subscription_type: SubscriptionType,
     consumer_id: Option<u64>,
     consumer_name: Option<String>,
+    authentication: Option<Authentication>,
     executor: TaskExecutor,
     deserialize: Option<Box<dyn Fn(Payload) -> Result<DataType, Error> + Send>>,
     batch_size: Option<u32>,
@@ -154,6 +156,7 @@ impl ConsumerBuilder<Unset, Unset, Unset, Unset> {
             subscription_type: Unset,
             consumer_id: None,
             consumer_name: None,
+            authentication: None,
             executor,
             deserialize: None,
             batch_size: None,
@@ -170,6 +173,7 @@ impl<Subscription, SubscriptionType, DataType> ConsumerBuilder<Unset, Subscripti
             subscription_type: self.subscription_type,
             consumer_id: self.consumer_id,
             consumer_name: self.consumer_name,
+            authentication: self.authentication,
             executor: self.executor,
             deserialize: self.deserialize,
             batch_size: self.batch_size,
@@ -186,6 +190,7 @@ impl<Topic, SubscriptionType, DataType> ConsumerBuilder<Topic, Unset, Subscripti
             subscription_type: self.subscription_type,
             consumer_id: self.consumer_id,
             consumer_name: self.consumer_name,
+            authentication: self.authentication,
             executor: self.executor,
             deserialize: self.deserialize,
             batch_size: self.batch_size,
@@ -202,6 +207,7 @@ impl<Topic, Subscription, DataType> ConsumerBuilder<Topic, Subscription, Unset, 
             subscription: self.subscription,
             consumer_id: self.consumer_id,
             consumer_name: self.consumer_name,
+            authentication: self.authentication,
             executor: self.executor,
             deserialize: self.deserialize,
             batch_size: self.batch_size,
@@ -221,6 +227,7 @@ impl<Topic, Subscription, SubscriptionType> ConsumerBuilder<Topic, Subscription,
             subscription_type: self.subscription_type,
             consumer_name: self.consumer_name,
             consumer_id: self.consumer_id,
+            authentication: self.authentication,
             executor: self.executor,
             batch_size: self.batch_size,
         }
@@ -236,6 +243,7 @@ impl<Topic, Subscription, SubscriptionType, DataType> ConsumerBuilder<Topic, Sub
             subscription: self.subscription,
             subscription_type: self.subscription_type,
             consumer_name: self.consumer_name,
+            authentication: self.authentication,
             executor: self.executor,
             deserialize: self.deserialize,
             batch_size: self.batch_size,
@@ -250,6 +258,7 @@ impl<Topic, Subscription, SubscriptionType, DataType> ConsumerBuilder<Topic, Sub
             subscription: self.subscription,
             subscription_type: self.subscription_type,
             consumer_id: self.consumer_id,
+            authentication: self.authentication,
             executor: self.executor,
             deserialize: self.deserialize,
             batch_size: self.batch_size,
@@ -265,6 +274,25 @@ impl<Topic, Subscription, SubscriptionType, DataType> ConsumerBuilder<Topic, Sub
             subscription_type: self.subscription_type,
             consumer_name: self.consumer_name,
             consumer_id: self.consumer_id,
+            authentication: self.authentication,
+            executor: self.executor,
+            deserialize: self.deserialize,
+        }
+    }
+
+    pub fn authenticate(self, method: String, data: Vec<u8>) -> ConsumerBuilder<Topic, Subscription, SubscriptionType, DataType> {
+        ConsumerBuilder {
+            batch_size: self.batch_size,
+            topic: self.topic,
+            addr: self.addr,
+            subscription: self.subscription,
+            subscription_type: self.subscription_type,
+            consumer_name: self.consumer_name,
+            consumer_id: self.consumer_id,
+            authentication: Some(Authentication {
+              name: method,
+              data
+            }),
             executor: self.executor,
             deserialize: self.deserialize,
         }
@@ -283,11 +311,12 @@ impl ConsumerBuilder<Set<String>, Set<String>, Set<SubType>, Unset> {
             subscription_type: Set(sub_type),
             consumer_id,
             consumer_name,
+            authentication,
             executor,
             batch_size,
             ..
         } = self;
-        Consumer::new(addr, topic, subscription, sub_type, consumer_id, consumer_name, executor, deserialize, batch_size)
+        Consumer::new(addr, topic, subscription, sub_type, consumer_id, consumer_name, authentication, executor, deserialize, batch_size)
     }
 }
 
@@ -300,11 +329,12 @@ impl<T: DeserializeOwned> ConsumerBuilder<Set<String>, Set<String>, Set<SubType>
             subscription_type: Set(sub_type),
             consumer_id,
             consumer_name,
+            authentication,
             executor,
             deserialize,
             batch_size,
         } = self;
         let deserialize = deserialize.unwrap();
-        Consumer::new(addr, topic, subscription, sub_type, consumer_id, consumer_name, executor, deserialize, batch_size)
+        Consumer::new(addr, topic, subscription, sub_type, consumer_id, consumer_name, authentication, executor, deserialize, batch_size)
     }
 }
