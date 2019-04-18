@@ -37,6 +37,15 @@ impl fmt::Display for Error {
   }
 }
 
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Error::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum ConsumerError {
     Connection(Error),
@@ -66,6 +75,17 @@ impl fmt::Display for ConsumerError {
   }
 }
 
+impl std::error::Error for ConsumerError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ConsumerError::Connection(e) => Some(e),
+            ConsumerError::Serde(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+
 #[derive(Debug)]
 pub enum ProducerError {
     Connection(Error),
@@ -91,6 +111,15 @@ impl fmt::Display for ProducerError {
       ProducerError::Serde(e) => write!(f, "Serialization error: {}", e),
     }
   }
+}
+
+impl std::error::Error for ProducerError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ProducerError::Connection(e) => Some(e),
+            ProducerError::Serde(e) => Some(e),
+        }
+    }
 }
 
 #[derive(Clone)]

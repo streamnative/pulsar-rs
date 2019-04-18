@@ -1,13 +1,3 @@
-extern crate bytes;
-extern crate chrono;
-extern crate crc;
-extern crate futures_timer;
-extern crate prost;
-extern crate rand;
-extern crate serde;
-extern crate serde_json;
-extern crate tokio;
-extern crate tokio_codec;
 #[macro_use] extern crate futures;
 #[macro_use] extern crate nom;
 #[macro_use] extern crate prost_derive;

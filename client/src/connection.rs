@@ -1,15 +1,14 @@
-use error::{Error, SharedError};
-
+use crate::error::{Error, SharedError};
+use crate::message::{proto::{self, command_subscribe::SubType}, Codec, Message};
 use futures::{self, Async, Future, Stream, Sink, IntoFuture, future::{self, Either}, sync::{mpsc, oneshot},
               AsyncSink};
-use message::{proto::{self, command_subscribe::SubType}, Codec, Message};
 use std::collections::BTreeMap;
-use std::net::SocketAddr;
 use std::fmt::Debug;
+use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
-use tokio::runtime::TaskExecutor;
 use tokio::net::TcpStream;
+use tokio::runtime::TaskExecutor;
 use tokio_codec;
 
 pub enum Register {
@@ -447,9 +446,9 @@ fn extract_message<T: Debug, F>(message: Message, extract: F) -> Result<T, Error
 }
 
 pub(crate) mod messages {
-    use message::{Message, Payload, proto::{self, base_command::Type as CommandType, command_subscribe::SubType}};
+    use crate::connection::Authentication;
+    use crate::message::{Message, Payload, proto::{self, base_command::Type as CommandType, command_subscribe::SubType}};
     use chrono::Utc;
-    use connection::Authentication;
 
     pub fn connect(auth: Option<Authentication>) -> Message {
         let (auth_method_name, auth_data) = match auth {

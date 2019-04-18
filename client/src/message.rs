@@ -1,10 +1,10 @@
+use crate::connection::RequestKey;
 use bytes::{Buf, BufMut, IntoBuf, BytesMut};
 use crc::crc32;
 use nom::{be_u16, be_u32};
 use prost::{self, Message as ImplProtobuf};
-use tokio_codec::{Encoder, Decoder};
 use std::io::Cursor;
-use connection::RequestKey;
+use tokio_codec::{Encoder, Decoder};
 
 use super::Error;
 

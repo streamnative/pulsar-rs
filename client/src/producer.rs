@@ -1,12 +1,12 @@
-use connection::{Connection, SerialId, Authentication};
-use error::{Error, ProducerError};
+use crate::connection::{Connection, SerialId, Authentication};
+use crate::error::{Error, ProducerError};
+use crate::message::proto;
 use futures::{Future, future::{self, Either}};
 use rand;
 use serde::Serialize;
 use serde_json;
-use message::proto;
-use tokio::runtime::TaskExecutor;
 use std::collections::BTreeMap;
+use tokio::runtime::TaskExecutor;
 
 
 pub struct Producer {

@@ -1,13 +1,13 @@
-use connection::{Connection, Authentication};
-use error::{Error, ConsumerError};
+use crate::connection::{Connection, Authentication};
+use crate::error::{Error, ConsumerError};
+use crate::message::{Message, Payload, proto::{self, command_subscribe::SubType}};
 use futures::Future;
+use futures::{Stream, sync::mpsc, Async};
+use rand;
 use serde::de::DeserializeOwned;
 use serde_json;
-use message::{Message, Payload, proto::{self, command_subscribe::SubType}};
-use rand;
-use tokio::runtime::TaskExecutor;
-use futures::{Stream, sync::mpsc, Async};
 use std::sync::Arc;
+use tokio::runtime::TaskExecutor;
 
 pub struct Consumer<T> {
     connection: Arc<Connection>,
