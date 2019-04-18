@@ -999,7 +999,7 @@ impl From<prost::DecodeError> for Error {
 
 #[cfg(test)]
 mod tests {
-    use message::Codec;
+    use crate::message::Codec;
     use bytes::BytesMut;
     use tokio_codec::{Encoder, Decoder};
 
