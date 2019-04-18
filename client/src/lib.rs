@@ -12,6 +12,7 @@ extern crate tokio_codec;
 #[macro_use] extern crate futures;
 #[macro_use] extern crate nom;
 #[macro_use] extern crate prost_derive;
+#[macro_use] extern crate log;
 
 #[cfg(test)] #[macro_use] extern crate serde_derive;
 
