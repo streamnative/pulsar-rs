@@ -1,29 +1,18 @@
-use std::io;
+use std::{io, fmt};
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 use serde_json;
 
-#[derive(Debug, Fail)]
+#[derive(Debug)]
 pub enum Error {
-    #[fail(display = "{}", _0)]
     Io(io::Error),
-    #[fail(display = "Disconnected")]
     Disconnected,
-    #[fail(display = "{}", _0)]
     PulsarError(String),
-    #[fail(display = "{}", _0)]
     Unexpected(String),
-    #[fail(display = "Error decoding message: {}", _0)]
     Decoding(String),
-    #[fail(display = "Error encoding message: {}", _0)]
     Encoding(String),
-    #[fail(display = "Error obtaining socket address: {}", _0)]
     SocketAddr(String),
-    #[fail(display = "Unexpected response from pulsar: {}", _0)]
     UnexpectedResponse(String),
-    #[fail(display = "Serde Error: {}", _0)]
-    Serde(serde_json::Error),
-    #[fail(display = "Error deserializing message: {}", _0)]
-    Deserialization(serde_json::Error),
+    Shutdown,
 }
 
 impl From<io::Error> for Error {
@@ -32,10 +21,76 @@ impl From<io::Error> for Error {
     }
 }
 
-impl From<serde_json::Error> for Error {
-    fn from(err: serde_json::Error) -> Self {
-        Error::Serde(err)
+impl fmt::Display for Error {
+  fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    match self {
+      Error::Io(e) => write!(f, "{}", e),
+      Error::Disconnected => write!(f, "Disconnected"),
+      Error::PulsarError(e) => write!(f, "{}", e),
+      Error::Unexpected(e) => write!(f, "{}", e),
+      Error::Decoding(e) => write!(f, "Error decoding message: {}", e),
+      Error::Encoding(e) => write!(f, "Error encoding message: {}", e),
+      Error::SocketAddr(e) => write!(f, "Error obtaning socket address: {}", e),
+      Error::UnexpectedResponse(e) => write!(f, "Unexpected response from pulsar: {}", e),
+      Error::Shutdown => write!(f, "The connection was shut down"),
     }
+  }
+}
+
+#[derive(Debug)]
+pub enum ConsumerError {
+    Connection(Error),
+    MissingPayload(String),
+    Serde(serde_json::Error),
+}
+
+impl From<Error> for ConsumerError {
+    fn from(err: Error) -> Self {
+        ConsumerError::Connection(err)
+    }
+}
+
+impl From<serde_json::Error> for ConsumerError {
+    fn from(err: serde_json::Error) -> Self {
+        ConsumerError::Serde(err)
+    }
+}
+
+impl fmt::Display for ConsumerError {
+  fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    match self {
+      ConsumerError::Connection(e) => write!(f, "Connection error: {}", e),
+      ConsumerError::MissingPayload(s) => write!(f, "Missing payload: {}", s),
+      ConsumerError::Serde(e) => write!(f, "Deserialization error: {}", e),
+    }
+  }
+}
+
+#[derive(Debug)]
+pub enum ProducerError {
+    Connection(Error),
+    Serde(serde_json::Error),
+}
+
+impl From<Error> for ProducerError {
+    fn from(err: Error) -> Self {
+        ProducerError::Connection(err)
+    }
+}
+
+impl From<serde_json::Error> for ProducerError {
+    fn from(err: serde_json::Error) -> Self {
+        ProducerError::Serde(err)
+    }
+}
+
+impl fmt::Display for ProducerError {
+  fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    match self {
+      ProducerError::Connection(e) => write!(f, "Connection error: {}", e),
+      ProducerError::Serde(e) => write!(f, "Serialization error: {}", e),
+    }
+  }
 }
 
 #[derive(Clone)]

@@ -1,5 +1,5 @@
 use connection::{Connection, Authentication};
-use error::Error;
+use error::{Error, ConsumerError};
 use futures::Future;
 use serde::de::DeserializeOwned;
 use serde_json;
@@ -13,7 +13,7 @@ pub struct Consumer<T> {
     connection: Arc<Connection>,
     id: u64,
     messages: mpsc::UnboundedReceiver<Message>,
-    deserialize: Box<dyn Fn(Payload) -> Result<T, Error> + Send>,
+    deserialize: Box<dyn Fn(Payload) -> Result<T, ConsumerError> + Send>,
     batch_size: u32,
     remaining_messages: u32,
 }
@@ -28,9 +28,9 @@ impl<T: DeserializeOwned> Consumer<T> {
         consumer_name: Option<String>,
         auth_data: Option<Authentication>,
         executor: TaskExecutor,
-        deserialize: Box<dyn Fn(Payload) -> Result<T, Error> + Send>,
+        deserialize: Box<dyn Fn(Payload) -> Result<T, ConsumerError> + Send>,
         batch_size: Option<u32>,
-    ) -> impl Future<Item=Consumer<T>, Error=Error> {
+    ) -> impl Future<Item=Consumer<T>, Error=ConsumerError> {
         let consumer_id = consumer_id.unwrap_or_else(rand::random);
         let (resolver, messages) = mpsc::unbounded();
         let batch_size = batch_size.unwrap_or(1000);
@@ -43,6 +43,7 @@ impl<T: DeserializeOwned> Consumer<T> {
                 conn.sender().send_flow(consumer_id, batch_size)
                     .map(move |()| conn)
             })
+            .map_err(|e| e.into())
             .map(move |connection| {
                 Consumer {
                     connection: Arc::new(connection),
@@ -83,13 +84,13 @@ impl Ack {
 }
 
 impl<T> Stream for Consumer<T> {
-    type Item = Result<(T, Ack), Error>;
-    type Error = Error;
+    type Item = Result<(T, Ack), ConsumerError>;
+    type Error = ConsumerError;
 
     fn poll(&mut self) -> Result<Async<Option<Self::Item>>, Self::Error> {
         if !self.connection.is_valid() {
             if let Some(err) = self.connection.error() {
-                return Err(err);
+                return Err(err.into());
             }
         }
 
@@ -112,13 +113,10 @@ impl<T> Stream for Consumer<T> {
             Some(Some((message, payload))) => {
                 Ok(Async::Ready(Some({
                     let ack = Ack::new(self.id, message.message_id, self.connection.clone());
-                    match (&self.deserialize)(payload) {
-                        Ok(data) => Ok((data, ack)),
-                        Err(e) => Err(e)
-                    }
+                    (&self.deserialize)(payload).map(|data| (data, ack))
                 })))
             },
-            Some(None) => Ok(Async::Ready(Some(Err(Error::Unexpected(format!("Missing payload for message {:?}", message)))))),
+            Some(None) => Ok(Async::Ready(Some(Err(ConsumerError::MissingPayload(format!("Missing payload for message {:?}", message)))))),
             None => Ok(Async::Ready(None))
         }
     }
@@ -143,7 +141,7 @@ pub struct ConsumerBuilder<Topic, Subscription, SubscriptionType, DataType> {
     consumer_name: Option<String>,
     authentication: Option<Authentication>,
     executor: TaskExecutor,
-    deserialize: Option<Box<dyn Fn(Payload) -> Result<DataType, Error> + Send>>,
+    deserialize: Option<Box<dyn Fn(Payload) -> Result<DataType, ConsumerError> + Send>>,
     batch_size: Option<u32>,
 }
 
@@ -217,7 +215,7 @@ impl<Topic, Subscription, DataType> ConsumerBuilder<Topic, Subscription, Unset, 
 
 impl<Topic, Subscription, SubscriptionType> ConsumerBuilder<Topic, Subscription, SubscriptionType, Unset> {
     pub fn with_deserializer<T, F>(self, deserializer: F) -> ConsumerBuilder<Topic, Subscription, SubscriptionType, T>
-        where F: Fn(Payload) -> Result<T, Error> + Send + 'static
+        where F: Fn(Payload) -> Result<T, ConsumerError> + Send + 'static
     {
         ConsumerBuilder {
             deserialize: Some(Box::new(deserializer)),
@@ -300,7 +298,7 @@ impl<Topic, Subscription, SubscriptionType, DataType> ConsumerBuilder<Topic, Sub
 }
 
 impl ConsumerBuilder<Set<String>, Set<String>, Set<SubType>, Unset> {
-    pub fn build<T: DeserializeOwned>(self) -> impl Future<Item=Consumer<T>, Error=Error> {
+    pub fn build<T: DeserializeOwned>(self) -> impl Future<Item=Consumer<T>, Error=ConsumerError> {
         let deserialize = Box::new(|payload: Payload| {
             serde_json::from_slice(&payload.data).map_err(|e| e.into())
         });
@@ -321,7 +319,7 @@ impl ConsumerBuilder<Set<String>, Set<String>, Set<SubType>, Unset> {
 }
 
 impl<T: DeserializeOwned> ConsumerBuilder<Set<String>, Set<String>, Set<SubType>, T> {
-    pub fn build(self) -> impl Future<Item=Consumer<T>, Error=Error> {
+    pub fn build(self) -> impl Future<Item=Consumer<T>, Error=ConsumerError> {
         let ConsumerBuilder {
             addr,
             topic: Set(topic),

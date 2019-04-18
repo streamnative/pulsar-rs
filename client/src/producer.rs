@@ -1,5 +1,5 @@
 use connection::{Connection, SerialId, Authentication};
-use error::Error;
+use error::{Error, ProducerError};
 use futures::{Future, future::{self, Either}};
 use rand;
 use serde::Serialize;
@@ -17,10 +17,11 @@ pub struct Producer {
 }
 
 impl Producer {
-    pub fn new<S1, S2>(addr: S1, name: S2, auth: Option<Authentication>, executor: TaskExecutor) -> impl Future<Item=Producer, Error=Error>
+    pub fn new<S1, S2>(addr: S1, name: S2, auth: Option<Authentication>, executor: TaskExecutor) -> impl Future<Item=Producer, Error=ProducerError>
         where S1: Into<String>, S2: Into<String>
     {
         Connection::new(addr.into(), auth, executor)
+            .map_err(|e| e.into())
             .map(move |conn| Producer::from_connection(conn, name.into()))
     }
 
@@ -42,15 +43,15 @@ impl Producer {
             .map(|_| ())
     }
 
-    pub fn send_json<S: Into<String>, T: Serialize>(&mut self, topic: S, msg: &T) -> impl Future<Item=proto::CommandSendReceipt, Error=Error> {
+    pub fn send_json<S: Into<String>, T: Serialize>(&mut self, topic: S, msg: &T) -> impl Future<Item=proto::CommandSendReceipt, Error=ProducerError> {
         let data = match serde_json::to_vec(msg) {
             Ok(data) => data,
-            Err(e) => return Either::A(future::failed(e.into()))
+            Err(e) => return Either::A(future::failed(e.into())),
         };
         Either::B(self.send_raw(topic, data))
     }
 
-    pub fn send_raw<S: Into<String>>(&mut self, topic: S, data: Vec<u8>) -> impl Future<Item=proto::CommandSendReceipt, Error=Error> {
+    pub fn send_raw<S: Into<String>>(&mut self, topic: S, data: Vec<u8>) -> impl Future<Item=proto::CommandSendReceipt, Error=ProducerError> {
         let topic = topic.into();
         let producer_name = self.name.clone();
 
@@ -80,7 +81,7 @@ impl Producer {
                 None,
                 data
             )
-        })
+        }).map_err(|e| e.into())
     }
 
     pub fn addr(&self) -> &str {

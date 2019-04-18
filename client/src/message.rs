@@ -95,6 +95,7 @@ impl Encoder for Codec {
             dst.reserve(buf.len());
         }
         dst.put_slice(&buf);
+        trace!("Encoder sending {} bytes", buf.len());
 //        println!("Wrote message {:?}", item);
         Ok(())
     }
@@ -105,6 +106,7 @@ impl Decoder for Codec {
     type Error = Error;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Message>, Error> {
+        trace!("Decoder received {} bytes", src.len());
         if src.len() >= 4 {
             let mut buf = Cursor::new(src);
             // `messageSize` refers only to _remaining_ message size, so we add 4 to get total frame size

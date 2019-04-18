@@ -5,6 +5,7 @@ use futures::{self, Async, Future, Stream, Sink, IntoFuture, future::{self, Eith
 use message::{proto::{self, command_subscribe::SubType}, Codec, Message};
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::fmt::Debug;
 use std::str::FromStr;
 use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 use tokio::runtime::TaskExecutor;
@@ -16,7 +17,7 @@ pub enum Register {
     Consumer { consumer_id: u64, resolver: mpsc::UnboundedSender<Message> },
 }
 
-#[derive(Debug, PartialEq, Ord, PartialOrd, Eq)]
+#[derive(Debug, Clone, PartialEq, Ord, PartialOrd, Eq)]
 pub enum RequestKey {
     RequestId(u64),
     ProducerSend { producer_id: u64, sequence_id: u64 },
@@ -66,7 +67,7 @@ impl<S: Stream<Item=Message, Error=Error>> Future for Receiver<S> {
 
     fn poll(&mut self) -> Result<Async<()>, ()> {
         match self.shutdown.poll() {
-            Ok(Async::Ready(())) | Err(_) => return Err(()),
+            Ok(Async::Ready(())) | Err(futures::Canceled) => return Err(()),
             Ok(Async::NotReady) => {}
         }
 
@@ -305,14 +306,19 @@ impl ConnectionSender {
         self.send_message(msg, RequestKey::RequestId(request_id), |resp| resp.command.success)
     }
 
-    fn send_message<R, F>(&self, msg: Message, key: RequestKey, extract: F) -> impl Future<Item=R, Error=Error>
+    fn send_message<R: Debug, F>(&self, msg: Message, key: RequestKey, extract: F) -> impl Future<Item=R, Error=Error>
         where F: FnOnce(Message) -> Option<R>
     {
         let (resolver, response) = oneshot::channel();
+        trace!("sending message(key = {:?}): {:?}", key, msg);
 
+        let k = key.clone();
         let response = response
             .map_err(|oneshot::Canceled| Error::Disconnected)
-            .and_then(|message: Message| extract_message(message, extract));
+            .and_then(move |message: Message| {
+              trace!("received message(key = {:?}): {:?}", k, message);
+              extract_message(message, extract)
+            });
 
         match (self.registrations.unbounded_send(Register::Request { key, resolver, }), self.tx.unbounded_send(msg)) {
             (Ok(_), Ok(_)) => Either::A(response),
@@ -338,13 +344,18 @@ impl Connection {
                     .map_err(|e| e.into())
                     .map(|stream| tokio_codec::Framed::new(stream, Codec))
                     .and_then(|stream|
-                        stream.send(messages::connect(auth_data))
+                        stream.send({
+                          let msg =  messages::connect(auth_data);
+                          trace!("connection message: {:?}", msg);
+                          msg
+                        })
                             .and_then(|stream| stream.into_future().map_err(|(err, _)| err))
                             .and_then(move |(msg, stream)| match msg {
                                 Some(Message { command: proto::BaseCommand { error: Some(error), .. }, .. }) =>
                                     Err(Error::PulsarError(format!("{:?}", error))),
                                 Some(msg) => {
                                     let cmd = msg.command.clone();
+                                    trace!("received connection response: {:?}", msg);
                                     msg.command.connected
                                         .ok_or_else(|| Error::PulsarError(format!("Unexpected message from pulsar: {:?}", cmd)))
                                         .map(|_msg| stream)
@@ -417,7 +428,7 @@ impl Drop for Connection {
     }
 }
 
-fn extract_message<T, F>(message: Message, extract: F) -> Result<T, Error>
+fn extract_message<T: Debug, F>(message: Message, extract: F) -> Result<T, Error>
     where F: FnOnce(Message) -> Option<T>
 {
     if message.command.error.is_some() {
@@ -427,6 +438,7 @@ fn extract_message<T, F>(message: Message, extract: F) -> Result<T, Error>
     } else {
         let cmd = message.command.clone();
         if let Some(extracted) = extract(message) {
+            trace!("extracted message: {:?}", extracted);
             Ok(extracted)
         } else {
             Err(Error::UnexpectedResponse(format!("{:?}", cmd)))
