@@ -67,7 +67,7 @@ impl<S: Stream<Item=Message, Error=Error>> Future for Receiver<S> {
 
     fn poll(&mut self) -> Result<Async<()>, ()> {
         match self.shutdown.poll() {
-            Ok(Async::Ready(())) | Err(_) => return Err(()),
+            Ok(Async::Ready(())) | Err(futures::Canceled) => return Err(()),
             Ok(Async::NotReady) => {}
         }
 

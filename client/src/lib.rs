@@ -8,7 +8,6 @@ extern crate serde;
 extern crate serde_json;
 extern crate tokio;
 extern crate tokio_codec;
-#[macro_use] extern crate failure;
 #[macro_use] extern crate futures;
 #[macro_use] extern crate nom;
 #[macro_use] extern crate prost_derive;
@@ -22,7 +21,7 @@ mod producer;
 mod error;
 mod connection;
 
-pub use error::Error;
+pub use error::{Error, ConsumerError, ProducerError};
 pub use connection::{Connection, Authentication};
 pub use producer::Producer;
 pub use consumer::{Consumer, ConsumerBuilder, Ack};
@@ -70,14 +69,14 @@ mod tests {
         produce.wait().unwrap();
 
         let mut consumed = 0;
-        let _ = consumer.for_each(move |data: Result<(TestData, Ack), Error>| {
+        let _ = consumer.for_each(move |data: Result<(TestData, Ack), ConsumerError>| {
             consumed += 1;
             match data {
                 Ok((_msg, ack)) => {
                     ack.ack();
                     if consumed >= 5000 {
                         println!("Finished consuming");
-                        Err(Error::Disconnected)
+                        Err(ConsumerError::Connection(Error::Disconnected))
                     } else {
                         Ok(())
                     }
