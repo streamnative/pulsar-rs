@@ -254,6 +254,13 @@ impl ConnectionSender {
         self.send_message(msg, RequestKey::RequestId(request_id), |resp| resp.command.lookup_topic_response)
     }
 
+    pub fn lookup_partitioned_topic<S: Into<String>>(&self, topic: S) -> impl Future<Item=proto::CommandPartitionedTopicMetadataResponse, Error=Error> {
+        let request_id = self.request_id.get();
+        let msg = messages::lookup_partitioned_topic(topic.into(), request_id);
+        self.send_message(msg, RequestKey::RequestId(request_id), |resp| resp.command.partition_metadata_response)
+    }
+
+
     pub fn create_producer(&self,
                            topic: String,
                            producer_id: u64,
@@ -546,6 +553,21 @@ pub(crate) mod messages {
             command: proto::BaseCommand {
                 type_: CommandType::Lookup as i32,
                 lookup_topic: Some(proto::CommandLookupTopic {
+                    topic,
+                    request_id,
+                    .. Default::default()
+                }),
+                .. Default::default()
+            },
+            payload: None,
+        }
+    }
+
+    pub fn lookup_partitioned_topic(topic: String, request_id: u64) -> Message {
+        Message {
+            command: proto::BaseCommand {
+                type_: CommandType::PartitionedMetadata as i32,
+                partition_metadata: Some(proto::CommandPartitionedTopicMetadata {
                     topic,
                     request_id,
                     .. Default::default()
