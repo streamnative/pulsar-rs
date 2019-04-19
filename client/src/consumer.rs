@@ -240,87 +240,32 @@ impl<Topic, Subscription, SubscriptionType> ConsumerBuilder<Topic, Subscription,
 }
 
 impl<Topic, Subscription, SubscriptionType, DataType> ConsumerBuilder<Topic, Subscription, SubscriptionType, DataType> {
-    pub fn with_consumer_id(self, consumer_id: u64) -> ConsumerBuilder<Topic, Subscription, SubscriptionType, DataType> {
-        ConsumerBuilder {
-            consumer_id: Some(consumer_id),
-            topic: self.topic,
-            addr: self.addr,
-            subscription: self.subscription,
-            subscription_type: self.subscription_type,
-            consumer_name: self.consumer_name,
-            authentication: self.authentication,
-            proxy_to_broker_url: self.proxy_to_broker_url,
-            executor: self.executor,
-            deserialize: self.deserialize,
-            batch_size: self.batch_size,
-        }
+    pub fn with_consumer_id(mut self, consumer_id: u64) -> ConsumerBuilder<Topic, Subscription, SubscriptionType, DataType> {
+        self.consumer_id = Some(consumer_id);
+        self
     }
 
-    pub fn with_consumer_name<S: Into<String>>(self, consumer_name: S) -> ConsumerBuilder<Topic, Subscription, SubscriptionType, DataType> {
-        ConsumerBuilder {
-            consumer_name: Some(consumer_name.into()),
-            topic: self.topic,
-            addr: self.addr,
-            subscription: self.subscription,
-            subscription_type: self.subscription_type,
-            consumer_id: self.consumer_id,
-            authentication: self.authentication,
-            proxy_to_broker_url: self.proxy_to_broker_url,
-            executor: self.executor,
-            deserialize: self.deserialize,
-            batch_size: self.batch_size,
-        }
+    pub fn with_consumer_name<S: Into<String>>(mut self, consumer_name: S) -> ConsumerBuilder<Topic, Subscription, SubscriptionType, DataType> {
+        self.consumer_name = Some(consumer_name.into());
+        self
     }
 
-    pub fn with_batch_size(self, batch_size: u32) -> ConsumerBuilder<Topic, Subscription, SubscriptionType, DataType> {
-        ConsumerBuilder {
-            batch_size: Some(batch_size),
-            topic: self.topic,
-            addr: self.addr,
-            subscription: self.subscription,
-            subscription_type: self.subscription_type,
-            consumer_name: self.consumer_name,
-            consumer_id: self.consumer_id,
-            authentication: self.authentication,
-            proxy_to_broker_url: self.proxy_to_broker_url,
-            executor: self.executor,
-            deserialize: self.deserialize,
-        }
+    pub fn with_batch_size(mut self, batch_size: u32) -> ConsumerBuilder<Topic, Subscription, SubscriptionType, DataType> {
+        self.batch_size = Some(batch_size);
+        self
     }
 
-    pub fn authenticate(self, method: String, data: Vec<u8>) -> ConsumerBuilder<Topic, Subscription, SubscriptionType, DataType> {
-        ConsumerBuilder {
-            batch_size: self.batch_size,
-            topic: self.topic,
-            addr: self.addr,
-            subscription: self.subscription,
-            subscription_type: self.subscription_type,
-            consumer_name: self.consumer_name,
-            consumer_id: self.consumer_id,
-            authentication: Some(Authentication {
-              name: method,
-              data
-            }),
-            proxy_to_broker_url: self.proxy_to_broker_url,
-            executor: self.executor,
-            deserialize: self.deserialize,
-        }
+    pub fn authenticate(mut self, method: String, data: Vec<u8>) -> ConsumerBuilder<Topic, Subscription, SubscriptionType, DataType> {
+        self.authentication = Some(Authentication {
+          name: method,
+          data
+        });
+        self
     }
 
-    pub fn with_proxy_to_broker_url(self, url: String) -> ConsumerBuilder<Topic, Subscription, SubscriptionType, DataType> {
-        ConsumerBuilder {
-            batch_size: self.batch_size,
-            topic: self.topic,
-            addr: self.addr,
-            subscription: self.subscription,
-            subscription_type: self.subscription_type,
-            consumer_name: self.consumer_name,
-            consumer_id: self.consumer_id,
-            authentication: self.authentication,
-            proxy_to_broker_url: Some(url),
-            executor: self.executor,
-            deserialize: self.deserialize,
-        }
+    pub fn with_proxy_to_broker_url<S: Into<String>>(mut self, url: S) -> ConsumerBuilder<Topic, Subscription, SubscriptionType, DataType> {
+        self.proxy_to_broker_url = Some(url.into());
+        self
     }
 }
 
