@@ -56,6 +56,39 @@ impl<T: DeserializeOwned> Consumer<T> {
                 }
             })
     }
+
+    pub fn from_connection(
+        conn: Arc<Connection>,
+        topic: String,
+        subscription: String,
+        sub_type: SubType,
+        consumer_id: Option<u64>,
+        consumer_name: Option<String>,
+        deserialize: Box<dyn Fn(Payload) -> Result<T, ConsumerError> + Send>,
+        batch_size: Option<u32>,
+    ) -> impl Future<Item=Consumer<T>, Error=ConsumerError> {
+        let consumer_id = consumer_id.unwrap_or_else(rand::random);
+        let (resolver, messages) = mpsc::unbounded();
+        let batch_size = batch_size.unwrap_or(1000);
+
+        conn.sender().subscribe(resolver, topic, subscription, sub_type, consumer_id, consumer_name)
+          .map(move |resp| (resp, conn))
+          .and_then(move |(_, conn)| {
+            conn.sender().send_flow(consumer_id, batch_size)
+              .map(move |()| conn)
+          })
+        .map_err(|e| e.into())
+          .map(move |connection| {
+            Consumer {
+              connection,
+              id: consumer_id,
+              messages,
+              deserialize,
+              batch_size,
+              remaining_messages: batch_size
+            }
+          })
+    }
 }
 
 pub struct Ack {
