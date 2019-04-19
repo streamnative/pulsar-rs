@@ -343,7 +343,8 @@ pub struct Connection {
 }
 
 impl Connection {
-    pub fn new(addr: String, auth_data: Option<Authentication>, executor: TaskExecutor) -> impl Future<Item=Connection, Error=Error> {
+    pub fn new(addr: String, auth_data: Option<Authentication>, proxy_to_broker_url: Option<String>,
+      executor: TaskExecutor) -> impl Future<Item=Connection, Error=Error> {
         SocketAddr::from_str(&addr).into_future()
             .map_err(|e| Error::SocketAddr(e.to_string()))
             .and_then(|addr| {
@@ -352,7 +353,7 @@ impl Connection {
                     .map(|stream| tokio_codec::Framed::new(stream, Codec))
                     .and_then(|stream|
                         stream.send({
-                          let msg =  messages::connect(auth_data);
+                          let msg =  messages::connect(auth_data, proxy_to_broker_url);
                           trace!("connection message: {:?}", msg);
                           msg
                         })
@@ -458,7 +459,7 @@ pub(crate) mod messages {
     use chrono::Utc;
     use connection::Authentication;
 
-    pub fn connect(auth: Option<Authentication>) -> Message {
+    pub fn connect(auth: Option<Authentication>, proxy_to_broker_url: Option<String>) -> Message {
         let (auth_method_name, auth_data) = match auth {
           Some(auth) => (Some(auth.name), Some(auth.data)),
           None => (None, None),
@@ -470,6 +471,7 @@ pub(crate) mod messages {
                 connect: Some(proto::CommandConnect {
                     auth_method_name,
                     auth_data,
+                    proxy_to_broker_url,
                     client_version: String::from("2.0.1-incubating"),
                     protocol_version: Some(12),
                     .. Default::default()
