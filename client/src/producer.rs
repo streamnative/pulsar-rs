@@ -17,10 +17,11 @@ pub struct Producer {
 }
 
 impl Producer {
-    pub fn new<S1, S2>(addr: S1, name: S2, auth: Option<Authentication>, executor: TaskExecutor) -> impl Future<Item=Producer, Error=ProducerError>
+    pub fn new<S1, S2>(addr: S1, name: S2, auth: Option<Authentication>, proxy_to_broker_url: Option<String>,
+      executor: TaskExecutor) -> impl Future<Item=Producer, Error=ProducerError>
         where S1: Into<String>, S2: Into<String>
     {
-        Connection::new(addr.into(), auth, executor)
+        Connection::new(addr.into(), auth, proxy_to_broker_url, executor)
             .map_err(|e| e.into())
             .map(move |conn| Producer::from_connection(conn, name.into()))
     }

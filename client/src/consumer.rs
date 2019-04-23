@@ -27,6 +27,7 @@ impl<T: DeserializeOwned> Consumer<T> {
         consumer_id: Option<u64>,
         consumer_name: Option<String>,
         auth_data: Option<Authentication>,
+        proxy_to_broker_url: Option<String>,
         executor: TaskExecutor,
         deserialize: Box<dyn Fn(Payload) -> Result<T, ConsumerError> + Send>,
         batch_size: Option<u32>,
@@ -35,7 +36,7 @@ impl<T: DeserializeOwned> Consumer<T> {
         let (resolver, messages) = mpsc::unbounded();
         let batch_size = batch_size.unwrap_or(1000);
 
-        Connection::new(addr, auth_data, executor.clone())
+        Connection::new(addr, auth_data, proxy_to_broker_url, executor.clone())
             .and_then(move |conn|
                 conn.sender().subscribe(resolver, topic, subscription, sub_type, consumer_id, consumer_name)
                     .map(move |resp| (resp, conn)))
@@ -140,6 +141,7 @@ pub struct ConsumerBuilder<Topic, Subscription, SubscriptionType, DataType> {
     consumer_id: Option<u64>,
     consumer_name: Option<String>,
     authentication: Option<Authentication>,
+    proxy_to_broker_url: Option<String>,
     executor: TaskExecutor,
     deserialize: Option<Box<dyn Fn(Payload) -> Result<DataType, ConsumerError> + Send>>,
     batch_size: Option<u32>,
@@ -155,6 +157,7 @@ impl ConsumerBuilder<Unset, Unset, Unset, Unset> {
             consumer_id: None,
             consumer_name: None,
             authentication: None,
+            proxy_to_broker_url: None,
             executor,
             deserialize: None,
             batch_size: None,
@@ -172,6 +175,7 @@ impl<Subscription, SubscriptionType, DataType> ConsumerBuilder<Unset, Subscripti
             consumer_id: self.consumer_id,
             consumer_name: self.consumer_name,
             authentication: self.authentication,
+            proxy_to_broker_url: self.proxy_to_broker_url,
             executor: self.executor,
             deserialize: self.deserialize,
             batch_size: self.batch_size,
@@ -189,6 +193,7 @@ impl<Topic, SubscriptionType, DataType> ConsumerBuilder<Topic, Unset, Subscripti
             consumer_id: self.consumer_id,
             consumer_name: self.consumer_name,
             authentication: self.authentication,
+            proxy_to_broker_url: self.proxy_to_broker_url,
             executor: self.executor,
             deserialize: self.deserialize,
             batch_size: self.batch_size,
@@ -206,6 +211,7 @@ impl<Topic, Subscription, DataType> ConsumerBuilder<Topic, Subscription, Unset, 
             consumer_id: self.consumer_id,
             consumer_name: self.consumer_name,
             authentication: self.authentication,
+            proxy_to_broker_url: self.proxy_to_broker_url,
             executor: self.executor,
             deserialize: self.deserialize,
             batch_size: self.batch_size,
@@ -226,6 +232,7 @@ impl<Topic, Subscription, SubscriptionType> ConsumerBuilder<Topic, Subscription,
             consumer_name: self.consumer_name,
             consumer_id: self.consumer_id,
             authentication: self.authentication,
+            proxy_to_broker_url: self.proxy_to_broker_url,
             executor: self.executor,
             batch_size: self.batch_size,
         }
@@ -233,67 +240,32 @@ impl<Topic, Subscription, SubscriptionType> ConsumerBuilder<Topic, Subscription,
 }
 
 impl<Topic, Subscription, SubscriptionType, DataType> ConsumerBuilder<Topic, Subscription, SubscriptionType, DataType> {
-    pub fn with_consumer_id(self, consumer_id: u64) -> ConsumerBuilder<Topic, Subscription, SubscriptionType, DataType> {
-        ConsumerBuilder {
-            consumer_id: Some(consumer_id),
-            topic: self.topic,
-            addr: self.addr,
-            subscription: self.subscription,
-            subscription_type: self.subscription_type,
-            consumer_name: self.consumer_name,
-            authentication: self.authentication,
-            executor: self.executor,
-            deserialize: self.deserialize,
-            batch_size: self.batch_size,
-        }
+    pub fn with_consumer_id(mut self, consumer_id: u64) -> ConsumerBuilder<Topic, Subscription, SubscriptionType, DataType> {
+        self.consumer_id = Some(consumer_id);
+        self
     }
 
-    pub fn with_consumer_name<S: Into<String>>(self, consumer_name: S) -> ConsumerBuilder<Topic, Subscription, SubscriptionType, DataType> {
-        ConsumerBuilder {
-            consumer_name: Some(consumer_name.into()),
-            topic: self.topic,
-            addr: self.addr,
-            subscription: self.subscription,
-            subscription_type: self.subscription_type,
-            consumer_id: self.consumer_id,
-            authentication: self.authentication,
-            executor: self.executor,
-            deserialize: self.deserialize,
-            batch_size: self.batch_size,
-        }
+    pub fn with_consumer_name<S: Into<String>>(mut self, consumer_name: S) -> ConsumerBuilder<Topic, Subscription, SubscriptionType, DataType> {
+        self.consumer_name = Some(consumer_name.into());
+        self
     }
 
-    pub fn with_batch_size(self, batch_size: u32) -> ConsumerBuilder<Topic, Subscription, SubscriptionType, DataType> {
-        ConsumerBuilder {
-            batch_size: Some(batch_size),
-            topic: self.topic,
-            addr: self.addr,
-            subscription: self.subscription,
-            subscription_type: self.subscription_type,
-            consumer_name: self.consumer_name,
-            consumer_id: self.consumer_id,
-            authentication: self.authentication,
-            executor: self.executor,
-            deserialize: self.deserialize,
-        }
+    pub fn with_batch_size(mut self, batch_size: u32) -> ConsumerBuilder<Topic, Subscription, SubscriptionType, DataType> {
+        self.batch_size = Some(batch_size);
+        self
     }
 
-    pub fn authenticate(self, method: String, data: Vec<u8>) -> ConsumerBuilder<Topic, Subscription, SubscriptionType, DataType> {
-        ConsumerBuilder {
-            batch_size: self.batch_size,
-            topic: self.topic,
-            addr: self.addr,
-            subscription: self.subscription,
-            subscription_type: self.subscription_type,
-            consumer_name: self.consumer_name,
-            consumer_id: self.consumer_id,
-            authentication: Some(Authentication {
-              name: method,
-              data
-            }),
-            executor: self.executor,
-            deserialize: self.deserialize,
-        }
+    pub fn authenticate(mut self, method: String, data: Vec<u8>) -> ConsumerBuilder<Topic, Subscription, SubscriptionType, DataType> {
+        self.authentication = Some(Authentication {
+          name: method,
+          data
+        });
+        self
+    }
+
+    pub fn with_proxy_to_broker_url<S: Into<String>>(mut self, url: S) -> ConsumerBuilder<Topic, Subscription, SubscriptionType, DataType> {
+        self.proxy_to_broker_url = Some(url.into());
+        self
     }
 }
 
@@ -310,11 +282,12 @@ impl ConsumerBuilder<Set<String>, Set<String>, Set<SubType>, Unset> {
             consumer_id,
             consumer_name,
             authentication,
+            proxy_to_broker_url,
             executor,
             batch_size,
             ..
         } = self;
-        Consumer::new(addr, topic, subscription, sub_type, consumer_id, consumer_name, authentication, executor, deserialize, batch_size)
+        Consumer::new(addr, topic, subscription, sub_type, consumer_id, consumer_name, authentication, proxy_to_broker_url, executor, deserialize, batch_size)
     }
 }
 
@@ -328,11 +301,12 @@ impl<T: DeserializeOwned> ConsumerBuilder<Set<String>, Set<String>, Set<SubType>
             consumer_id,
             consumer_name,
             authentication,
+            proxy_to_broker_url,
             executor,
             deserialize,
             batch_size,
         } = self;
         let deserialize = deserialize.unwrap();
-        Consumer::new(addr, topic, subscription, sub_type, consumer_id, consumer_name, authentication, executor, deserialize, batch_size)
+        Consumer::new(addr, topic, subscription, sub_type, consumer_id, consumer_name, authentication, proxy_to_broker_url, executor, deserialize, batch_size)
     }
 }
