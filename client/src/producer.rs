@@ -6,11 +6,12 @@ use rand;
 use serde::Serialize;
 use serde_json;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use tokio::runtime::TaskExecutor;
 
 
 pub struct Producer {
-    connection: Connection,
+    connection: Arc<Connection>,
     addr: String,
     topics: BTreeMap<String, (u64, SerialId)>,
     name: String,
@@ -29,7 +30,7 @@ impl Producer {
     pub fn from_connection(connection: Connection, name: String) -> Producer {
         Producer {
             addr: connection.addr().to_string(),
-            connection,
+            connection: Arc::new(connection),
             topics: BTreeMap::new(),
             name,
         }
