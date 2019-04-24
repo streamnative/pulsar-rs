@@ -1,4 +1,5 @@
 use crate::connection::RequestKey;
+use crate::error::ConnectionError;
 use bytes::{Buf, BufMut, IntoBuf, BytesMut};
 use crc::crc32;
 use nom::{be_u16, be_u32};
@@ -6,7 +7,6 @@ use prost::{self, Message as ImplProtobuf};
 use std::io::Cursor;
 use tokio_codec::{Encoder, Decoder};
 
-use super::Error;
 
 pub use self::proto::BaseCommand;
 pub use self::proto::MessageMetadata as Metadata;
@@ -58,9 +58,9 @@ pub struct Codec;
 
 impl Encoder for Codec {
     type Item = Message;
-    type Error = Error;
+    type Error = ConnectionError;
 
-    fn encode(&mut self, item: Message, dst: &mut BytesMut) -> Result<(), Error> {
+    fn encode(&mut self, item: Message, dst: &mut BytesMut) -> Result<(), ConnectionError> {
 
         let command_size = item.command.encoded_len();
         let metadata_size = item.payload.as_ref().map(|p| p.metadata.encoded_len()).unwrap_or(0);
@@ -103,9 +103,9 @@ impl Encoder for Codec {
 
 impl Decoder for Codec {
     type Item = Message;
-    type Error = Error;
+    type Error = ConnectionError;
 
-    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Message>, Error> {
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Message>, ConnectionError> {
         trace!("Decoder received {} bytes", src.len());
         if src.len() >= 4 {
             let mut buf = Cursor::new(src);
@@ -115,13 +115,13 @@ impl Decoder for Codec {
             if src.len() >= message_size {
                 let msg = {
                     let (buf, command_frame) = command_frame(&src[..message_size])
-                        .map_err(|err| Error::Decoding(format!("Error decoding command frame: {}", err)))?;
+                        .map_err(|err| ConnectionError::Decoding(format!("Error decoding command frame: {}", err)))?;
                     let command = BaseCommand::decode(command_frame.command)?;
 
                     let payload =
                         if buf.len() > 0 {
                             let (buf, payload_frame) = payload_frame(buf)
-                                .map_err(|err| Error::Decoding(format!("Error decoding payload frame: {}", err)))?;
+                                .map_err(|err| ConnectionError::Decoding(format!("Error decoding payload frame: {}", err)))?;
 
                             // TODO: Check crc32 of payload data
 
@@ -985,15 +985,15 @@ pub mod proto {
     }
 }
 
-impl From<prost::EncodeError> for Error {
+impl From<prost::EncodeError> for ConnectionError {
     fn from(e: prost::EncodeError) -> Self {
-        Error::Encoding(e.to_string())
+        ConnectionError::Encoding(e.to_string())
     }
 }
 
-impl From<prost::DecodeError> for Error {
+impl From<prost::DecodeError> for ConnectionError {
     fn from(e: prost::DecodeError) -> Self {
-        Error::Decoding(e.to_string())
+        ConnectionError::Decoding(e.to_string())
     }
 }
 
