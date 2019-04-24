@@ -1,5 +1,5 @@
 use crate::connection::{Connection, Authentication};
-use crate::error::{Error, ConsumerError};
+use crate::error::{ConnectionError, ConsumerError};
 use crate::message::{Message, Payload, proto::{self, command_subscribe::SubType}};
 use futures::Future;
 use futures::{Stream, sync::mpsc, Async};
@@ -100,7 +100,7 @@ impl<T> Stream for Consumer<T> {
             self.remaining_messages = self.batch_size;
         }
 
-        let message: Option<Option<(proto::CommandMessage, Payload)>> = try_ready!(self.messages.poll().map_err(|_| Error::Disconnected))
+        let message: Option<Option<(proto::CommandMessage, Payload)>> = try_ready!(self.messages.poll().map_err(|_| ConnectionError::Disconnected))
             .map(| Message { command, payload }: Message|
                 command.message
                     .and_then(move |msg| payload

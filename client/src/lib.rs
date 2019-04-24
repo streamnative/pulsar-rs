@@ -11,7 +11,7 @@ mod producer;
 mod error;
 mod connection;
 
-pub use error::{Error, ConsumerError, ProducerError};
+pub use error::{Error, ConnectionError, ConsumerError, ProducerError};
 pub use connection::{Connection, Authentication};
 pub use producer::Producer;
 pub use consumer::{Consumer, ConsumerBuilder, Ack};
@@ -66,7 +66,7 @@ mod tests {
                     ack.ack();
                     if consumed >= 5000 {
                         println!("Finished consuming");
-                        Err(ConsumerError::Connection(Error::Disconnected))
+                        Err(ConsumerError::Connection(ConnectionError::Disconnected))
                     } else {
                         Ok(())
                     }

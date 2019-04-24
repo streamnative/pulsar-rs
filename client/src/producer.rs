@@ -1,5 +1,5 @@
 use crate::connection::{Connection, SerialId, Authentication};
-use crate::error::{Error, ProducerError};
+use crate::error::{ConnectionError, ProducerError};
 use crate::message::proto;
 use futures::{Future, future::{self, Either}};
 use rand;
@@ -39,7 +39,7 @@ impl Producer {
         self.connection.is_valid()
     }
 
-    pub fn check_connection(&self) -> impl Future<Item=(), Error=Error> {
+    pub fn check_connection(&self) -> impl Future<Item=(), Error=ConnectionError> {
         self.connection.sender().lookup_topic("test")
             .map(|_| ())
     }
@@ -89,7 +89,7 @@ impl Producer {
         &self.addr
     }
 
-    pub fn error(&mut self) -> Option<Error> {
+    pub fn error(&mut self) -> Option<ConnectionError> {
         self.connection.error()
     }
 }

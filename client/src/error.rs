@@ -4,6 +4,51 @@ use serde_json;
 
 #[derive(Debug)]
 pub enum Error {
+  Connection(ConnectionError),
+  Consumer(ConsumerError),
+  Producer(ProducerError),
+}
+
+impl From<ConnectionError> for Error {
+    fn from(err: ConnectionError) -> Self {
+        Error::Connection(err)
+    }
+}
+
+impl From<ConsumerError> for Error {
+    fn from(err: ConsumerError) -> Self {
+        Error::Consumer(err)
+    }
+}
+
+impl From<ProducerError> for Error {
+    fn from(err: ProducerError) -> Self {
+        Error::Producer(err)
+    }
+}
+
+impl fmt::Display for Error {
+  fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    match self {
+      Error::Connection(e) => write!(f, "Connection error: {}", e),
+      Error::Consumer(e) => write!(f, "consumer error: {}", e),
+      Error::Producer(e) => write!(f, "producer error: {}", e),
+    }
+  }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Error::Connection(e) => e.source(),
+            Error::Consumer(e) => e.source(),
+            Error::Producer(e) => e.source(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum ConnectionError {
     Io(io::Error),
     Disconnected,
     PulsarError(String),
@@ -15,32 +60,32 @@ pub enum Error {
     Shutdown,
 }
 
-impl From<io::Error> for Error {
+impl From<io::Error> for ConnectionError {
     fn from(err: io::Error) -> Self {
-        Error::Io(err)
+        ConnectionError::Io(err)
     }
 }
 
-impl fmt::Display for Error {
+impl fmt::Display for ConnectionError {
   fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
     match self {
-      Error::Io(e) => write!(f, "{}", e),
-      Error::Disconnected => write!(f, "Disconnected"),
-      Error::PulsarError(e) => write!(f, "{}", e),
-      Error::Unexpected(e) => write!(f, "{}", e),
-      Error::Decoding(e) => write!(f, "Error decoding message: {}", e),
-      Error::Encoding(e) => write!(f, "Error encoding message: {}", e),
-      Error::SocketAddr(e) => write!(f, "Error obtaning socket address: {}", e),
-      Error::UnexpectedResponse(e) => write!(f, "Unexpected response from pulsar: {}", e),
-      Error::Shutdown => write!(f, "The connection was shut down"),
+      ConnectionError::Io(e) => write!(f, "{}", e),
+      ConnectionError::Disconnected => write!(f, "Disconnected"),
+      ConnectionError::PulsarError(e) => write!(f, "{}", e),
+      ConnectionError::Unexpected(e) => write!(f, "{}", e),
+      ConnectionError::Decoding(e) => write!(f, "Error decoding message: {}", e),
+      ConnectionError::Encoding(e) => write!(f, "Error encoding message: {}", e),
+      ConnectionError::SocketAddr(e) => write!(f, "Error obtaning socket address: {}", e),
+      ConnectionError::UnexpectedResponse(e) => write!(f, "Unexpected response from pulsar: {}", e),
+      ConnectionError::Shutdown => write!(f, "The connection was shut down"),
     }
   }
 }
 
-impl std::error::Error for Error {
+impl std::error::Error for ConnectionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Error::Io(e) => Some(e),
+            ConnectionError::Io(e) => Some(e),
             _ => None,
         }
     }
@@ -48,13 +93,13 @@ impl std::error::Error for Error {
 
 #[derive(Debug)]
 pub enum ConsumerError {
-    Connection(Error),
+    Connection(ConnectionError),
     MissingPayload(String),
     Serde(serde_json::Error),
 }
 
-impl From<Error> for ConsumerError {
-    fn from(err: Error) -> Self {
+impl From<ConnectionError> for ConsumerError {
+    fn from(err: ConnectionError) -> Self {
         ConsumerError::Connection(err)
     }
 }
@@ -88,12 +133,12 @@ impl std::error::Error for ConsumerError {
 
 #[derive(Debug)]
 pub enum ProducerError {
-    Connection(Error),
+    Connection(ConnectionError),
     Serde(serde_json::Error),
 }
 
-impl From<Error> for ProducerError {
-    fn from(err: Error) -> Self {
+impl From<ConnectionError> for ProducerError {
+    fn from(err: ConnectionError) -> Self {
         ProducerError::Connection(err)
     }
 }
@@ -125,7 +170,7 @@ impl std::error::Error for ProducerError {
 #[derive(Clone)]
 pub struct SharedError {
     error_set: Arc<AtomicBool>,
-    error: Arc<Mutex<Option<Error>>>,
+    error: Arc<Mutex<Option<ConnectionError>>>,
 }
 
 impl SharedError {
@@ -140,14 +185,14 @@ impl SharedError {
         self.error_set.load(Ordering::Relaxed)
     }
 
-    pub fn remove(&self) -> Option<Error> {
+    pub fn remove(&self) -> Option<ConnectionError> {
         let mut lock = self.error.lock().unwrap();
         let error = lock.take();
         self.error_set.store(false, Ordering::Release);
         error
     }
 
-    pub fn set(&self, error: Error) {
+    pub fn set(&self, error: ConnectionError) {
         let mut lock = self.error.lock().unwrap();
         *lock = Some(error);
         self.error_set.store(true, Ordering::Release);
