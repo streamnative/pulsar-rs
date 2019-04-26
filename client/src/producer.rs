@@ -24,13 +24,13 @@ impl Producer {
     {
         Connection::new(addr.into(), auth, proxy_to_broker_url, executor)
             .map_err(|e| e.into())
-            .map(move |conn| Producer::from_connection(conn, name.into()))
+            .map(move |conn| Producer::from_connection(Arc::new(conn), name.into()))
     }
 
-    pub fn from_connection(connection: Connection, name: String) -> Producer {
+    pub fn from_connection(connection: Arc<Connection>, name: String) -> Producer {
         Producer {
             addr: connection.addr().to_string(),
-            connection: Arc::new(connection),
+            connection,
             topics: BTreeMap::new(),
             name,
         }
@@ -41,7 +41,7 @@ impl Producer {
     }
 
     pub fn check_connection(&self) -> impl Future<Item=(), Error=ConnectionError> {
-        self.connection.sender().lookup_topic("test")
+        self.connection.sender().lookup_topic("test", false)
             .map(|_| ())
     }
 
@@ -68,7 +68,7 @@ impl Producer {
                 let producer_name = producer_name.clone();
                 let sender = self.connection.sender().clone();
                 Either::B(
-                    self.connection.sender().lookup_topic(topic.clone())
+                    self.connection.sender().lookup_topic(topic.clone(), false)
                         .and_then(move |_| sender.create_producer(topic, producer_id, Some(producer_name)))
                         .map(move |_| (producer_id, sequence_id))
                 )

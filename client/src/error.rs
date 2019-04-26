@@ -7,6 +7,7 @@ pub enum Error {
   Connection(ConnectionError),
   Consumer(ConsumerError),
   Producer(ProducerError),
+  ServiceDiscovery(ServiceDiscoveryError),
 }
 
 impl From<ConnectionError> for Error {
@@ -27,12 +28,19 @@ impl From<ProducerError> for Error {
     }
 }
 
+impl From<ServiceDiscoveryError> for Error {
+    fn from(err: ServiceDiscoveryError) -> Self {
+        Error::ServiceDiscovery(err)
+    }
+}
+
 impl fmt::Display for Error {
   fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
     match self {
       Error::Connection(e) => write!(f, "Connection error: {}", e),
       Error::Consumer(e) => write!(f, "consumer error: {}", e),
       Error::Producer(e) => write!(f, "producer error: {}", e),
+      Error::ServiceDiscovery(e) => write!(f, "service discovery error: {}", e),
     }
   }
 }
@@ -43,6 +51,7 @@ impl std::error::Error for Error {
             Error::Connection(e) => e.source(),
             Error::Consumer(e) => e.source(),
             Error::Producer(e) => e.source(),
+            Error::ServiceDiscovery(e) => e.source(),
         }
     }
 }
@@ -166,6 +175,47 @@ impl std::error::Error for ProducerError {
         }
     }
 }
+
+#[derive(Debug)]
+pub enum ServiceDiscoveryError {
+    Connection(ConnectionError),
+    Query(String),
+    NotFound,
+    DnsLookupError,
+    Canceled,
+    Shutdown,
+    Dummy,
+}
+
+impl From<ConnectionError> for ServiceDiscoveryError {
+    fn from(err: ConnectionError) -> Self {
+        ServiceDiscoveryError::Connection(err)
+    }
+}
+
+impl fmt::Display for ServiceDiscoveryError {
+  fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    match self {
+      ServiceDiscoveryError::Connection(e) => write!(f, "Connection error: {}", e),
+      ServiceDiscoveryError::Query(s) => write!(f, "Query error: {}", s),
+      ServiceDiscoveryError::NotFound => write!(f, "cannot find topic"),
+      ServiceDiscoveryError::DnsLookupError => write!(f, "cannot lookup broker address"),
+      ServiceDiscoveryError::Canceled => write!(f, "canceled request"),
+      ServiceDiscoveryError::Shutdown => write!(f, "service discovery engine not responding"),
+      ServiceDiscoveryError::Dummy => write!(f, "placeholder error"),
+    }
+  }
+}
+
+impl std::error::Error for ServiceDiscoveryError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ServiceDiscoveryError::Connection(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
 
 #[derive(Clone)]
 pub struct SharedError {

@@ -247,9 +247,9 @@ impl ConnectionSender {
             .map_err(|_| ConnectionError::Disconnected)
     }
 
-    pub fn lookup_topic<S: Into<String>>(&self, topic: S) -> impl Future<Item=proto::CommandLookupTopicResponse, Error=ConnectionError> {
+    pub fn lookup_topic<S: Into<String>>(&self, topic: S, authoritative: bool) -> impl Future<Item=proto::CommandLookupTopicResponse, Error=ConnectionError> {
         let request_id = self.request_id.get();
-        let msg = messages::lookup_topic(topic.into(), request_id);
+        let msg = messages::lookup_topic(topic.into(), authoritative, request_id);
         self.send_message(msg, RequestKey::RequestId(request_id), |resp| resp.command.lookup_topic_response)
     }
 
@@ -549,13 +549,14 @@ pub(crate) mod messages {
         }
     }
 
-    pub fn lookup_topic(topic: String, request_id: u64) -> Message {
+    pub fn lookup_topic(topic: String, authoritative: bool, request_id: u64) -> Message {
         Message {
             command: proto::BaseCommand {
                 type_: CommandType::Lookup as i32,
                 lookup_topic: Some(proto::CommandLookupTopic {
                     topic,
                     request_id,
+                    authoritative: Some(authoritative),
                     .. Default::default()
                 }),
                 .. Default::default()
