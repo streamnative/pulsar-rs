@@ -66,6 +66,7 @@ pub enum ConnectionError {
     Encoding(String),
     SocketAddr(String),
     UnexpectedResponse(String),
+    Canceled,
     Shutdown,
 }
 
@@ -86,6 +87,7 @@ impl fmt::Display for ConnectionError {
       ConnectionError::Encoding(e) => write!(f, "Error encoding message: {}", e),
       ConnectionError::SocketAddr(e) => write!(f, "Error obtaning socket address: {}", e),
       ConnectionError::UnexpectedResponse(e) => write!(f, "Unexpected response from pulsar: {}", e),
+      ConnectionError::Canceled => write!(f, "canceled request"),
       ConnectionError::Shutdown => write!(f, "The connection was shut down"),
     }
   }

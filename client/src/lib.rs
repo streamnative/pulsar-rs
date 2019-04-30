@@ -10,10 +10,12 @@ mod consumer;
 mod producer;
 mod error;
 mod connection;
+mod connection_manager;
 mod service_discovery;
 
 pub use error::{Error, ConnectionError, ConsumerError, ProducerError, ServiceDiscoveryError};
 pub use connection::{Connection, Authentication};
+pub use connection_manager::ConnectionManager;
 pub use producer::Producer;
 pub use consumer::{Consumer, ConsumerBuilder, Ack};
 pub use service_discovery::ServiceDiscovery;
