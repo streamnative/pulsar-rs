@@ -12,6 +12,7 @@ mod error;
 mod connection;
 mod connection_manager;
 mod service_discovery;
+mod client;
 
 pub use error::{Error, ConnectionError, ConsumerError, ProducerError, ServiceDiscoveryError};
 pub use connection::{Connection, Authentication};
@@ -19,6 +20,7 @@ pub use connection_manager::ConnectionManager;
 pub use producer::Producer;
 pub use consumer::{Consumer, ConsumerBuilder, Ack};
 pub use service_discovery::ServiceDiscovery;
+pub use client::{Pulsar, DeserializeMessage};
 pub use message::proto;
 pub use message::proto::command_subscribe::SubType;
 

@@ -32,15 +32,15 @@ impl ServiceDiscovery {
     ) -> impl Future<Item = Self, Error = ServiceDiscoveryError> {
         ConnectionManager::new(addr, auth.clone(), executor.clone())
             .map_err(|e| e.into())
-            .and_then(move |conn| ServiceDiscovery::with_manager(Arc::new(conn), executor))
+            .map(move |conn| ServiceDiscovery::with_manager(Arc::new(conn), executor))
     }
 
     pub fn with_manager(
         manager: Arc<ConnectionManager>,
         executor: TaskExecutor,
-    ) -> Result<ServiceDiscovery, ServiceDiscoveryError> {
+    ) -> ServiceDiscovery {
         let tx = engine(manager, executor);
-        Ok(ServiceDiscovery { tx })
+        ServiceDiscovery { tx }
     }
 
     /// get the broker address for a topic
