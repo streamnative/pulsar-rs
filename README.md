@@ -85,7 +85,7 @@ fn main() {
     let pulsar_addr = "...";
     let runtime = Runtime::new().unwrap();
 
-    let consumer = ConsumerBuilder::new(pulsar_addr, runtime.executor())
+    let consumer = ConsumerBuilder::new(pulsar_addr, None, None, runtime.executor())
         .with_topic("some_topic")
         .with_subscription_type(SubType::Exclusive)
         .with_subscription("some_subscription_name")
@@ -95,8 +95,8 @@ fn main() {
         .unwrap();
 
     let consumption_result = consumer
-        .for_each(|msg: Result<(SomeData, Ack), Error>| match msg {
-            Ok((ack, data)) => {
+        .for_each(|(msg, ack): (Result<SomeData, Error>, Ack)| match msg {
+            Ok(data) => {
                 // process data
                 ack.ack();
                 Ok(())
@@ -156,7 +156,7 @@ fn main() {
     let pulsar_addr = "...";
     let runtime = Runtime::new().unwrap();
 
-    let producer = Producer::new(pulsar_addr, "some_producer_name", runtime.executor())
+    let producer = Producer::new(pulsar_addr, "some_producer_name", None, None, runtime.executor())
         .wait()
         .unwrap();
 
@@ -175,7 +175,7 @@ fn main() {
     future::join_all(vec![send_1, send_2, send_3]).wait().unwrap();
 
     let consumption_result = consumer
-        .for_each(|msg| process_data(msg))
+        .for_each(|(msg, ack)| process_data(msg, ack))
         .wait();
 
     runtime.shutdown_now().wait().unwrap();
