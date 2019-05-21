@@ -118,7 +118,7 @@ impl Ack {
 }
 
 impl<T> Stream for Consumer<T> {
-    type Item = Result<(T, Ack), ConsumerError>;
+    type Item = (Result<T, ConsumerError>, Ack);
     type Error = ConsumerError;
 
     fn poll(&mut self) -> Result<Async<Option<Self::Item>>, Self::Error> {
@@ -145,12 +145,14 @@ impl<T> Stream for Consumer<T> {
 
         match message {
             Some(Some((message, payload))) => {
-                Ok(Async::Ready(Some({
-                    let ack = Ack::new(self.id, message.message_id, self.connection.clone());
-                    (&self.deserialize)(payload).map(|data| (data, ack))
-                })))
+                Ok(Async::Ready(Some(
+                    (
+                        (&self.deserialize)(payload),
+                        Ack::new(self.id, message.message_id, self.connection.clone())
+                    )
+                )))
             },
-            Some(None) => Ok(Async::Ready(Some(Err(ConsumerError::MissingPayload(format!("Missing payload for message {:?}", message)))))),
+            Some(None) => Err(ConsumerError::MissingPayload(format!("Missing payload for message {:?}", message))),
             None => Ok(Async::Ready(None))
         }
     }

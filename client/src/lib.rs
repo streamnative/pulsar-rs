@@ -65,22 +65,17 @@ mod tests {
         produce.wait().unwrap();
 
         let mut consumed = 0;
-        let _ = consumer.for_each(move |data: Result<(TestData, Ack), ConsumerError>| {
+        let _ = consumer.for_each(move |(data, ack): (Result<TestData, ConsumerError>, Ack)| {
             consumed += 1;
-            match data {
-                Ok((_msg, ack)) => {
-                    ack.ack();
-                    if consumed >= 5000 {
-                        println!("Finished consuming");
-                        Err(ConsumerError::Connection(ConnectionError::Disconnected))
-                    } else {
-                        Ok(())
-                    }
-                },
-                Err(e) => {
-                    println!("Error: {}", e);
-                    Ok(())
-                }
+            ack.ack();
+            if let Err(e) = data {
+                println!("Error: {}", e);
+            }
+            if consumed >= 5000 {
+                println!("Finished consuming");
+                Err(ConsumerError::Connection(ConnectionError::Disconnected))
+            } else {
+                Ok(())
             }
         }).wait();
 

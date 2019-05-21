@@ -342,8 +342,12 @@ pub struct Connection {
 }
 
 impl Connection {
-    pub fn new(addr: String, auth_data: Option<Authentication>, proxy_to_broker_url: Option<String>,
-      executor: TaskExecutor) -> impl Future<Item=Connection, Error=ConnectionError> {
+    pub fn new(
+        addr: String,
+        auth_data: Option<Authentication>,
+        proxy_to_broker_url: Option<String>,
+        executor: TaskExecutor
+    ) -> impl Future<Item=Connection, Error=ConnectionError> {
         SocketAddr::from_str(&addr).into_future()
             .map_err(|e| ConnectionError::SocketAddr(e.to_string()))
             .and_then(|addr| {

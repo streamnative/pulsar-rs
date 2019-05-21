@@ -1,19 +1,9 @@
-extern crate failure;
-extern crate futures;
-extern crate pulsar;
-extern crate r2d2;
-extern crate tokio;
-
-#[cfg(test)]
-extern crate serde;
-
 #[cfg(test)]
 #[macro_use]
 extern crate serde_derive;
 
-use failure::Fail;
 use futures::Future;
-use pulsar::{Connection, Producer, Error};
+use pulsar::{Connection, Producer};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub struct ConnectionManager {
@@ -23,18 +13,15 @@ pub struct ConnectionManager {
 
 impl r2d2::ManageConnection for ConnectionManager {
     type Connection = Connection;
-    type Error = failure::Compat<Error>;
+    type Error = pulsar::ConnectionError;
 
     fn connect(&self) -> Result<Self::Connection, Self::Error> {
-        let connection = Future::wait(Connection::new(self.addr.clone(), self.executor.clone()))
-            .map_err(|e| e.compat())?;
-        Ok(connection)
+        Future::wait(Connection::new(self.addr.clone(), None, None, self.executor.clone()))
     }
 
     fn is_valid(&self, conn: &mut Self::Connection) -> Result<(), Self::Error> {
-        Future::wait(conn.sender().lookup_topic(String::from("test")))
+        Future::wait(conn.sender().lookup_topic(String::from("test"), false))
             .map(|_| ())
-            .map_err(|e| e.compat())
     }
 
     fn has_broken(&self, conn: &mut Self::Connection) -> bool {
@@ -62,17 +49,16 @@ impl ProducerConnectionManager {
 
 impl r2d2::ManageConnection for ProducerConnectionManager {
     type Connection = Producer;
-    type Error = failure::Compat<Error>;
+    type Error = pulsar::ProducerError;
 
     fn connect(&self) -> Result<Producer, Self::Error> {
         let name = format!("{}_{}", &self.producer_name, self.connection_index.fetch_add(1, Ordering::Relaxed));
-        Producer::new(self.addr.as_str(), name, self.executor.clone())
+        Producer::new(self.addr.as_str(), name, None, None, self.executor.clone())
             .wait()
-            .map_err(|e| e.compat())
     }
 
     fn is_valid(&self, conn: &mut Producer) -> Result<(), Self::Error> {
-        conn.check_connection().wait().map_err(|e| e.compat())
+        conn.check_connection().wait().map_err(|e| pulsar::ProducerError::Connection(e))
     }
 
     fn has_broken(&self, conn: &mut Producer) -> bool {
@@ -86,7 +72,7 @@ mod tests {
     use super::*;
     use r2d2;
     use futures::Stream;
-    use pulsar::{Consumer, ConsumerBuilder, SubType};
+    use pulsar::{Consumer, ConsumerBuilder, SubType, ConsumerError, ConnectionError};
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     struct TestData {
@@ -123,21 +109,22 @@ mod tests {
             .unwrap();
 
         let mut consumed_messages = 0;
-        let consumed = consumer.for_each(move |msg| {
+        let consumed = consumer.for_each(move |(msg, ack)| {
             consumed_messages += 1;
-            let (data, ack) = msg.unwrap();
-            let _ = ack.ack();
-            assert_eq!(data.data.as_str(), "dataz");
+            ack.ack();
+            if let Err(e) = msg {
+                println!("Consumer error: {}", e);
+            }
             if consumed_messages == 2 {
                 //err here to shutdown
-                Err(Error::Unexpected("Done!".to_string()))
+                Err(ConsumerError::Connection(ConnectionError::Unexpected("Done!".to_owned())))
             } else {
                 Ok(())
             }
         }).wait();
 
         match &consumed {
-            Err(Error::Unexpected(msg)) if msg.as_str() == "Done!" => {},
+            Err(ConsumerError::Connection(ConnectionError::Unexpected(msg))) if msg.as_str() == "Done!" => {},
             other => panic!("Unexpected consumer shutdown. Found: {:?}", other)
         }
 
