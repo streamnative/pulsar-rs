@@ -156,7 +156,7 @@ fn main() {
     let pulsar_addr = "...";
     let runtime = Runtime::new().unwrap();
 
-    let producer = Producer::new(pulsar_addr, "some_producer_name", None, None, runtime.executor())
+    let producer = Producer::new(pulsar_addr, None, None, None, runtime.executor())
         .wait()
         .unwrap();
 
