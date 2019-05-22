@@ -4,7 +4,6 @@ extern crate serde_derive;
 
 use futures::Future;
 use pulsar::{Connection, Producer};
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub struct ConnectionManager {
     addr: String,
@@ -31,18 +30,14 @@ impl r2d2::ManageConnection for ConnectionManager {
 
 pub struct ProducerConnectionManager {
     addr: String,
-    producer_name: String,
     executor: tokio::runtime::TaskExecutor,
-    connection_index: AtomicUsize,
 }
 
 impl ProducerConnectionManager {
-    pub fn new<S1: Into<String>, S2: Into<String>>(addr: S1, producer_name: S2, executor: tokio::runtime::TaskExecutor) -> ProducerConnectionManager {
+    pub fn new<S: Into<String>>(addr: S, executor: tokio::runtime::TaskExecutor) -> ProducerConnectionManager {
         ProducerConnectionManager {
             addr: addr.into(),
-            producer_name: producer_name.into(),
             executor,
-            connection_index: AtomicUsize::new(0)
         }
     }
 }
@@ -52,8 +47,7 @@ impl r2d2::ManageConnection for ProducerConnectionManager {
     type Error = pulsar::ProducerError;
 
     fn connect(&self) -> Result<Producer, Self::Error> {
-        let name = format!("{}_{}", &self.producer_name, self.connection_index.fetch_add(1, Ordering::Relaxed));
-        Producer::new(self.addr.as_str(), name, None, None, self.executor.clone())
+        Producer::new(self.addr.as_str(), None, None, None, self.executor.clone())
             .wait()
     }
 
@@ -86,7 +80,6 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let pool = r2d2::Pool::new(ProducerConnectionManager::new(
             addr,
-            "r2d2_test_producer",
             runtime.executor()
         )).unwrap();
 
