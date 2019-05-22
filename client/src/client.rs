@@ -149,14 +149,15 @@ impl Pulsar {
     pub fn create_producer<S: Into<String> + Clone>(
         &self,
         topic: S,
+        name: Option<String>,
     ) -> impl Future<Item = Producer, Error = Error> {
         let manager = self.manager.clone();
 
         self.service_discovery
-            .lookup_topic(topic.clone())
+            .lookup_topic(topic)
             .from_err()
             .and_then(move |broker_address| manager.get_connection(&broker_address).from_err())
-            .map(move |conn| Producer::from_connection(conn, topic.into()))
+            .map(move |conn| Producer::from_connection(conn, name))
     }
 
     pub fn create_partitioned_producers<S: Into<String> + Clone>(
@@ -192,7 +193,7 @@ impl Pulsar {
     ) -> impl Future<Item = CommandSendReceipt, Error = Error> {
 
         let t = topic.clone();
-        self.create_producer(topic)
+        self.create_producer(topic, None)
             .and_then(|mut producer| {
               producer.send_raw(t, data)
                 .from_err()
