@@ -6,6 +6,7 @@ use futures::{Future, future::{self, Either}};
 use rand;
 use serde::Serialize;
 use serde_json;
+use std::collections::HashMap;
 use tokio::runtime::TaskExecutor;
 
 use crate::connection::{Authentication, Connection, SerialId};
@@ -50,15 +51,15 @@ impl Producer {
             .map(|_| ())
     }
 
-    pub fn send_json<S: Into<String>, T: Serialize>(&mut self, topic: S, msg: &T) -> impl Future<Item=proto::CommandSendReceipt, Error=ProducerError> {
+    pub fn send_json<S: Into<String>, T: Serialize>(&mut self, topic: S, msg: &T, properties: Option<HashMap<String, String>>) -> impl Future<Item=proto::CommandSendReceipt, Error=ProducerError> {
         let data = match serde_json::to_vec(msg) {
             Ok(data) => data,
             Err(e) => return Either::A(future::failed(e.into())),
         };
-        Either::B(self.send_raw(topic, data))
+        Either::B(self.send_raw(topic, data, properties))
     }
 
-    pub fn send_raw<S: Into<String>>(&mut self, topic: S, data: Vec<u8>) -> impl Future<Item=proto::CommandSendReceipt, Error=ProducerError> {
+    pub fn send_raw<S: Into<String>>(&mut self, topic: S, data: Vec<u8>, properties: Option<HashMap<String, String>>) -> impl Future<Item=proto::CommandSendReceipt, Error=ProducerError> {
         let topic = topic.into();
 
         let producer = self.topics.read().unwrap().get(&topic)
@@ -92,6 +93,7 @@ impl Producer {
                 sequence_id,
                 None,
                 data,
+                properties
             )
         }).map_err(|e| e.into())
     }
