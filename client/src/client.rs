@@ -23,6 +23,7 @@ pub trait DeserializeMessage {
         Self: std::marker::Sized;
 }
 
+#[derive(Clone)]
 pub struct Pulsar {
     manager: Arc<ConnectionManager>,
     service_discovery: Arc<ServiceDiscovery>,
@@ -73,14 +74,27 @@ impl Pulsar {
             .from_err()
     }
 
-    pub fn create_consumer<T: DeserializeOwned, S1: Into<String> + Clone, S2: Into<String>>(
+    pub fn get_topics_of_namespace(&self, namespace: String) -> impl Future<Item=Vec<String>, Error=Error> {
+        self.manager.get_base_connection()
+            .and_then(move |conn| conn.sender().get_topics_of_namespace(namespace))
+            .from_err()
+            .map(|topics| topics.topics)
+    }
+
+    pub fn create_consumer<T, S1, S2, F>(
         &self,
         topic: S1,
         subscription: S2,
         sub_type: SubType,
-        deserialize: Box<dyn Fn(Payload) -> Result<T, ConsumerError> + Send>,
-    ) -> impl Future<Item = Consumer<T>, Error = Error> {
+        deserialize: F,
+    ) -> impl Future<Item = Consumer<T>, Error = Error>
+        where T: DeserializeOwned,
+              S1: Into<String>,
+              S2: Into<String>,
+              F: Fn(Payload) -> Result<T, ConsumerError> + Send + 'static
+    {
         let manager = self.manager.clone();
+        let topic = topic.into();
 
         self.service_discovery
             .lookup_topic(topic.clone())
@@ -89,7 +103,7 @@ impl Pulsar {
             .and_then(move |conn| {
                 Consumer::from_connection(
                     conn,
-                    topic.into(),
+                    topic,
                     subscription.into(),
                     sub_type,
                     None,

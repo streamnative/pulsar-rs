@@ -12,6 +12,7 @@ mod error;
 mod connection;
 mod connection_manager;
 mod service_discovery;
+mod reconnecting;
 mod client;
 
 pub use error::{Error, ConnectionError, ConsumerError, ProducerError, ServiceDiscoveryError};

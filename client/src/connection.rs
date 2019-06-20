@@ -1,15 +1,17 @@
-use crate::error::{ConnectionError, SharedError};
-use crate::message::{proto::{self, command_subscribe::SubType}, Codec, Message};
-use futures::{self, Async, Future, Stream, Sink, IntoFuture, future::{self, Either}, sync::{mpsc, oneshot},
-              AsyncSink};
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+
+use futures::{self, Async, AsyncSink, Future, future::{self, Either}, IntoFuture, Sink, Stream,
+              sync::{mpsc, oneshot}};
 use tokio::net::TcpStream;
 use tokio::runtime::TaskExecutor;
 use tokio_codec;
+
+use crate::error::{ConnectionError, SharedError};
+use crate::message::{Codec, Message, proto::{self, command_subscribe::SubType}};
 
 pub enum Register {
     Request { key: RequestKey, resolver: oneshot::Sender<Message> },
@@ -24,8 +26,8 @@ pub enum RequestKey {
 
 #[derive(Clone)]
 pub struct Authentication {
-  pub name: String,
-  pub data: Vec<u8>,
+    pub name: String,
+    pub data: Vec<u8>,
 }
 
 pub struct Receiver<S: Stream<Item=Message, Error=ConnectionError>> {
@@ -70,26 +72,26 @@ impl<S: Stream<Item=Message, Error=ConnectionError>> Future for Receiver<S> {
             Ok(Async::NotReady) => {}
         }
 
-        //Are we worries about starvation here?
+        //Are we worried about starvation here?
         loop {
             match self.registrations.poll() {
                 Ok(Async::Ready(Some(Register::Request { key, resolver }))) => {
                     match self.received_messages.remove(&key) {
                         Some(msg) => {
                             let _ = resolver.send(msg);
-                        },
+                        }
                         None => {
                             self.pending_requests.insert(key, resolver);
                         }
                     }
-                },
+                }
                 Ok(Async::Ready(Some(Register::Consumer { consumer_id, resolver }))) => {
                     self.consumers.insert(consumer_id, resolver);
-                },
+                }
                 Ok(Async::Ready(None)) | Err(_) => {
                     self.error.set(ConnectionError::Disconnected);
                     return Err(());
-                },
+                }
                 Ok(Async::NotReady) => break,
             }
         }
@@ -115,19 +117,18 @@ impl<S: Stream<Item=Message, Error=ConnectionError>> Future for Receiver<S> {
                             println!("Received message with no request_id; dropping. Message: {:?}", msg.command);
                         }
                     }
-                },
+                }
                 Ok(Async::Ready(None)) => {
                     self.error.set(ConnectionError::Disconnected);
-                    return Err(())
-                },
+                    return Err(());
+                }
                 Ok(Async::NotReady) => return Ok(Async::NotReady),
                 Err(e) => {
                     self.error.set(e);
-                    return Err(())
+                    return Err(());
                 }
             }
         }
-
     }
 }
 
@@ -139,12 +140,12 @@ pub struct Sender<S: Sink<SinkItem=Message, SinkError=ConnectionError>> {
     shutdown: oneshot::Receiver<()>,
 }
 
-impl <S: Sink<SinkItem=Message, SinkError=ConnectionError>> Sender<S> {
+impl<S: Sink<SinkItem=Message, SinkError=ConnectionError>> Sender<S> {
     pub fn new(
         sink: S,
         outbound: mpsc::UnboundedReceiver<Message>,
         error: SharedError,
-        shutdown: oneshot::Receiver<()>
+        shutdown: oneshot::Receiver<()>,
     ) -> Sender<S> {
         Sender {
             sink,
@@ -158,7 +159,7 @@ impl <S: Sink<SinkItem=Message, SinkError=ConnectionError>> Sender<S> {
     fn try_start_send(&mut self, item: Message) -> futures::Poll<(), ConnectionError> {
         if let AsyncSink::NotReady(item) = self.sink.start_send(item)? {
             self.buffered = Some(item);
-            return Ok(Async::NotReady)
+            return Ok(Async::NotReady);
         }
         Ok(Async::Ready(()))
     }
@@ -171,7 +172,7 @@ impl<S: Sink<SinkItem=Message, SinkError=ConnectionError>> Future for Sender<S> 
     fn poll(&mut self) -> Result<Async<()>, ()> {
         match self.shutdown.poll() {
             Ok(Async::Ready(())) | Err(futures::Canceled) => return Err(()),
-            Ok(Async::NotReady) => {},
+            Ok(Async::NotReady) => {}
         }
 
         if let Some(item) = self.buffered.take() {
@@ -183,11 +184,11 @@ impl<S: Sink<SinkItem=Message, SinkError=ConnectionError>> Future for Sender<S> 
                 Async::Ready(Some(item)) => try_ready!(self.try_start_send(item).map_err(|e| self.error.set(e))),
                 Async::Ready(None) => {
                     try_ready!(self.sink.close().map_err(|e| self.error.set(e)));
-                    return Ok(Async::Ready(()))
+                    return Ok(Async::Ready(()));
                 }
                 Async::NotReady => {
                     try_ready!(self.sink.poll_complete().map_err(|e| self.error.set(e)));
-                    return Ok(Async::NotReady)
+                    return Ok(Async::NotReady);
                 }
             }
         }
@@ -220,7 +221,7 @@ impl ConnectionSender {
         tx: mpsc::UnboundedSender<Message>,
         registrations: mpsc::UnboundedSender<Register>,
         request_id: SerialId,
-        error: SharedError
+        error: SharedError,
     ) -> ConnectionSender {
         ConnectionSender {
             tx,
@@ -235,7 +236,7 @@ impl ConnectionSender {
                 producer_name: String,
                 sequence_id: u64,
                 num_messages: Option<i32>,
-                data: Vec<u8>
+                data: Vec<u8>,
     ) -> impl Future<Item=proto::CommandSendReceipt, Error=ConnectionError> {
         let key = RequestKey::ProducerSend { producer_id, sequence_id };
         let msg = messages::send(producer_id, producer_name, sequence_id, num_messages, data);
@@ -270,6 +271,12 @@ impl ConnectionSender {
         self.send_message(msg, RequestKey::RequestId(request_id), |resp| resp.command.producer_success)
     }
 
+    pub fn get_topics_of_namespace(&self, namespace: String) -> impl Future<Item=proto::CommandGetTopicsOfNamespaceResponse, Error=ConnectionError> {
+        let request_id = self.request_id.get();
+        let msg = messages::get_topics_of_namespace(request_id, namespace);
+        self.send_message(msg, RequestKey::RequestId(request_id), |resp| resp.command.get_topics_of_namespace_response)
+    }
+
     pub fn close_producer(&self, producer_id: u64) -> impl Future<Item=proto::CommandSuccess, Error=ConnectionError> {
         let request_id = self.request_id.get();
         let msg = messages::close_producer(producer_id, request_id);
@@ -282,12 +289,12 @@ impl ConnectionSender {
                      subscription: String,
                      sub_type: SubType,
                      consumer_id: u64,
-                     consumer_name: Option<String>
+                     consumer_name: Option<String>,
     ) -> impl Future<Item=proto::CommandSuccess, Error=ConnectionError> {
         let request_id = self.request_id.get();
         let msg = messages::subscribe(topic, subscription, sub_type, consumer_id, request_id, consumer_name);
         match self.registrations.unbounded_send(Register::Consumer { consumer_id, resolver }) {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(_) => {
                 self.error.set(ConnectionError::Disconnected);
                 return Either::A(future::failed(ConnectionError::Disconnected));
@@ -322,16 +329,15 @@ impl ConnectionSender {
         let response = response
             .map_err(|oneshot::Canceled| ConnectionError::Disconnected)
             .and_then(move |message: Message| {
-              trace!("received message(key = {:?}): {:?}", k, message);
-              extract_message(message, extract)
+                trace!("received message(key = {:?}): {:?}", k, message);
+                extract_message(message, extract)
             });
 
-        match (self.registrations.unbounded_send(Register::Request { key, resolver, }), self.tx.unbounded_send(msg)) {
+        match (self.registrations.unbounded_send(Register::Request { key, resolver }), self.tx.unbounded_send(msg)) {
             (Ok(_), Ok(_)) => Either::A(response),
             _ => Either::B(future::err(ConnectionError::Disconnected))
         }
     }
-
 }
 
 pub struct Connection {
@@ -346,7 +352,7 @@ impl Connection {
         addr: String,
         auth_data: Option<Authentication>,
         proxy_to_broker_url: Option<String>,
-        executor: TaskExecutor
+        executor: TaskExecutor,
     ) -> impl Future<Item=Connection, Error=ConnectionError> {
         SocketAddr::from_str(&addr).into_future()
             .map_err(|e| ConnectionError::SocketAddr(e.to_string()))
@@ -356,9 +362,9 @@ impl Connection {
                     .map(|stream| tokio_codec::Framed::new(stream, Codec))
                     .and_then(|stream|
                         stream.send({
-                          let msg =  messages::connect(auth_data, proxy_to_broker_url);
-                          trace!("connection message: {:?}", msg);
-                          msg
+                            let msg = messages::connect(auth_data, proxy_to_broker_url);
+                            trace!("connection message: {:?}", msg);
+                            msg
                         })
                             .and_then(|stream| stream.into_future().map_err(|(err, _)| err))
                             .and_then(move |(msg, stream)| match msg {
@@ -370,7 +376,7 @@ impl Connection {
                                     msg.command.connected
                                         .ok_or_else(|| ConnectionError::PulsarError(format!("Unexpected message from pulsar: {:?}", cmd)))
                                         .map(|_msg| stream)
-                                },
+                                }
                                 None => {
                                     Err(ConnectionError::Disconnected)
                                 }
@@ -396,7 +402,7 @@ impl Connection {
                     sink,
                     rx,
                     error.clone(),
-                    sender_shutdown_rx
+                    sender_shutdown_rx,
                 ));
 
                 let sender = ConnectionSender::new(tx, registrations_tx, SerialId::new(), error);
@@ -458,14 +464,15 @@ fn extract_message<T: Debug, F>(message: Message, extract: F) -> Result<T, Conne
 }
 
 pub(crate) mod messages {
+    use chrono::Utc;
+
     use crate::connection::Authentication;
     use crate::message::{Message, Payload, proto::{self, base_command::Type as CommandType, command_subscribe::SubType}};
-    use chrono::Utc;
 
     pub fn connect(auth: Option<Authentication>, proxy_to_broker_url: Option<String>) -> Message {
         let (auth_method_name, auth_data) = match auth {
-          Some(auth) => (Some(auth.name), Some(auth.data)),
-          None => (None, None),
+            Some(auth) => (Some(auth.name), Some(auth.data)),
+            None => (None, None),
         };
 
         Message {
@@ -477,9 +484,9 @@ pub(crate) mod messages {
                     proxy_to_broker_url,
                     client_version: String::from("2.0.1-incubating"),
                     protocol_version: Some(12),
-                    .. Default::default()
+                    ..Default::default()
                 }),
-                .. Default::default()
+                ..Default::default()
             },
             payload: None,
         }
@@ -490,7 +497,7 @@ pub(crate) mod messages {
             command: proto::BaseCommand {
                 type_: CommandType::Ping as i32,
                 ping: Some(proto::CommandPing {}),
-                .. Default::default()
+                ..Default::default()
             },
             payload: None,
         }
@@ -501,7 +508,7 @@ pub(crate) mod messages {
             command: proto::BaseCommand {
                 type_: CommandType::Pong as i32,
                 pong: Some(proto::CommandPong {}),
-                .. Default::default()
+                ..Default::default()
             },
             payload: None,
         }
@@ -516,9 +523,23 @@ pub(crate) mod messages {
                     producer_id,
                     request_id,
                     producer_name,
-                    .. Default::default()
+                    ..Default::default()
                 }),
-                .. Default::default()
+                ..Default::default()
+            },
+            payload: None,
+        }
+    }
+
+    pub fn get_topics_of_namespace(request_id: u64, namespace: String) -> Message {
+        Message {
+            command: proto::BaseCommand {
+                type_: CommandType::GetTopicsOfNamespace as i32,
+                get_topics_of_namespace: Some(proto::CommandGetTopicsOfNamespace {
+                    request_id,
+                    namespace,
+                }),
+                ..Default::default()
             },
             payload: None,
         }
@@ -529,7 +550,7 @@ pub(crate) mod messages {
         producer_name: String,
         sequence_id: u64,
         num_messages: Option<i32>,
-        data: Vec<u8>
+        data: Vec<u8>,
     ) -> Message {
         Message {
             command: proto::BaseCommand {
@@ -537,16 +558,16 @@ pub(crate) mod messages {
                 send: Some(proto::CommandSend {
                     producer_id,
                     sequence_id,
-                    num_messages
+                    num_messages,
                 }),
-                .. Default::default()
+                ..Default::default()
             },
             payload: Some(Payload {
                 metadata: proto::MessageMetadata {
                     producer_name,
                     sequence_id,
                     publish_time: Utc::now().timestamp_millis() as u64,
-                    .. Default::default()
+                    ..Default::default()
                 },
                 data,
             }),
@@ -561,9 +582,9 @@ pub(crate) mod messages {
                     topic,
                     request_id,
                     authoritative: Some(authoritative),
-                    .. Default::default()
+                    ..Default::default()
                 }),
-                .. Default::default()
+                ..Default::default()
             },
             payload: None,
         }
@@ -576,9 +597,9 @@ pub(crate) mod messages {
                 partition_metadata: Some(proto::CommandPartitionedTopicMetadata {
                     topic,
                     request_id,
-                    .. Default::default()
+                    ..Default::default()
                 }),
-                .. Default::default()
+                ..Default::default()
             },
             payload: None,
         }
@@ -592,7 +613,7 @@ pub(crate) mod messages {
                     producer_id,
                     request_id,
                 }),
-                .. Default::default()
+                ..Default::default()
             },
             payload: None,
         }
@@ -604,7 +625,7 @@ pub(crate) mod messages {
         sub_type: SubType,
         consumer_id: u64,
         request_id: u64,
-        consumer_name: Option<String>
+        consumer_name: Option<String>,
     ) -> Message {
         Message {
             command: proto::BaseCommand {
@@ -616,9 +637,9 @@ pub(crate) mod messages {
                     consumer_id,
                     request_id,
                     consumer_name,
-                    .. Default::default()
+                    ..Default::default()
                 }),
-                .. Default::default()
+                ..Default::default()
             },
             payload: None,
         }
@@ -632,7 +653,7 @@ pub(crate) mod messages {
                     consumer_id,
                     message_permits,
                 }),
-                .. Default::default()
+                ..Default::default()
             },
             payload: None,
         }
@@ -649,7 +670,7 @@ pub(crate) mod messages {
                     validation_error: None,
                     properties: Vec::new(),
                 }),
-                .. Default::default()
+                ..Default::default()
             },
             payload: None,
         }
@@ -663,7 +684,7 @@ pub(crate) mod messages {
                     consumer_id,
                     request_id,
                 }),
-                .. Default::default()
+                ..Default::default()
             },
             payload: None,
         }
