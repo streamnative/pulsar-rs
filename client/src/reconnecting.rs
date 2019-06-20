@@ -10,9 +10,9 @@ pub enum Error<E> {
 }
 
 pub struct ReconnectingStream<T, E> {
-    stream: Box<dyn Stream<Item=T, Error=E>>,
-    reconnecting: Option<Box<dyn Future<Item=Box<dyn Stream<Item=T, Error=E>>, Error=E>>>,
-    reconnect: Arc<Fn() -> Box<dyn Future<Item=Box<dyn Stream<Item=T, Error=E>>, Error=E>>>,
+    stream: Box<dyn Stream<Item=T, Error=E> + Send>,
+    reconnecting: Option<Box<dyn Future<Item=Box<dyn Stream<Item=T, Error=E> + Send>, Error=E>>>,
+    reconnect: Arc<Fn() -> Box<dyn Future<Item=Box<dyn Stream<Item=T, Error=E> + Send>, Error=E>>>,
     max_retries: u32,
     max_backoff: Duration,
     current_retries: u32,
@@ -21,7 +21,7 @@ pub struct ReconnectingStream<T, E> {
 
 impl<T, E> ReconnectingStream<T, E> {
     pub fn new<F>(connect: F, max_retries: u32, max_backoff: Duration) -> impl Future<Item=ReconnectingStream<T, E>, Error=E>
-        where F: Fn() -> Box<dyn Future<Item=Box<dyn Stream<Item=T, Error=E>>, Error=E>> + 'static
+        where F: Fn() -> Box<dyn Future<Item=Box<dyn Stream<Item=T, Error=E> + Send>, Error=E>> + Send + 'static
     {
         connect().map(move |stream| {
             ReconnectingStream {

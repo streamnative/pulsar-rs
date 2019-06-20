@@ -1,6 +1,6 @@
 use crate::connection::Authentication;
 use crate::connection_manager::{BrokerAddress, ConnectionManager};
-use crate::consumer::Consumer;
+use crate::consumer::{Consumer, MultiTopicConsumer};
 use crate::error::{ConsumerError, Error};
 use crate::message::proto::{
   command_subscribe::SubType, CommandSendReceipt};
@@ -15,6 +15,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::runtime::TaskExecutor;
+use std::time::Duration;
 
 /// Helper trait for consumer deserialization
 pub trait DeserializeMessage {
@@ -79,6 +80,35 @@ impl Pulsar {
             .and_then(move |conn| conn.sender().get_topics_of_namespace(namespace))
             .from_err()
             .map(|topics| topics.topics)
+    }
+
+    pub fn create_multi_topic_consumer<T, S1, S2, F>(
+        &self,
+        topic_regex: regex::Regex,
+        subscription: S1,
+        namespace: S2,
+        sub_type: SubType,
+        deserialize: F,
+        max_retries: u32,
+        max_backoff: Duration,
+        topic_refresh: Duration,
+    ) -> MultiTopicConsumer<T>
+        where T: DeserializeOwned,
+              S1: Into<String>,
+              S2: Into<String>,
+              F: Fn(Payload) -> Result<T, ConsumerError> + Send + Sync + 'static
+    {
+        MultiTopicConsumer::new(
+            self.clone(),
+            namespace.into(),
+            topic_regex,
+            subscription.into(),
+            sub_type,
+            deserialize,
+            max_retries,
+            max_backoff,
+            topic_refresh,
+        )
     }
 
     pub fn create_consumer<T, S1, S2, F>(

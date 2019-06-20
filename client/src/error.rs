@@ -8,6 +8,7 @@ pub enum Error {
   Consumer(ConsumerError),
   Producer(ProducerError),
   ServiceDiscovery(ServiceDiscoveryError),
+  Custom(String),
 }
 
 impl From<ConnectionError> for Error {
@@ -41,6 +42,7 @@ impl fmt::Display for Error {
       Error::Consumer(e) => write!(f, "consumer error: {}", e),
       Error::Producer(e) => write!(f, "producer error: {}", e),
       Error::ServiceDiscovery(e) => write!(f, "service discovery error: {}", e),
+      Error::Custom(e) => write!(f, "error: {}", e)
     }
   }
 }
@@ -52,6 +54,7 @@ impl std::error::Error for Error {
             Error::Consumer(e) => e.source(),
             Error::Producer(e) => e.source(),
             Error::ServiceDiscovery(e) => e.source(),
+            Error::Custom(_) => None,
         }
     }
 }
