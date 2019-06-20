@@ -369,10 +369,10 @@ pub struct MultiTopicConsumer<T> {
     namespace: String,
     topic_regex: Regex,
     pulsar: Pulsar,
-    consumers: BTreeMap<String, ReconnectingStream<(Result<T, Error>, Ack), Error>>,
+    consumers: BTreeMap<String, Consumer<T>>,
     topics: VecDeque<String>,
-    new_consumers: Option<Box<dyn Future<Item=Vec<(String, ReconnectingStream<(Result<T, Error>, Ack), Error>)>, Error=Error>>>,
-    refresh: Box<dyn Stream<Item=(), Error=()>>,
+    new_consumers: Option<Box<dyn Future<Item=Vec<(String, Consumer<T>)>, Error=Error> + Send>>,
+    refresh: Box<dyn Stream<Item=(), Error=()> + Send>,
     subscription: String,
     sub_type: SubType,
     deserialize: Arc<dyn Fn(Payload) -> Result<T, ConsumerError> + Send + Sync + 'static>,
@@ -424,7 +424,7 @@ impl<T> Debug for MultiTopicConsumer<T> {
 impl<T> Stream for MultiTopicConsumer<T>
     where T: 'static, for<'de> T: serde::de::Deserialize<'de>
 {
-    type Item = (Result<T, Error>, Ack);
+    type Item = (Result<T, ConsumerError>, Ack);
     type Error = Error;
 
     fn poll(&mut self) -> Result<Async<Option<Self::Item>>, Self::Error> {
@@ -454,8 +454,6 @@ impl<T> Stream for MultiTopicConsumer<T>
                 let subscription = self.subscription.clone();
                 let sub_type = self.sub_type;
                 let deserialize = self.deserialize.clone();
-                let max_retries = self.max_retries;
-                let max_backoff = self.max_backoff;
                 let new_consumers = Box::new(self.pulsar.get_topics_of_namespace(self.namespace.clone())
                     .and_then(move |topics: Vec<String>| {
                         println!("got topics: {:?}", &topics);
@@ -465,22 +463,8 @@ impl<T> Stream for MultiTopicConsumer<T>
                                 let pulsar = pulsar.clone();
                                 let deserialize = deserialize.clone();
                                 let subscription = subscription.clone();
-                                let topic_ = topic.clone();
-                                ReconnectingStream::new(
-                                    move || Box::new({
-                                        let deserialize = deserialize.clone();
-                                        let topic = topic_.clone();
-                                        pulsar.create_consumer(topic, subscription.clone(), sub_type, move |payload| deserialize(payload))
-                                            .map(|stream| {
-                                                let stream = stream
-                                                    .map(|(r, ack)| (r.map_err(|e| Error::Consumer(e)), ack))
-                                                    .map_err(|e| Error::Consumer(e));
-                                                Box::new(stream) as Box<dyn Stream<Item=_, Error=_>>
-                                            })
-                                    }),
-                                    max_retries,
-                                    max_backoff,
-                                ).map(move |stream| (topic, stream))
+                                pulsar.create_consumer(topic.clone(), subscription, sub_type, move |payload| deserialize(payload))
+                                    .map(|c| (topic, c))
                             })
                         )
                     }));
@@ -492,45 +476,45 @@ impl<T> Stream for MultiTopicConsumer<T>
             }
         }
 
-        if let Ok(Async::Ready(_)) = self.refresh.poll() {
-            println!("refresh");
-            let regex = self.topic_regex.clone();
-            let pulsar = self.pulsar.clone();
-            let subscription = self.subscription.clone();
-            let sub_type = self.sub_type;
-            let deserialize = self.deserialize.clone();
-            let max_retries = self.max_retries;
-            let max_backoff = self.max_backoff;
-            let new_consumers = Box::new(self.pulsar.get_topics_of_namespace(self.namespace.clone())
-                .and_then(move |topics: Vec<String>| {
-                    println!("got topics: {:?}", &topics);
-                    futures::future::collect(topics.into_iter()
-                        .filter(move |topic| regex.is_match(topic.as_str()))
-                        .map(move |topic| {
-                            let pulsar = pulsar.clone();
-                            let deserialize = deserialize.clone();
-                            let subscription = subscription.clone();
-                            let topic_ = topic.clone();
-                            ReconnectingStream::new(
-                                move || Box::new({
-                                    let deserialize = deserialize.clone();
-                                    let topic = topic_.clone();
-                                    pulsar.create_consumer(topic, subscription.clone(), sub_type, move |payload| deserialize(payload))
-                                        .map(|stream| {
-                                            let stream = stream
-                                                .map(|(r, ack)| (r.map_err(|e| Error::Consumer(e)), ack))
-                                                .map_err(|e| Error::Consumer(e));
-                                            Box::new(stream) as Box<dyn Stream<Item=_, Error=_>>
-                                        })
-                                }),
-                                max_retries,
-                                max_backoff,
-                            ).map(move |stream| (topic, stream))
-                        })
-                    )
-                }));
-            self.new_consumers = Some(new_consumers);
-        }
+//        if let Ok(Async::Ready(_)) = self.refresh.poll() {
+//            println!("refresh");
+//            let regex = self.topic_regex.clone();
+//            let pulsar = self.pulsar.clone();
+//            let subscription = self.subscription.clone();
+//            let sub_type = self.sub_type;
+//            let deserialize = self.deserialize.clone();
+//            let max_retries = self.max_retries;
+//            let max_backoff = self.max_backoff;
+//            let new_consumers = Box::new(self.pulsar.get_topics_of_namespace(self.namespace.clone())
+//                .and_then(move |topics: Vec<String>| {
+//                    println!("got topics: {:?}", &topics);
+//                    futures::future::collect(topics.into_iter()
+//                        .filter(move |topic| regex.is_match(topic.as_str()))
+//                        .map(move |topic| {
+//                            let pulsar = pulsar.clone();
+//                            let deserialize = deserialize.clone();
+//                            let subscription = subscription.clone();
+//                            let topic_ = topic.clone();
+//                            ReconnectingStream::new(
+//                                move || Box::new({
+//                                    let deserialize = deserialize.clone();
+//                                    let topic = topic_.clone();
+//                                    pulsar.create_consumer(topic, subscription.clone(), sub_type, move |payload| deserialize(payload))
+//                                        .map(|stream| {
+//                                            let stream = stream
+//                                                .map(|(r, ack)| (r.map_err(|e| Error::Consumer(e)), ack))
+//                                                .map_err(|e| Error::Consumer(e));
+//                                            Box::new(stream) as Box<dyn Stream<Item=_, Error=_>>
+//                                        })
+//                                }),
+//                                max_retries,
+//                                max_backoff,
+//                            ).map(move |stream| (topic, stream))
+//                        })
+//                    )
+//                }));
+//            self.new_consumers = Some(new_consumers);
+//        }
 
         for _ in 0..self.topics.len() {
             let topic = self.topics.pop_front().unwrap();
