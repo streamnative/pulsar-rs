@@ -14,6 +14,7 @@ use futures::{
 use serde::{de::DeserializeOwned, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::collections::HashMap;
 use tokio::runtime::TaskExecutor;
 
 /// Helper trait for consumer deserialization
@@ -190,12 +191,13 @@ impl Pulsar {
         &self,
         topic: S,
         data: Vec<u8>,
+        properties: Option<HashMap<String, String>>,
     ) -> impl Future<Item = CommandSendReceipt, Error = Error> {
 
         let t = topic.clone();
         self.create_producer(topic, None)
             .and_then(|mut producer| {
-              producer.send_raw(t, data)
+              producer.send_raw(t, data, properties)
                 .from_err()
             })
     }
@@ -203,7 +205,8 @@ impl Pulsar {
     pub fn send_json<S: Into<String> + Clone, T: Serialize>(
         &self,
         topic: S,
-        msg: &T
+        msg: &T,
+        properties: Option<HashMap<String, String>>,
     ) -> impl Future<Item = CommandSendReceipt, Error = Error> {
         let data = match serde_json::to_vec(msg) {
           Ok(data) => data,
@@ -213,6 +216,6 @@ impl Pulsar {
           },
         };
 
-        Either::B(self.send_raw(topic, data))
+        Either::B(self.send_raw(topic, data, properties))
     }
 }

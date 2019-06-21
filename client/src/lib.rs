@@ -49,7 +49,7 @@ mod tests {
         let produce = {
             let producer = &mut producer;
             future::join_all((0..5000).map(move |_| {
-                producer.send_json("test", &TestData { data: "data".to_string() })
+                producer.send_json("test", &TestData { data: "data".to_string() }, None)
             }))
         };
 

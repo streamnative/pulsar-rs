@@ -2,7 +2,7 @@ use crate::error::{ConnectionError, SharedError};
 use crate::message::{proto::{self, command_subscribe::SubType}, Codec, Message};
 use futures::{self, Async, Future, Stream, Sink, IntoFuture, future::{self, Either}, sync::{mpsc, oneshot},
               AsyncSink};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Debug;
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -235,10 +235,11 @@ impl ConnectionSender {
                 producer_name: String,
                 sequence_id: u64,
                 num_messages: Option<i32>,
-                data: Vec<u8>
+                data: Vec<u8>,
+                properties: Option<HashMap<String, String>>,
     ) -> impl Future<Item=proto::CommandSendReceipt, Error=ConnectionError> {
         let key = RequestKey::ProducerSend { producer_id, sequence_id };
-        let msg = messages::send(producer_id, producer_name, sequence_id, num_messages, data);
+        let msg = messages::send(producer_id, producer_name, sequence_id, num_messages, data, properties);
         self.send_message(msg, key, |resp| resp.command.send_receipt)
     }
 
@@ -461,6 +462,7 @@ pub(crate) mod messages {
     use crate::connection::Authentication;
     use crate::message::{Message, Payload, proto::{self, base_command::Type as CommandType, command_subscribe::SubType}};
     use chrono::Utc;
+    use std::collections::HashMap;
 
     pub fn connect(auth: Option<Authentication>, proxy_to_broker_url: Option<String>) -> Message {
         let (auth_method_name, auth_data) = match auth {
@@ -529,8 +531,13 @@ pub(crate) mod messages {
         producer_name: String,
         sequence_id: u64,
         num_messages: Option<i32>,
-        data: Vec<u8>
+        data: Vec<u8>,
+        properties: Option<HashMap<String, String>>,
     ) -> Message {
+        let properties = properties.map(|mut h| h.drain().map(|(key, value)| {
+          proto::KeyValue { key, value }
+        }).collect()).unwrap_or(vec![]);
+
         Message {
             command: proto::BaseCommand {
                 type_: CommandType::Send as i32,
@@ -545,6 +552,7 @@ pub(crate) mod messages {
                 metadata: proto::MessageMetadata {
                     producer_name,
                     sequence_id,
+                    properties,
                     publish_time: Utc::now().timestamp_millis() as u64,
                     .. Default::default()
                 },
