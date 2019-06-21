@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Debug;
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -237,9 +237,10 @@ impl ConnectionSender {
                 sequence_id: u64,
                 num_messages: Option<i32>,
                 data: Vec<u8>,
+                properties: Option<HashMap<String, String>>,
     ) -> impl Future<Item=proto::CommandSendReceipt, Error=ConnectionError> {
         let key = RequestKey::ProducerSend { producer_id, sequence_id };
-        let msg = messages::send(producer_id, producer_name, sequence_id, num_messages, data);
+        let msg = messages::send(producer_id, producer_name, sequence_id, num_messages, data, properties);
         self.send_message(msg, key, |resp| resp.command.send_receipt)
     }
 
@@ -464,6 +465,8 @@ fn extract_message<T: Debug, F>(message: Message, extract: F) -> Result<T, Conne
 }
 
 pub(crate) mod messages {
+    use std::collections::HashMap;
+
     use chrono::Utc;
 
     use crate::connection::Authentication;
@@ -551,7 +554,12 @@ pub(crate) mod messages {
         sequence_id: u64,
         num_messages: Option<i32>,
         data: Vec<u8>,
+        properties: Option<HashMap<String, String>>,
     ) -> Message {
+        let properties = properties.map(|mut h| h.drain().map(|(key, value)| {
+            proto::KeyValue { key, value }
+        }).collect()).unwrap_or(vec![]);
+
         Message {
             command: proto::BaseCommand {
                 type_: CommandType::Send as i32,
@@ -566,6 +574,7 @@ pub(crate) mod messages {
                 metadata: proto::MessageMetadata {
                     producer_name,
                     sequence_id,
+                    properties,
                     publish_time: Utc::now().timestamp_millis() as u64,
                     ..Default::default()
                 },
