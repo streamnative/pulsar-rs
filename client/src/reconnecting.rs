@@ -1,72 +1,110 @@
+use tokio::prelude::*;
+use std::time::{Duration, Instant};
+use tokio_retry::strategy::*;
+use tokio::timer::Delay;
+use std::sync::Arc;
 
-pub struct ReconnectingStream<T, E, S: Stream<Item = T, Error = E>> {
-    stream: S,
-    reconnecting: Option<Box<dyn Future<Item = S, Error = E>>>,
-    reconnect: Box<Fn() -> Box<dyn Future<Item = S, Error = E>>>,
-    max_retries: usize,
-    current_retries: usize,
+pub enum Error<E> {
+    Reconnect(E),
+    Abort(E),
 }
 
-impl<T, E, S> ReconnectingStream<T, E, S>
-    where S: Stream<Item = T, Error = E>
-{
-    pub fn new<F>(connect: F, max_retries: usize) -> impl Future<Item = ReconnectingStream<T, E, S>, Error = E>
-        where F: Fn() -> Box<dyn Future<Item = S, Error = E>> + 'static
+pub struct ReconnectingStream<T, E> {
+    stream: Box<dyn Stream<Item=T, Error=E> + Send>,
+    reconnecting: Option<Box<dyn Future<Item=Box<dyn Stream<Item=T, Error=E> + Send>, Error=E>>>,
+    reconnect: Arc<Fn() -> Box<dyn Future<Item=Box<dyn Stream<Item=T, Error=E> + Send>, Error=E>>>,
+    max_retries: u32,
+    max_backoff: Duration,
+    current_retries: u32,
+    current_backoff: ExponentialBackoff,
+}
+
+impl<T, E> ReconnectingStream<T, E> {
+    pub fn new<F>(connect: F, max_retries: u32, max_backoff: Duration) -> impl Future<Item=ReconnectingStream<T, E>, Error=E>
+        where F: Fn() -> Box<dyn Future<Item=Box<dyn Stream<Item=T, Error=E> + Send>, Error=E>> + Send + 'static
     {
         connect().map(move |stream| {
             ReconnectingStream {
                 stream,
                 reconnecting: None,
-                reconnect: Box::new(connect),
+                reconnect: Arc::new(connect),
                 max_retries,
+                max_backoff,
                 current_retries: 0,
+                current_backoff: backoff(max_backoff),
             }
         })
     }
+
+    fn reset_backoff(&mut self) {
+        self.current_retries = 0;
+        self.reconnecting = None;
+        self.current_backoff = backoff(self.max_backoff);
+    }
 }
 
-impl<T, E, S> Stream for ReconnectingStream<T, E, S>
-    where S: Stream<Item = T, Error = E>
+fn backoff(max_backoff: Duration) -> ExponentialBackoff {
+    ExponentialBackoff::from_millis(10).max_delay(max_backoff)
+}
+
+impl<T: 'static, E: 'static> Stream for ReconnectingStream<T, E>
+    where Error<E>: From<E>
 {
     type Item = T;
     type Error = E;
 
     fn poll(&mut self) -> Result<Async<Option<T>>, E> {
-        match self.reconnecting.as_mut().map(|r| r.poll()) {
-            Some(Ok(Async::Ready(reconnected_stream))) => {
-                self.stream = reconnected_stream;
-                self.reconnecting = None;
-            },
-            Some(Ok(Async::NotReady)) => {
-                return Ok(Async::NotReady);
-            },
-            Some(Err(e)) => {
-                self.reconnecting = None;
-                return Err(e);
-            },
-            None => {},
-        };
+        if let Some(reconnecting) = self.reconnecting.as_mut() {
+            match reconnecting.poll().map_err(Error::from) {
+                Ok(Async::NotReady) => {
+                    return Ok(Async::NotReady);
+                }
+                Ok(Async::Ready(reconnected_stream)) => {
+                    self.stream = reconnected_stream;
+                    self.reset_backoff()
+                }
 
-        match self.stream.poll() {
+                Err(Error::Abort(e)) => return Err(e),
+
+                Err(Error::Reconnect(e)) => {
+                    if self.current_retries >= self.max_retries {
+                        return Err(e)
+                    }
+                    self.current_retries += 1;
+                    let reconnect = self.reconnect.clone();
+                    self.reconnecting = Some(Box::new(Delay::new(Instant::now() + self.current_backoff.next().unwrap())
+                        .map_err(|_| unreachable!())
+                        .and_then(move |_| reconnect())));
+                    return self.poll();
+                }
+            }
+        }
+
+        match self.stream.poll().map_err(|e| e.into()) {
             Ok(Async::NotReady) => Ok(Async::NotReady),
-            Err(e) => Err(e),
 
-            Ok(Async::Ready(Some(data))) => {
-                //retries reset on successful data in order to prevent a continuously
-                //reconnecting but empty stream from causing a stack overflow
-                self.current_retries = 0;
-                Ok(Async::Ready(Some(data)))
-            },
+            Ok(Async::Ready(Some(data))) => Ok(Async::Ready(Some(data))),
 
-            //needs reconnect
+            Ok(Async::Ready(None)) if self.current_retries >= self.max_retries => Ok(Async::Ready(None)),
+
             Ok(Async::Ready(None)) => {
                 self.current_retries += 1;
+                let reconnect = self.reconnect.clone();
+                self.reconnecting = Some(Box::new(Delay::new(Instant::now() + self.current_backoff.next().unwrap())
+                    .map_err(|_| unreachable!())
+                    .and_then(move |_| reconnect())));
+                self.poll()
+            }
+
+            Err(Error::Abort(e)) => Err(e),
+
+            Err(Error::Reconnect(e)) => {
                 if self.current_retries >= self.max_retries {
-                    Ok(Async::Ready(None))
-                } else {
-                    self.reconnecting = Some((&self.reconnect)());
-                    self.poll()
+                    return Err(e);
                 }
+                self.current_retries += 1;
+                self.reconnecting = Some((&self.reconnect)());
+                self.poll()
             }
         }
     }
