@@ -88,8 +88,8 @@ mod tests {
 
         let dataz = TestData { data: String::from("dataz") };
 
-        let send_1 = a.send_json("r2d2_test", &dataz.clone());
-        let send_2 = b.send_json("r2d2_test", &dataz.clone());
+        let send_1 = a.send_json("r2d2_test", &dataz.clone(), None);
+        let send_2 = b.send_json("r2d2_test", &dataz.clone(), None);
 
         send_1.join(send_2).wait().unwrap();
 
