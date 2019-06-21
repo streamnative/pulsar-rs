@@ -522,10 +522,10 @@ mod tests {
 
         let client: Pulsar = Pulsar::new(addr, None, rt.executor()).wait().unwrap();
 
-        client.send_json(topic1, &data1).wait().unwrap();
-        client.send_json(topic1, &data2).wait().unwrap();
-        client.send_json(topic2, &data3).wait().unwrap();
-        client.send_json(topic2, &data4).wait().unwrap();
+        client.send_json(topic1, &data1, None).wait().unwrap();
+        client.send_json(topic1, &data2, None).wait().unwrap();
+        client.send_json(topic2, &data3, None).wait().unwrap();
+        client.send_json(topic2, &data4, None).wait().unwrap();
 
         let data = vec![data1, data2, data3, data4];
 
