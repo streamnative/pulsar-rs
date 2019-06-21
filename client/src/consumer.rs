@@ -10,13 +10,10 @@ use serde::de::DeserializeOwned;
 use serde_json;
 use tokio::runtime::TaskExecutor;
 
-use reconnecting::ReconnectingStream;
-
 use crate::connection::{Authentication, Connection};
 use crate::error::{ConnectionError, ConsumerError, Error};
 use crate::message::{Message, Payload, proto::{self, command_subscribe::SubType}};
 use crate::Pulsar;
-use crate::reconnecting;
 use tokio::timer::Interval;
 use std::fmt::Debug;
 
@@ -359,12 +356,6 @@ impl<T: DeserializeOwned> ConsumerBuilder<Set<String>, Set<String>, Set<SubType>
     }
 }
 
-impl From<Error> for reconnecting::Error<Error> {
-    fn from(e: Error) -> Self {
-        reconnecting::Error::Reconnect(e)
-    }
-}
-
 pub struct MultiTopicConsumer<T> {
     namespace: String,
     topic_regex: Regex,
@@ -376,11 +367,10 @@ pub struct MultiTopicConsumer<T> {
     subscription: String,
     sub_type: SubType,
     deserialize: Arc<dyn Fn(Payload) -> Result<T, ConsumerError> + Send + Sync + 'static>,
-    max_retries: u32,
-    max_backoff: Duration,
 }
 
 impl<T> MultiTopicConsumer<T> {
+    //TODO: Expose builder API
     pub fn new<S1, S2, F>(
         pulsar: Pulsar,
         namespace: S1,
@@ -388,8 +378,6 @@ impl<T> MultiTopicConsumer<T> {
         subscription: S2,
         sub_type: SubType,
         deserialize: F,
-        max_retries: u32,
-        max_backoff: Duration,
         topic_refresh: Duration,
     ) -> Self
         where S1: Into<String>,
@@ -409,8 +397,6 @@ impl<T> MultiTopicConsumer<T> {
             subscription: subscription.into(),
             sub_type,
             deserialize: Arc::new(deserialize),
-            max_retries,
-            max_backoff
         }
     }
 }
@@ -555,6 +541,7 @@ mod tests {
     use regex::Regex;
 
     #[test]
+    #[ignore]
     fn multi_consumer() {
         let addr = "127.0.0.1:6650".parse().unwrap();
         let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -578,14 +565,12 @@ mod tests {
 
         let data = vec![data1, data2, data3, data4];
 
-        let mut consumer: MultiTopicConsumer<serde_json::Value> = client.create_multi_topic_consumer(
+        let consumer: MultiTopicConsumer<serde_json::Value> = client.create_multi_topic_consumer(
             Regex::new("mt_test_[ab]").unwrap(),
             "test_sub",
             namespace,
             SubType::Shared,
             |payload| serde_json::from_slice(&payload.data).map_err(|e| e.into()),
-            5,
-            Duration::from_secs(1),
             Duration::from_secs(10),
         );
 

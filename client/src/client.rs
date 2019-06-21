@@ -89,8 +89,6 @@ impl Pulsar {
         namespace: S2,
         sub_type: SubType,
         deserialize: F,
-        max_retries: u32,
-        max_backoff: Duration,
         topic_refresh: Duration,
     ) -> MultiTopicConsumer<T>
         where T: DeserializeOwned,
@@ -105,8 +103,6 @@ impl Pulsar {
             subscription.into(),
             sub_type,
             deserialize,
-            max_retries,
-            max_backoff,
             topic_refresh,
         )
     }
