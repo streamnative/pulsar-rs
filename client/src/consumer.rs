@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, VecDeque};
+use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -9,13 +10,12 @@ use regex::Regex;
 use serde::de::DeserializeOwned;
 use serde_json;
 use tokio::runtime::TaskExecutor;
+use tokio::timer::Interval;
 
 use crate::connection::{Authentication, Connection};
 use crate::error::{ConnectionError, ConsumerError, Error};
 use crate::message::{Message, Payload, proto::{self, command_subscribe::SubType}};
 use crate::Pulsar;
-use tokio::timer::Interval;
-use std::fmt::Debug;
 
 pub struct Consumer<T> {
     connection: Arc<Connection>,
@@ -393,7 +393,7 @@ impl<T> MultiTopicConsumer<T> {
             new_consumers: None,
             refresh: Box::new(Interval::new(Instant::now(), topic_refresh)
                 .map(drop)
-                .map_err(|e| println!("interval error: {}", e))),
+                .map_err(|e| panic!("error creating referesh timer: {}", e))),
             subscription: subscription.into(),
             sub_type,
             deserialize: Arc::new(deserialize),
@@ -414,7 +414,6 @@ impl<T> Stream for MultiTopicConsumer<T>
     type Error = Error;
 
     fn poll(&mut self) -> Result<Async<Option<Self::Item>>, Self::Error> {
-        println!("polling");
         if let Some(mut new_consumers) = self.new_consumers.take() {
             match new_consumers.poll() {
                 Ok(Async::Ready(new_consumers)) => {
@@ -427,80 +426,37 @@ impl<T> Stream for MultiTopicConsumer<T>
                     self.new_consumers = Some(new_consumers);
                 }
                 Err(e) => {
-                    println!("Error connecting to pulsar topic {}", e);
+                    error!("Error creating pulsar consumers: {}", e);
+                    // don't return error here; could be intermittent connection failure and we want
+                    // to retry
                 }
             }
         }
 
-        match self.refresh.poll() {
-            Ok(Async::Ready(_)) => {
-                println!("refresh");
-                let regex = self.topic_regex.clone();
-                let pulsar = self.pulsar.clone();
-                let subscription = self.subscription.clone();
-                let sub_type = self.sub_type;
-                let deserialize = self.deserialize.clone();
-                let new_consumers = Box::new(self.pulsar.get_topics_of_namespace(self.namespace.clone())
-                    .and_then(move |topics: Vec<String>| {
-                        println!("got topics: {:?}", &topics);
-                        futures::future::collect(topics.into_iter()
-                            .filter(move |topic| regex.is_match(topic.as_str()))
-                            .map(move |topic| {
-                                let pulsar = pulsar.clone();
-                                let deserialize = deserialize.clone();
-                                let subscription = subscription.clone();
-                                pulsar.create_consumer(topic.clone(), subscription, sub_type, move |payload| deserialize(payload))
-                                    .map(|c| (topic, c))
-                            })
-                        )
-                    }));
-                self.new_consumers = Some(new_consumers);
-            }
-            Ok(Async::NotReady) => {},
-            Err(()) => {
-                println!("refresh error");
-            }
+        if let Ok(Async::Ready(_)) = self.refresh.poll() {
+            let regex = self.topic_regex.clone();
+            let pulsar = self.pulsar.clone();
+            let subscription = self.subscription.clone();
+            let sub_type = self.sub_type;
+            let deserialize = self.deserialize.clone();
+            let new_consumers = Box::new(self.pulsar.get_topics_of_namespace(self.namespace.clone())
+                .and_then(move |topics: Vec<String>| {
+                    trace!("fetched topics: {:?}", &topics);
+                    futures::future::collect(topics.into_iter()
+                        .filter(move |topic| regex.is_match(topic.as_str()))
+                        .map(move |topic| {
+                            trace!("creating consumer for topic {}", topic);
+                            let pulsar = pulsar.clone();
+                            let deserialize = deserialize.clone();
+                            let subscription = subscription.clone();
+                            pulsar.create_consumer(topic.clone(), subscription, sub_type, move |payload| deserialize(payload))
+                                .map(|c| (topic, c))
+                        })
+                    )
+                }));
+            self.new_consumers = Some(new_consumers);
+            return self.poll();
         }
-
-//        if let Ok(Async::Ready(_)) = self.refresh.poll() {
-//            println!("refresh");
-//            let regex = self.topic_regex.clone();
-//            let pulsar = self.pulsar.clone();
-//            let subscription = self.subscription.clone();
-//            let sub_type = self.sub_type;
-//            let deserialize = self.deserialize.clone();
-//            let max_retries = self.max_retries;
-//            let max_backoff = self.max_backoff;
-//            let new_consumers = Box::new(self.pulsar.get_topics_of_namespace(self.namespace.clone())
-//                .and_then(move |topics: Vec<String>| {
-//                    println!("got topics: {:?}", &topics);
-//                    futures::future::collect(topics.into_iter()
-//                        .filter(move |topic| regex.is_match(topic.as_str()))
-//                        .map(move |topic| {
-//                            let pulsar = pulsar.clone();
-//                            let deserialize = deserialize.clone();
-//                            let subscription = subscription.clone();
-//                            let topic_ = topic.clone();
-//                            ReconnectingStream::new(
-//                                move || Box::new({
-//                                    let deserialize = deserialize.clone();
-//                                    let topic = topic_.clone();
-//                                    pulsar.create_consumer(topic, subscription.clone(), sub_type, move |payload| deserialize(payload))
-//                                        .map(|stream| {
-//                                            let stream = stream
-//                                                .map(|(r, ack)| (r.map_err(|e| Error::Consumer(e)), ack))
-//                                                .map_err(|e| Error::Consumer(e));
-//                                            Box::new(stream) as Box<dyn Stream<Item=_, Error=_>>
-//                                        })
-//                                }),
-//                                max_retries,
-//                                max_backoff,
-//                            ).map(move |stream| (topic, stream))
-//                        })
-//                    )
-//                }));
-//            self.new_consumers = Some(new_consumers);
-//        }
 
         for _ in 0..self.topics.len() {
             let topic = self.topics.pop_front().unwrap();
@@ -510,12 +466,12 @@ impl<T> Stream for MultiTopicConsumer<T>
                     Ok(Async::NotReady) => {}
                     Ok(Async::Ready(Some(data))) => result = Some(data),
                     Ok(Async::Ready(None)) => {
-                        println!("Unexpected end of stream for pulsar topic {}", topic);
+                        error!("Unexpected end of stream for pulsar topic {}", topic);
                         self.consumers.remove(&topic);
                         continue; //continue to avoid re-adding topic to list of topics
                     }
                     Err(e) => {
-                        println!("Unexpected error consuming from pulsar topic {}: {}", topic, e);
+                        error!("Unexpected error consuming from pulsar topic {}: {}", topic, e);
                         self.consumers.remove(&topic);
                         continue; //continue to avoid re-adding topic to list of topics
                     }
@@ -535,28 +491,35 @@ impl<T> Stream for MultiTopicConsumer<T>
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::Pulsar;
-    use serde_json::json;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+    use std::sync::Mutex;
+    use std::thread;
+
     use regex::Regex;
+    use serde_json::json;
+    use tokio::prelude::*;
+    use tokio::runtime::Runtime;
+
+    use crate::Pulsar;
+
+    use super::*;
 
     #[test]
-    #[ignore]
     fn multi_consumer() {
         let addr = "127.0.0.1:6650".parse().unwrap();
-        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let rt = Runtime::new().unwrap();
 
-        let namespace = "default";
+        let namespace = "public/default";
         let topic1 = "mt_test_a";
-        let topic2 = "mt_test_bb";
+        let topic2 = "mt_test_b";
 
         let data1 = json!({"topic": "a", "msg": 1});
         let data2 = json!({"topic": "a", "msg": 2});
         let data3 = json!({"topic": "b", "msg": 1});
         let data4 = json!({"topic": "b", "msg": 2});
 
-
-        let client: Pulsar = Pulsar::new(addr, None, runtime.executor()).wait().unwrap();
+        let client: Pulsar = Pulsar::new(addr, None, rt.executor()).wait().unwrap();
 
         client.send_json(topic1, &data1).wait().unwrap();
         client.send_json(topic1, &data2).wait().unwrap();
@@ -571,10 +534,14 @@ mod tests {
             namespace,
             SubType::Shared,
             |payload| serde_json::from_slice(&payload.data).map_err(|e| e.into()),
-            Duration::from_secs(10),
+            Duration::from_secs(1),
         );
 
-        runtime.executor().spawn(
+        let error: Arc<Mutex<Option<Error>>> = Arc::new(Mutex::new(None));
+        let successes = Arc::new(AtomicUsize::new(0));
+
+        rt.executor().spawn({
+            let successes = successes.clone();
             consumer.take(4)
                 .for_each(move |(msg, ack)| {
                     ack.ack();
@@ -582,10 +549,28 @@ mod tests {
                     if !data.contains(&msg) {
                         Err(Error::Custom(format!("Unexpected message: {:?}", &msg)))
                     } else {
+                        successes.fetch_add(1, Ordering::Relaxed);
                         Ok(())
                     }
                 })
-                .map_err(|e| panic!(e))
-        );
+                .map_err({
+                    let error = error.clone();
+                    move |e| {
+                        let mut error = error.lock().unwrap();
+                        *error = Some(e);
+                    }
+                })
+        });
+
+        let start = Instant::now();
+        loop {
+            let success_count = successes.load(Ordering::Relaxed);
+            if success_count == 4 {
+                break;
+            } else if start.elapsed() > Duration::from_secs(3) {
+                panic!("Messages not received within timeout");
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
     }
 }
