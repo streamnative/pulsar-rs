@@ -506,6 +506,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore]
     fn multi_consumer() {
         let addr = "127.0.0.1:6650".parse().unwrap();
         let rt = Runtime::new().unwrap();
