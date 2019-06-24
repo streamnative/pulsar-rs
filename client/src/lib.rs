@@ -18,12 +18,11 @@ pub use error::{Error, ConnectionError, ConsumerError, ProducerError, ServiceDis
 pub use connection::{Connection, Authentication};
 pub use connection_manager::ConnectionManager;
 pub use producer::Producer;
-pub use consumer::{Consumer, ConsumerBuilder, MultiTopicConsumer, Ack};
+pub use consumer::{Consumer, ConsumerBuilder, MultiTopicConsumer, Message, Ack};
 pub use service_discovery::ServiceDiscovery;
 pub use client::{Pulsar, DeserializeMessage};
 pub use message::proto;
 pub use message::proto::command_subscribe::SubType;
-
 
 #[cfg(test)]
 mod tests {
