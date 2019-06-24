@@ -17,16 +17,16 @@ use crate::error::{ConnectionError, ConsumerError, Error};
 use crate::message::{Message, Payload, proto::{self, command_subscribe::SubType}};
 use crate::Pulsar;
 
-pub struct Consumer<T> {
+pub struct Consumer<T, E> {
     connection: Arc<Connection>,
     id: u64,
     messages: mpsc::UnboundedReceiver<Message>,
-    deserialize: Box<dyn Fn(Payload) -> Result<T, ConsumerError> + Send>,
+    deserialize: Box<dyn Fn(Payload) -> Result<T, E> + Send>,
     batch_size: u32,
     remaining_messages: u32,
 }
 
-impl<T: DeserializeOwned> Consumer<T> {
+impl<T, E> Consumer<T, E> {
     pub fn new(
         addr: String,
         topic: String,
@@ -37,9 +37,9 @@ impl<T: DeserializeOwned> Consumer<T> {
         auth_data: Option<Authentication>,
         proxy_to_broker_url: Option<String>,
         executor: TaskExecutor,
-        deserialize: Box<dyn Fn(Payload) -> Result<T, ConsumerError> + Send>,
+        deserialize: Box<dyn Fn(Payload) -> Result<T, E> + Send>,
         batch_size: Option<u32>,
-    ) -> impl Future<Item=Consumer<T>, Error=ConsumerError> {
+    ) -> impl Future<Item=Consumer<T, E>, Error=ConsumerError> {
         let consumer_id = consumer_id.unwrap_or_else(rand::random);
         let (resolver, messages) = mpsc::unbounded();
         let batch_size = batch_size.unwrap_or(1000);
@@ -74,8 +74,8 @@ impl<T: DeserializeOwned> Consumer<T> {
         consumer_name: Option<String>,
         deserialize: F,
         batch_size: Option<u32>,
-    ) -> impl Future<Item=Consumer<T>, Error=ConsumerError>
-        where F: Fn(Payload) -> Result<T, ConsumerError> + Send + 'static
+    ) -> impl Future<Item=Consumer<T, E>, Error=ConsumerError>
+        where F: Fn(Payload) -> Result<T, E> + Send + 'static
     {
         let consumer_id = consumer_id.unwrap_or_else(rand::random);
         let (resolver, messages) = mpsc::unbounded();
@@ -127,8 +127,8 @@ impl Ack {
     }
 }
 
-impl<T> Stream for Consumer<T> {
-    type Item = (Result<T, ConsumerError>, Ack);
+impl<T, E> Stream for Consumer<T, E> {
+    type Item = (Result<T, E>, Ack);
     type Error = ConsumerError;
 
     fn poll(&mut self) -> Result<Async<Option<Self::Item>>, Self::Error> {
@@ -168,7 +168,7 @@ impl<T> Stream for Consumer<T> {
     }
 }
 
-impl<T> Drop for Consumer<T> {
+impl<T, E> Drop for Consumer<T, E> {
     fn drop(&mut self) {
         let _ = self.connection.sender().close_consumer(self.id);
     }
@@ -315,7 +315,7 @@ impl<Topic, Subscription, SubscriptionType, DataType> ConsumerBuilder<Topic, Sub
 }
 
 impl ConsumerBuilder<Set<String>, Set<String>, Set<SubType>, Unset> {
-    pub fn build<T: DeserializeOwned>(self) -> impl Future<Item=Consumer<T>, Error=ConsumerError> {
+    pub fn build<T: DeserializeOwned>(self) -> impl Future<Item=Consumer<T, ConsumerError>, Error=ConsumerError> {
         let deserialize = Box::new(|payload: Payload| {
             serde_json::from_slice(&payload.data).map_err(|e| e.into())
         });
@@ -337,7 +337,7 @@ impl ConsumerBuilder<Set<String>, Set<String>, Set<SubType>, Unset> {
 }
 
 impl<T: DeserializeOwned> ConsumerBuilder<Set<String>, Set<String>, Set<SubType>, T> {
-    pub fn build(self) -> impl Future<Item=Consumer<T>, Error=ConsumerError> {
+    pub fn build(self) -> impl Future<Item=Consumer<T, ConsumerError>, Error=ConsumerError> {
         let ConsumerBuilder {
             addr,
             topic: Set(topic),
@@ -356,20 +356,20 @@ impl<T: DeserializeOwned> ConsumerBuilder<Set<String>, Set<String>, Set<SubType>
     }
 }
 
-pub struct MultiTopicConsumer<T> {
+pub struct MultiTopicConsumer<T, E> {
     namespace: String,
     topic_regex: Regex,
     pulsar: Pulsar,
-    consumers: BTreeMap<String, Consumer<T>>,
+    consumers: BTreeMap<String, Consumer<T, E>>,
     topics: VecDeque<String>,
-    new_consumers: Option<Box<dyn Future<Item=Vec<(String, Consumer<T>)>, Error=Error> + Send>>,
+    new_consumers: Option<Box<dyn Future<Item=Vec<(String, Consumer<T, E>)>, Error=Error> + Send>>,
     refresh: Box<dyn Stream<Item=(), Error=()> + Send>,
     subscription: String,
     sub_type: SubType,
-    deserialize: Arc<dyn Fn(Payload) -> Result<T, ConsumerError> + Send + Sync + 'static>,
+    deserialize: Arc<dyn Fn(Payload) -> Result<T, E> + Send + Sync + 'static>,
 }
 
-impl<T> MultiTopicConsumer<T> {
+impl<T, E> MultiTopicConsumer<T, E> {
     //TODO: Expose builder API
     pub fn new<S1, S2, F>(
         pulsar: Pulsar,
@@ -382,7 +382,7 @@ impl<T> MultiTopicConsumer<T> {
     ) -> Self
         where S1: Into<String>,
               S2: Into<String>,
-              F: Fn(Payload) -> Result<T, ConsumerError> + Send + Sync + 'static
+              F: Fn(Payload) -> Result<T, E> + Send + Sync + 'static
     {
         MultiTopicConsumer {
             namespace: namespace.into(),
@@ -401,16 +401,16 @@ impl<T> MultiTopicConsumer<T> {
     }
 }
 
-impl<T> Debug for MultiTopicConsumer<T> {
+impl<T, E> Debug for MultiTopicConsumer<T, E> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "MultiTopicConsumer({:?}, {:?})", &self.namespace, &self.topic_regex)
     }
 }
 
-impl<T> Stream for MultiTopicConsumer<T>
-    where T: 'static, for<'de> T: serde::de::Deserialize<'de>
+impl<T, E> Stream for MultiTopicConsumer<T, E>
+    where T: 'static, E: 'static
 {
-    type Item = (Result<T, ConsumerError>, Ack);
+    type Item = (Result<T, E>, Ack);
     type Error = Error;
 
     fn poll(&mut self) -> Result<Async<Option<Self::Item>>, Self::Error> {
@@ -529,12 +529,12 @@ mod tests {
 
         let data = vec![data1, data2, data3, data4];
 
-        let consumer: MultiTopicConsumer<serde_json::Value> = client.create_multi_topic_consumer(
+        let consumer: MultiTopicConsumer<serde_json::Value, serde_json::Error> = client.create_multi_topic_consumer(
             Regex::new("mt_test_[ab]").unwrap(),
             "test_sub",
             namespace,
             SubType::Shared,
-            |payload| serde_json::from_slice(&payload.data).map_err(|e| e.into()),
+            |payload| serde_json::from_slice(&payload.data),
             Duration::from_secs(1),
         );
 

@@ -20,7 +20,8 @@ use std::time::Duration;
 
 /// Helper trait for consumer deserialization
 pub trait DeserializeMessage {
-    fn deserialize_message(payload: Payload) -> Result<Self, ConsumerError>
+    type Error;
+    fn deserialize_message(payload: Payload) -> Result<Self, Self::Error>
     where
         Self: std::marker::Sized;
 }
@@ -83,7 +84,7 @@ impl Pulsar {
             .map(|topics| topics.topics)
     }
 
-    pub fn create_multi_topic_consumer<T, S1, S2, F>(
+    pub fn create_multi_topic_consumer<T, E, S1, S2, F>(
         &self,
         topic_regex: regex::Regex,
         subscription: S1,
@@ -91,11 +92,11 @@ impl Pulsar {
         sub_type: SubType,
         deserialize: F,
         topic_refresh: Duration,
-    ) -> MultiTopicConsumer<T>
+    ) -> MultiTopicConsumer<T, E>
         where T: DeserializeOwned,
               S1: Into<String>,
               S2: Into<String>,
-              F: Fn(Payload) -> Result<T, ConsumerError> + Send + Sync + 'static
+              F: Fn(Payload) -> Result<T, E> + Send + Sync + 'static
     {
         MultiTopicConsumer::new(
             self.clone(),
@@ -108,17 +109,16 @@ impl Pulsar {
         )
     }
 
-    pub fn create_consumer<T, S1, S2, F>(
+    pub fn create_consumer<T, E, S1, S2, F>(
         &self,
         topic: S1,
         subscription: S2,
         sub_type: SubType,
         deserialize: F,
-    ) -> impl Future<Item = Consumer<T>, Error = Error>
-        where T: DeserializeOwned,
-              S1: Into<String>,
+    ) -> impl Future<Item = Consumer<T, E>, Error = Error>
+        where S1: Into<String>,
               S2: Into<String>,
-              F: Fn(Payload) -> Result<T, ConsumerError> + Send + 'static
+              F: Fn(Payload) -> Result<T, E> + Send + 'static
     {
         let manager = self.manager.clone();
         let topic = topic.into();
@@ -151,7 +151,7 @@ impl Pulsar {
         topic: S1,
         subscription: S2,
         sub_type: SubType,
-    ) -> impl Future<Item = Vec<Consumer<T>>, Error = Error> {
+    ) -> impl Future<Item = Vec<Consumer<T, T::Error>>, Error = Error> {
         let manager = self.manager.clone();
 
         self.service_discovery
