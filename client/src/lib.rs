@@ -31,6 +31,7 @@ mod tests {
     use futures::{Future, Stream, future};
     use super::*;
     use message::proto::command_subscribe::SubType;
+    use crate::consumer::Message;
 
     #[derive(Debug, Serialize, Deserialize)]
     struct TestData {
@@ -53,7 +54,7 @@ mod tests {
             }))
         };
 
-        let consumer = ConsumerBuilder::new(addr, runtime.executor())
+        let consumer: Consumer<TestData, _> = ConsumerBuilder::new(addr, runtime.executor())
             .with_topic("test")
             .with_consumer_name("test_consumer")
             .with_subscription_type(SubType::Exclusive)
@@ -65,10 +66,10 @@ mod tests {
         produce.wait().unwrap();
 
         let mut consumed = 0;
-        let _ = consumer.for_each(move |(data, ack): (Result<TestData, ConsumerError>, Ack)| {
+        let _ = consumer.for_each(move |Message { payload, ack, .. }| {
             consumed += 1;
             ack.ack();
-            if let Err(e) = data {
+            if let Err(e) = payload {
                 println!("Error: {}", e);
             }
             if consumed >= 5000 {

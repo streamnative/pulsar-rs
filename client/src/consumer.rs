@@ -14,13 +14,14 @@ use tokio::timer::Interval;
 
 use crate::connection::{Authentication, Connection};
 use crate::error::{ConnectionError, ConsumerError, Error};
-use crate::message::{Message, Payload, proto::{self, command_subscribe::SubType}};
+use crate::message::{Message as RawMessage, Payload, proto::{self, command_subscribe::SubType}};
 use crate::Pulsar;
 
 pub struct Consumer<T, E> {
     connection: Arc<Connection>,
+    topic: String,
     id: u64,
-    messages: mpsc::UnboundedReceiver<Message>,
+    messages: mpsc::UnboundedReceiver<RawMessage>,
     deserialize: Box<dyn Fn(Payload) -> Result<T, E> + Send>,
     batch_size: u32,
     remaining_messages: u32,
@@ -45,9 +46,12 @@ impl<T, E> Consumer<T, E> {
         let batch_size = batch_size.unwrap_or(1000);
 
         Connection::new(addr, auth_data, proxy_to_broker_url, executor.clone())
-            .and_then(move |conn|
-                conn.sender().subscribe(resolver, topic, subscription, sub_type, consumer_id, consumer_name)
-                    .map(move |resp| (resp, conn)))
+            .and_then({
+                let topic = topic.clone();
+                move |conn|
+                    conn.sender().subscribe(resolver, topic, subscription, sub_type, consumer_id, consumer_name)
+                        .map(move |resp| (resp, conn))
+            })
             .and_then(move |(_, conn)| {
                 conn.sender().send_flow(consumer_id, batch_size)
                     .map(move |()| conn)
@@ -56,6 +60,7 @@ impl<T, E> Consumer<T, E> {
             .map(move |connection| {
                 Consumer {
                     connection: Arc::new(connection),
+                    topic,
                     id: consumer_id,
                     messages,
                     deserialize,
@@ -81,7 +86,7 @@ impl<T, E> Consumer<T, E> {
         let (resolver, messages) = mpsc::unbounded();
         let batch_size = batch_size.unwrap_or(1000);
 
-        conn.sender().subscribe(resolver, topic, subscription, sub_type, consumer_id, consumer_name)
+        conn.sender().subscribe(resolver, topic.clone(), subscription, sub_type, consumer_id, consumer_name)
             .map(move |resp| (resp, conn))
             .and_then(move |(_, conn)| {
                 conn.sender().send_flow(consumer_id, batch_size)
@@ -91,6 +96,7 @@ impl<T, E> Consumer<T, E> {
             .map(move |connection| {
                 Consumer {
                     connection,
+                    topic,
                     id: consumer_id,
                     messages,
                     deserialize: Box::new(deserialize),
@@ -128,7 +134,7 @@ impl Ack {
 }
 
 impl<T, E> Stream for Consumer<T, E> {
-    type Item = (Result<T, E>, Ack);
+    type Item = Message<T, E>;
     type Error = ConsumerError;
 
     fn poll(&mut self) -> Result<Async<Option<Self::Item>>, Self::Error> {
@@ -144,7 +150,7 @@ impl<T, E> Stream for Consumer<T, E> {
         }
 
         let message: Option<Option<(proto::CommandMessage, Payload)>> = try_ready!(self.messages.poll().map_err(|_| ConnectionError::Disconnected))
-            .map(|Message { command, payload }: Message|
+            .map(|RawMessage { command, payload }: RawMessage|
                 command.message
                     .and_then(move |msg| payload
                         .map(move |payload| (msg, payload))));
@@ -155,12 +161,11 @@ impl<T, E> Stream for Consumer<T, E> {
 
         match message {
             Some(Some((message, payload))) => {
-                Ok(Async::Ready(Some(
-                    (
-                        (&self.deserialize)(payload),
-                        Ack::new(self.id, message.message_id, self.connection.clone())
-                    )
-                )))
+                Ok(Async::Ready(Some(Message {
+                    topic: self.topic.clone(),
+                    payload: (&self.deserialize)(payload),
+                    ack: Ack::new(self.id, message.message_id, self.connection.clone())
+                })))
             }
             Some(None) => Err(ConsumerError::MissingPayload(format!("Missing payload for message {:?}", message))),
             None => Ok(Async::Ready(None))
@@ -401,6 +406,12 @@ impl<T, E> MultiTopicConsumer<T, E> {
     }
 }
 
+pub struct Message<T, E> {
+    pub topic: String,
+    pub payload: Result<T, E>,
+    pub ack: Ack,
+}
+
 impl<T, E> Debug for MultiTopicConsumer<T, E> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "MultiTopicConsumer({:?}, {:?})", &self.namespace, &self.topic_regex)
@@ -410,7 +421,7 @@ impl<T, E> Debug for MultiTopicConsumer<T, E> {
 impl<T, E> Stream for MultiTopicConsumer<T, E>
     where T: 'static, E: 'static
 {
-    type Item = (Result<T, E>, Ack);
+    type Item = Message<T, E>;
     type Error = Error;
 
     fn poll(&mut self) -> Result<Async<Option<Self::Item>>, Self::Error> {
@@ -464,7 +475,7 @@ impl<T, E> Stream for MultiTopicConsumer<T, E>
             if let Some(item) = self.consumers.get_mut(&topic).map(|c| c.poll()) {
                 match item {
                     Ok(Async::NotReady) => {}
-                    Ok(Async::Ready(Some(data))) => result = Some(data),
+                    Ok(Async::Ready(Some(msg))) => result = Some(msg),
                     Ok(Async::Ready(None)) => {
                         error!("Unexpected end of stream for pulsar topic {}", topic);
                         self.consumers.remove(&topic);
@@ -544,9 +555,9 @@ mod tests {
         rt.executor().spawn({
             let successes = successes.clone();
             consumer.take(4)
-                .for_each(move |(msg, ack)| {
+                .for_each(move |Message { payload, ack, .. }| {
                     ack.ack();
-                    let msg = msg.unwrap();
+                    let msg = payload.unwrap();
                     if !data.contains(&msg) {
                         Err(Error::Custom(format!("Unexpected message: {:?}", &msg)))
                     } else {
