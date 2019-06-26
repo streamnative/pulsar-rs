@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Debug;
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -7,26 +8,26 @@ use futures::{Async, Stream, sync::mpsc};
 use futures::Future;
 use rand;
 use regex::Regex;
-use serde::de::DeserializeOwned;
-use serde_json;
 use tokio::runtime::TaskExecutor;
 use tokio::timer::Interval;
 
+use crate::{DeserializeMessage, Pulsar};
 use crate::connection::{Authentication, Connection};
 use crate::error::{ConnectionError, ConsumerError, Error};
-use crate::message::{Message, Payload, proto::{self, command_subscribe::SubType}};
-use crate::Pulsar;
+use crate::message::{Message as RawMessage, Payload, proto::{self, command_subscribe::SubType}};
 
-pub struct Consumer<T> {
+pub struct Consumer<T: DeserializeMessage> {
     connection: Arc<Connection>,
+    topic: String,
     id: u64,
-    messages: mpsc::UnboundedReceiver<Message>,
-    deserialize: Box<dyn Fn(Payload) -> Result<T, ConsumerError> + Send>,
+    messages: mpsc::UnboundedReceiver<RawMessage>,
     batch_size: u32,
     remaining_messages: u32,
+    #[allow(unused)]
+    data_type: PhantomData<fn(Payload) -> T::Output>,
 }
 
-impl<T: DeserializeOwned> Consumer<T> {
+impl<T: DeserializeMessage> Consumer<T> {
     pub fn new(
         addr: String,
         topic: String,
@@ -37,7 +38,6 @@ impl<T: DeserializeOwned> Consumer<T> {
         auth_data: Option<Authentication>,
         proxy_to_broker_url: Option<String>,
         executor: TaskExecutor,
-        deserialize: Box<dyn Fn(Payload) -> Result<T, ConsumerError> + Send>,
         batch_size: Option<u32>,
     ) -> impl Future<Item=Consumer<T>, Error=ConsumerError> {
         let consumer_id = consumer_id.unwrap_or_else(rand::random);
@@ -45,9 +45,12 @@ impl<T: DeserializeOwned> Consumer<T> {
         let batch_size = batch_size.unwrap_or(1000);
 
         Connection::new(addr, auth_data, proxy_to_broker_url, executor.clone())
-            .and_then(move |conn|
-                conn.sender().subscribe(resolver, topic, subscription, sub_type, consumer_id, consumer_name)
-                    .map(move |resp| (resp, conn)))
+            .and_then({
+                let topic = topic.clone();
+                move |conn|
+                    conn.sender().subscribe(resolver, topic, subscription, sub_type, consumer_id, consumer_name)
+                        .map(move |resp| (resp, conn))
+            })
             .and_then(move |(_, conn)| {
                 conn.sender().send_flow(consumer_id, batch_size)
                     .map(move |()| conn)
@@ -56,32 +59,30 @@ impl<T: DeserializeOwned> Consumer<T> {
             .map(move |connection| {
                 Consumer {
                     connection: Arc::new(connection),
+                    topic,
                     id: consumer_id,
                     messages,
-                    deserialize,
                     batch_size,
                     remaining_messages: batch_size,
+                    data_type: PhantomData
                 }
             })
     }
 
-    pub fn from_connection<F>(
+    pub fn from_connection(
         conn: Arc<Connection>,
         topic: String,
         subscription: String,
         sub_type: SubType,
         consumer_id: Option<u64>,
         consumer_name: Option<String>,
-        deserialize: F,
         batch_size: Option<u32>,
-    ) -> impl Future<Item=Consumer<T>, Error=ConsumerError>
-        where F: Fn(Payload) -> Result<T, ConsumerError> + Send + 'static
-    {
+    ) -> impl Future<Item=Consumer<T>, Error=ConsumerError> {
         let consumer_id = consumer_id.unwrap_or_else(rand::random);
         let (resolver, messages) = mpsc::unbounded();
         let batch_size = batch_size.unwrap_or(1000);
 
-        conn.sender().subscribe(resolver, topic, subscription, sub_type, consumer_id, consumer_name)
+        conn.sender().subscribe(resolver, topic.clone(), subscription, sub_type, consumer_id, consumer_name)
             .map(move |resp| (resp, conn))
             .and_then(move |(_, conn)| {
                 conn.sender().send_flow(consumer_id, batch_size)
@@ -91,11 +92,12 @@ impl<T: DeserializeOwned> Consumer<T> {
             .map(move |connection| {
                 Consumer {
                     connection,
+                    topic,
                     id: consumer_id,
                     messages,
-                    deserialize: Box::new(deserialize),
                     batch_size,
                     remaining_messages: batch_size,
+                    data_type: PhantomData,
                 }
             })
     }
@@ -127,8 +129,8 @@ impl Ack {
     }
 }
 
-impl<T> Stream for Consumer<T> {
-    type Item = (Result<T, ConsumerError>, Ack);
+impl<T: DeserializeMessage> Stream for Consumer<T> {
+    type Item = Message<T::Output>;
     type Error = ConsumerError;
 
     fn poll(&mut self) -> Result<Async<Option<Self::Item>>, Self::Error> {
@@ -144,7 +146,7 @@ impl<T> Stream for Consumer<T> {
         }
 
         let message: Option<Option<(proto::CommandMessage, Payload)>> = try_ready!(self.messages.poll().map_err(|_| ConnectionError::Disconnected))
-            .map(|Message { command, payload }: Message|
+            .map(|RawMessage { command, payload }|
                 command.message
                     .and_then(move |msg| payload
                         .map(move |payload| (msg, payload))));
@@ -155,12 +157,11 @@ impl<T> Stream for Consumer<T> {
 
         match message {
             Some(Some((message, payload))) => {
-                Ok(Async::Ready(Some(
-                    (
-                        (&self.deserialize)(payload),
-                        Ack::new(self.id, message.message_id, self.connection.clone())
-                    )
-                )))
+                Ok(Async::Ready(Some(Message {
+                    topic: self.topic.clone(),
+                    payload: T::deserialize_message(payload),
+                    ack: Ack::new(self.id, message.message_id, self.connection.clone()),
+                })))
             }
             Some(None) => Err(ConsumerError::MissingPayload(format!("Missing payload for message {:?}", message))),
             None => Ok(Async::Ready(None))
@@ -168,7 +169,7 @@ impl<T> Stream for Consumer<T> {
     }
 }
 
-impl<T> Drop for Consumer<T> {
+impl<T: DeserializeMessage> Drop for Consumer<T> {
     fn drop(&mut self) {
         let _ = self.connection.sender().close_consumer(self.id);
     }
@@ -178,185 +179,194 @@ pub struct Set<T>(T);
 
 pub struct Unset;
 
-pub struct ConsumerBuilder<Topic, Subscription, SubscriptionType, DataType> {
-    addr: String,
+
+pub struct ConsumerBuilder<'a, Topic, Subscription, SubscriptionType> {
+    pulsar: &'a Pulsar,
     topic: Topic,
     subscription: Subscription,
     subscription_type: SubscriptionType,
     consumer_id: Option<u64>,
     consumer_name: Option<String>,
-    authentication: Option<Authentication>,
-    proxy_to_broker_url: Option<String>,
-    executor: TaskExecutor,
-    deserialize: Option<Box<dyn Fn(Payload) -> Result<DataType, ConsumerError> + Send>>,
     batch_size: Option<u32>,
+
+    // Currently only used for multi-topic
+    namespace: Option<String>,
+    topic_refresh: Option<Duration>,
 }
 
-impl ConsumerBuilder<Unset, Unset, Unset, Unset> {
-    pub fn new<S: Into<String>>(addr: S, executor: TaskExecutor) -> Self {
+impl<'a> ConsumerBuilder<'a, Unset, Unset, Unset> {
+    pub fn new(pulsar: &'a Pulsar) -> Self {
         ConsumerBuilder {
-            addr: addr.into(),
+            pulsar,
             topic: Unset,
             subscription: Unset,
             subscription_type: Unset,
             consumer_id: None,
             consumer_name: None,
-            authentication: None,
-            proxy_to_broker_url: None,
-            executor,
-            deserialize: None,
             batch_size: None,
+            namespace: None,
+            topic_refresh: None,
         }
     }
 }
 
-impl<Subscription, SubscriptionType, DataType> ConsumerBuilder<Unset, Subscription, SubscriptionType, DataType> {
-    pub fn with_topic<S: Into<String>>(self, topic: S) -> ConsumerBuilder<Set<String>, Subscription, SubscriptionType, DataType> {
+impl<'a, Subscription, SubscriptionType> ConsumerBuilder<'a, Unset, Subscription, SubscriptionType> {
+    pub fn with_topic<S: Into<String>>(self, topic: S) -> ConsumerBuilder<'a, Set<String>, Subscription, SubscriptionType> {
         ConsumerBuilder {
+            pulsar: self.pulsar,
             topic: Set(topic.into()),
-            addr: self.addr,
             subscription: self.subscription,
             subscription_type: self.subscription_type,
             consumer_id: self.consumer_id,
             consumer_name: self.consumer_name,
-            authentication: self.authentication,
-            proxy_to_broker_url: self.proxy_to_broker_url,
-            executor: self.executor,
-            deserialize: self.deserialize,
             batch_size: self.batch_size,
+            namespace: self.namespace,
+            topic_refresh: self.topic_refresh,
+        }
+    }
+
+    pub fn multi_topic(self, regex: Regex) -> ConsumerBuilder<'a, Set<Regex>, Subscription, SubscriptionType> {
+        ConsumerBuilder {
+            pulsar: self.pulsar,
+            topic: Set(regex),
+            subscription: self.subscription,
+            subscription_type: self.subscription_type,
+            consumer_id: self.consumer_id,
+            consumer_name: self.consumer_name,
+            batch_size: self.batch_size,
+            namespace: self.namespace,
+            topic_refresh: self.topic_refresh,
         }
     }
 }
 
-impl<Topic, SubscriptionType, DataType> ConsumerBuilder<Topic, Unset, SubscriptionType, DataType> {
-    pub fn with_subscription<S: Into<String>>(self, subscription: S) -> ConsumerBuilder<Topic, Set<String>, SubscriptionType, DataType> {
+impl<'a, Topic, SubscriptionType> ConsumerBuilder<'a, Topic, Unset, SubscriptionType> {
+    pub fn with_subscription<S: Into<String>>(self, subscription: S) -> ConsumerBuilder<'a, Topic, Set<String>, SubscriptionType> {
         ConsumerBuilder {
+            pulsar: self.pulsar,
             subscription: Set(subscription.into()),
             topic: self.topic,
-            addr: self.addr,
             subscription_type: self.subscription_type,
             consumer_id: self.consumer_id,
             consumer_name: self.consumer_name,
-            authentication: self.authentication,
-            proxy_to_broker_url: self.proxy_to_broker_url,
-            executor: self.executor,
-            deserialize: self.deserialize,
             batch_size: self.batch_size,
+            namespace: self.namespace,
+            topic_refresh: self.topic_refresh,
         }
     }
 }
 
-impl<Topic, Subscription, DataType> ConsumerBuilder<Topic, Subscription, Unset, DataType> {
-    pub fn with_subscription_type(self, subscription_type: SubType) -> ConsumerBuilder<Topic, Subscription, Set<SubType>, DataType> {
+impl<'a, Topic, Subscription> ConsumerBuilder<'a, Topic, Subscription, Unset> {
+    pub fn with_subscription_type(self, subscription_type: SubType) -> ConsumerBuilder<'a, Topic, Subscription, Set<SubType>> {
         ConsumerBuilder {
+            pulsar: self.pulsar,
             subscription_type: Set(subscription_type),
             topic: self.topic,
-            addr: self.addr,
             subscription: self.subscription,
             consumer_id: self.consumer_id,
             consumer_name: self.consumer_name,
-            authentication: self.authentication,
-            proxy_to_broker_url: self.proxy_to_broker_url,
-            executor: self.executor,
-            deserialize: self.deserialize,
             batch_size: self.batch_size,
+            namespace: self.namespace,
+            topic_refresh: self.topic_refresh,
         }
     }
 }
 
-impl<Topic, Subscription, SubscriptionType> ConsumerBuilder<Topic, Subscription, SubscriptionType, Unset> {
-    pub fn with_deserializer<T, F>(self, deserializer: F) -> ConsumerBuilder<Topic, Subscription, SubscriptionType, T>
-        where F: Fn(Payload) -> Result<T, ConsumerError> + Send + 'static
-    {
+impl<'a, Subscription, SubscriptionType> ConsumerBuilder<'a, Set<Regex>, Subscription, SubscriptionType> {
+    pub fn with_namespace<S: Into<String>>(self, namespace: S) -> ConsumerBuilder<'a, Set<Regex>, Subscription, SubscriptionType> {
         ConsumerBuilder {
-            deserialize: Some(Box::new(deserializer)),
+            pulsar: self.pulsar,
             topic: self.topic,
-            addr: self.addr,
             subscription: self.subscription,
             subscription_type: self.subscription_type,
             consumer_name: self.consumer_name,
             consumer_id: self.consumer_id,
-            authentication: self.authentication,
-            proxy_to_broker_url: self.proxy_to_broker_url,
-            executor: self.executor,
             batch_size: self.batch_size,
+            namespace: Some(namespace.into()),
+            topic_refresh: self.topic_refresh,
+        }
+    }
+
+    pub fn with_topic_refresh(self, refresh_interval: Duration) -> ConsumerBuilder<'a, Set<Regex>, Subscription, SubscriptionType> {
+        ConsumerBuilder {
+            pulsar: self.pulsar,
+            topic: self.topic,
+            subscription: self.subscription,
+            subscription_type: self.subscription_type,
+            consumer_name: self.consumer_name,
+            consumer_id: self.consumer_id,
+            batch_size: self.batch_size,
+            namespace: self.namespace,
+            topic_refresh: Some(refresh_interval),
         }
     }
 }
 
-impl<Topic, Subscription, SubscriptionType, DataType> ConsumerBuilder<Topic, Subscription, SubscriptionType, DataType> {
-    pub fn with_consumer_id(mut self, consumer_id: u64) -> ConsumerBuilder<Topic, Subscription, SubscriptionType, DataType> {
+impl<'a, Topic, Subscription, SubscriptionType> ConsumerBuilder<'a, Topic, Subscription, SubscriptionType> {
+    pub fn with_consumer_id(mut self, consumer_id: u64) -> ConsumerBuilder<'a, Topic, Subscription, SubscriptionType> {
         self.consumer_id = Some(consumer_id);
         self
     }
 
-    pub fn with_consumer_name<S: Into<String>>(mut self, consumer_name: S) -> ConsumerBuilder<Topic, Subscription, SubscriptionType, DataType> {
+    pub fn with_consumer_name<S: Into<String>>(mut self, consumer_name: S) -> ConsumerBuilder<'a, Topic, Subscription, SubscriptionType> {
         self.consumer_name = Some(consumer_name.into());
         self
     }
 
-    pub fn with_batch_size(mut self, batch_size: u32) -> ConsumerBuilder<Topic, Subscription, SubscriptionType, DataType> {
+    pub fn with_batch_size(mut self, batch_size: u32) -> ConsumerBuilder<'a, Topic, Subscription, SubscriptionType> {
         self.batch_size = Some(batch_size);
         self
     }
-
-    pub fn authenticate(mut self, method: String, data: Vec<u8>) -> ConsumerBuilder<Topic, Subscription, SubscriptionType, DataType> {
-        self.authentication = Some(Authentication {
-            name: method,
-            data,
-        });
-        self
-    }
-
-    pub fn with_proxy_to_broker_url<S: Into<String>>(mut self, url: S) -> ConsumerBuilder<Topic, Subscription, SubscriptionType, DataType> {
-        self.proxy_to_broker_url = Some(url.into());
-        self
-    }
 }
 
-impl ConsumerBuilder<Set<String>, Set<String>, Set<SubType>, Unset> {
-    pub fn build<T: DeserializeOwned>(self) -> impl Future<Item=Consumer<T>, Error=ConsumerError> {
-        let deserialize = Box::new(|payload: Payload| {
-            serde_json::from_slice(&payload.data).map_err(|e| e.into())
-        });
+impl<'a> ConsumerBuilder<'a, Set<String>, Set<String>, Set<SubType>> {
+    pub fn build<T: DeserializeMessage>(self) -> impl Future<Item=Consumer<T>, Error=Error> {
         let ConsumerBuilder {
-            addr,
+            pulsar,
             topic: Set(topic),
             subscription: Set(subscription),
             subscription_type: Set(sub_type),
             consumer_id,
             consumer_name,
-            authentication,
-            proxy_to_broker_url,
-            executor,
             batch_size,
             ..
         } = self;
-        Consumer::new(addr, topic, subscription, sub_type, consumer_id, consumer_name, authentication, proxy_to_broker_url, executor, deserialize, batch_size)
+
+        pulsar.create_consumer(topic, subscription, sub_type, batch_size, consumer_name, consumer_id)
     }
 }
 
-impl<T: DeserializeOwned> ConsumerBuilder<Set<String>, Set<String>, Set<SubType>, T> {
-    pub fn build(self) -> impl Future<Item=Consumer<T>, Error=ConsumerError> {
+impl<'a> ConsumerBuilder<'a, Set<Regex>, Set<String>, Set<SubType>> {
+    pub fn build<T: DeserializeMessage>(self) -> MultiTopicConsumer<T> {
         let ConsumerBuilder {
-            addr,
+            pulsar,
             topic: Set(topic),
             subscription: Set(subscription),
             subscription_type: Set(sub_type),
             consumer_id,
             consumer_name,
-            authentication,
-            proxy_to_broker_url,
-            executor,
-            deserialize,
             batch_size,
+            topic_refresh,
+            namespace,
+            ..
         } = self;
-        let deserialize = deserialize.unwrap();
-        Consumer::new(addr, topic, subscription, sub_type, consumer_id, consumer_name, authentication, proxy_to_broker_url, executor, deserialize, batch_size)
+        if consumer_id.is_none() {
+            warn!("Multi-topic consumers cannot have a set consumer ID; ignoring.");
+        }
+        if consumer_name.is_none() {
+            warn!("Consumer name not currently supported for Multi-topic consumers; ignoring.");
+        }
+        if batch_size.is_none() {
+            warn!("Batch size not currently supported for Multi-topic consumers; ignoring.");
+        }
+        let namespace = namespace.unwrap_or_else(|| "public/default".to_owned());
+        let topic_refresh = topic_refresh.unwrap_or_else(|| Duration::from_secs(30));
+
+        pulsar.create_multi_topic_consumer(topic, subscription, namespace, sub_type, topic_refresh)
     }
 }
 
-pub struct MultiTopicConsumer<T> {
+pub struct MultiTopicConsumer<T: DeserializeMessage> {
     namespace: String,
     topic_regex: Regex,
     pulsar: Pulsar,
@@ -366,23 +376,19 @@ pub struct MultiTopicConsumer<T> {
     refresh: Box<dyn Stream<Item=(), Error=()> + Send>,
     subscription: String,
     sub_type: SubType,
-    deserialize: Arc<dyn Fn(Payload) -> Result<T, ConsumerError> + Send + Sync + 'static>,
 }
 
-impl<T> MultiTopicConsumer<T> {
-    //TODO: Expose builder API
-    pub fn new<S1, S2, F>(
+impl<T: DeserializeMessage> MultiTopicConsumer<T> {
+    pub fn new<S1, S2>(
         pulsar: Pulsar,
         namespace: S1,
         topic_regex: Regex,
         subscription: S2,
         sub_type: SubType,
-        deserialize: F,
         topic_refresh: Duration,
     ) -> Self
         where S1: Into<String>,
               S2: Into<String>,
-              F: Fn(Payload) -> Result<T, ConsumerError> + Send + Sync + 'static
     {
         MultiTopicConsumer {
             namespace: namespace.into(),
@@ -396,21 +402,24 @@ impl<T> MultiTopicConsumer<T> {
                 .map_err(|e| panic!("error creating referesh timer: {}", e))),
             subscription: subscription.into(),
             sub_type,
-            deserialize: Arc::new(deserialize),
         }
     }
 }
 
-impl<T> Debug for MultiTopicConsumer<T> {
+pub struct Message<T> {
+    pub topic: String,
+    pub payload: T,
+    pub ack: Ack,
+}
+
+impl<T: DeserializeMessage> Debug for MultiTopicConsumer<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "MultiTopicConsumer({:?}, {:?})", &self.namespace, &self.topic_regex)
     }
 }
 
-impl<T> Stream for MultiTopicConsumer<T>
-    where T: 'static, for<'de> T: serde::de::Deserialize<'de>
-{
-    type Item = (Result<T, ConsumerError>, Ack);
+impl<T: 'static + DeserializeMessage> Stream for MultiTopicConsumer<T> {
+    type Item = Message<T::Output>;
     type Error = Error;
 
     fn poll(&mut self) -> Result<Async<Option<Self::Item>>, Self::Error> {
@@ -438,7 +447,6 @@ impl<T> Stream for MultiTopicConsumer<T>
             let pulsar = self.pulsar.clone();
             let subscription = self.subscription.clone();
             let sub_type = self.sub_type;
-            let deserialize = self.deserialize.clone();
             let new_consumers = Box::new(self.pulsar.get_topics_of_namespace(self.namespace.clone())
                 .and_then(move |topics: Vec<String>| {
                     trace!("fetched topics: {:?}", &topics);
@@ -447,9 +455,8 @@ impl<T> Stream for MultiTopicConsumer<T>
                         .map(move |topic| {
                             trace!("creating consumer for topic {}", topic);
                             let pulsar = pulsar.clone();
-                            let deserialize = deserialize.clone();
                             let subscription = subscription.clone();
-                            pulsar.create_consumer(topic.clone(), subscription, sub_type, move |payload| deserialize(payload))
+                            pulsar.create_consumer(topic.clone(), subscription, sub_type, None, None, None)
                                 .map(|c| (topic, c))
                         })
                     )
@@ -464,7 +471,7 @@ impl<T> Stream for MultiTopicConsumer<T>
             if let Some(item) = self.consumers.get_mut(&topic).map(|c| c.poll()) {
                 match item {
                     Ok(Async::NotReady) => {}
-                    Ok(Async::Ready(Some(data))) => result = Some(data),
+                    Ok(Async::Ready(Some(msg))) => result = Some(msg),
                     Ok(Async::Ready(None)) => {
                         error!("Unexpected end of stream for pulsar topic {}", topic);
                         self.consumers.remove(&topic);
@@ -529,14 +536,13 @@ mod tests {
 
         let data = vec![data1, data2, data3, data4];
 
-        let consumer: MultiTopicConsumer<serde_json::Value> = client.create_multi_topic_consumer(
-            Regex::new("mt_test_[ab]").unwrap(),
-            "test_sub",
-            namespace,
-            SubType::Shared,
-            |payload| serde_json::from_slice(&payload.data).map_err(|e| e.into()),
-            Duration::from_secs(1),
-        );
+        let consumer: MultiTopicConsumer<serde_json::Value> = client.consumer()
+            .multi_topic(Regex::new("mt_test_[ab]").unwrap())
+            .with_namespace(namespace)
+            .with_subscription("test_sub")
+            .with_subscription_type(SubType::Shared)
+            .with_topic_refresh(Duration::from_secs(1))
+            .build();
 
         let error: Arc<Mutex<Option<Error>>> = Arc::new(Mutex::new(None));
         let successes = Arc::new(AtomicUsize::new(0));
@@ -544,9 +550,9 @@ mod tests {
         rt.executor().spawn({
             let successes = successes.clone();
             consumer.take(4)
-                .for_each(move |(msg, ack)| {
+                .for_each(move |Message { payload, ack, .. }| {
                     ack.ack();
-                    let msg = msg.unwrap();
+                    let msg = payload.unwrap();
                     if !data.contains(&msg) {
                         Err(Error::Custom(format!("Unexpected message: {:?}", &msg)))
                     } else {
