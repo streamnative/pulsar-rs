@@ -31,18 +31,32 @@ mod tests {
     use super::*;
     use message::proto::command_subscribe::SubType;
     use crate::consumer::Message;
+    use crate::message::Payload;
 
     #[derive(Debug, Serialize, Deserialize)]
     struct TestData {
         pub data: String
     }
 
+    impl DeserializeMessage for TestData {
+        type Output = Result<TestData, serde_json::Error>;
+
+        fn deserialize_message(payload: Payload) -> Self::Output {
+            serde_json::from_slice(&payload.data)
+        }
+    }
+
     #[test]
     #[ignore]
     fn connect() {
-        let addr = "127.0.0.1:6650";
+        let addr = "127.0.0.1:6650".parse().unwrap();
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let mut producer = Producer::new(addr, None, None, None, runtime.executor())
+
+        let pulsar = Pulsar::new(addr, None, runtime.executor())
+            .wait().unwrap();
+
+        //TODO replace with new producer API when available
+        let mut producer = Producer::new(addr.to_string(), None, None, None, runtime.executor())
             .wait()
             .unwrap();
 
@@ -53,7 +67,7 @@ mod tests {
             }))
         };
 
-        let consumer: Consumer<TestData, _> = ConsumerBuilder::new(addr, runtime.executor())
+        let consumer: Consumer<TestData> = pulsar.consumer()
             .with_topic("test")
             .with_consumer_name("test_consumer")
             .with_subscription_type(SubType::Exclusive)
