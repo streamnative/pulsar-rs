@@ -379,7 +379,6 @@ pub struct MultiTopicConsumer<T: DeserializeMessage> {
 }
 
 impl<T: DeserializeMessage> MultiTopicConsumer<T> {
-    //TODO: Expose builder API
     pub fn new<S1, S2>(
         pulsar: Pulsar,
         namespace: S1,
