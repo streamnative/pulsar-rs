@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::string::FromUtf8Error;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,13 +14,12 @@ use tokio::runtime::TaskExecutor;
 use crate::connection::Authentication;
 use crate::connection_manager::{BrokerAddress, ConnectionManager};
 use crate::consumer::{Consumer, MultiTopicConsumer, Unset};
+use crate::ConsumerBuilder;
 use crate::error::{ConsumerError, Error};
 use crate::message::Payload;
 use crate::message::proto::{command_subscribe::SubType, CommandSendReceipt};
 use crate::producer::Producer;
 use crate::service_discovery::ServiceDiscovery;
-use crate::ConsumerBuilder;
-use std::string::FromUtf8Error;
 
 /// Helper trait for consumer deserialization
 pub trait DeserializeMessage {
@@ -152,7 +152,7 @@ impl Pulsar {
         sub_type: SubType,
         batch_size: Option<u32>,
         consumer_name: Option<String>,
-        consumer_id: Option<u64>
+        consumer_id: Option<u64>,
     ) -> impl Future<Item=Consumer<T>, Error=Error>
         where S1: Into<String>,
               S2: Into<String>,
