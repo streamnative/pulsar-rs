@@ -16,7 +16,7 @@ use crate::connection::{Authentication, Connection};
 use crate::error::{ConnectionError, ConsumerError, Error};
 use crate::message::{Message as RawMessage, Payload, proto::{self, command_subscribe::SubType}};
 
-pub struct Consumer<T> {
+pub struct Consumer<T: DeserializeMessage> {
     connection: Arc<Connection>,
     topic: String,
     id: u64,
@@ -24,16 +24,10 @@ pub struct Consumer<T> {
     batch_size: u32,
     remaining_messages: u32,
     #[allow(unused)]
-    data_type: SendSyncPhantomData<T>,
+    data_type: PhantomData<fn(Payload) -> T::Output>,
 }
 
-// We don't want to require Send for T: DeserializeMessage (only for <T as DeserializeMessage>::Output)
-// so we have to convince the compiler to let our PhantomData be Send + Sync
-struct SendSyncPhantomData<T>(PhantomData<T>);
-unsafe impl<T> Send for SendSyncPhantomData<T> {}
-unsafe impl<T> Sync for SendSyncPhantomData<T> {}
-
-impl<T> Consumer<T> {
+impl<T: DeserializeMessage> Consumer<T> {
     pub fn new(
         addr: String,
         topic: String,
@@ -70,7 +64,7 @@ impl<T> Consumer<T> {
                     messages,
                     batch_size,
                     remaining_messages: batch_size,
-                    data_type: SendSyncPhantomData(PhantomData)
+                    data_type: PhantomData
                 }
             })
     }
@@ -103,7 +97,7 @@ impl<T> Consumer<T> {
                     messages,
                     batch_size,
                     remaining_messages: batch_size,
-                    data_type: SendSyncPhantomData(PhantomData),
+                    data_type: PhantomData,
                 }
             })
     }
@@ -175,7 +169,7 @@ impl<T: DeserializeMessage> Stream for Consumer<T> {
     }
 }
 
-impl<T> Drop for Consumer<T> {
+impl<T: DeserializeMessage> Drop for Consumer<T> {
     fn drop(&mut self) {
         let _ = self.connection.sender().close_consumer(self.id);
     }
@@ -372,7 +366,7 @@ impl<'a> ConsumerBuilder<'a, Set<Regex>, Set<String>, Set<SubType>> {
     }
 }
 
-pub struct MultiTopicConsumer<T> {
+pub struct MultiTopicConsumer<T: DeserializeMessage> {
     namespace: String,
     topic_regex: Regex,
     pulsar: Pulsar,
@@ -384,7 +378,7 @@ pub struct MultiTopicConsumer<T> {
     sub_type: SubType,
 }
 
-impl<T> MultiTopicConsumer<T> {
+impl<T: DeserializeMessage> MultiTopicConsumer<T> {
     //TODO: Expose builder API
     pub fn new<S1, S2>(
         pulsar: Pulsar,
@@ -419,7 +413,7 @@ pub struct Message<T> {
     pub ack: Ack,
 }
 
-impl<T> Debug for MultiTopicConsumer<T> {
+impl<T: DeserializeMessage> Debug for MultiTopicConsumer<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "MultiTopicConsumer({:?}, {:?})", &self.namespace, &self.topic_regex)
     }

@@ -154,7 +154,8 @@ impl Pulsar {
         consumer_name: Option<String>,
         consumer_id: Option<u64>,
     ) -> impl Future<Item=Consumer<T>, Error=Error>
-        where S1: Into<String>,
+        where T: DeserializeMessage,
+              S1: Into<String>,
               S2: Into<String>,
     {
         let manager = self.manager.clone();
