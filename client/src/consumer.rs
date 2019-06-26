@@ -146,7 +146,7 @@ impl<T: DeserializeMessage> Stream for Consumer<T> {
         }
 
         let message: Option<Option<(proto::CommandMessage, Payload)>> = try_ready!(self.messages.poll().map_err(|_| ConnectionError::Disconnected))
-            .map(|RawMessage { command, payload }: RawMessage|
+            .map(|RawMessage { command, payload }|
                 command.message
                     .and_then(move |msg| payload
                         .map(move |payload| (msg, payload))));
