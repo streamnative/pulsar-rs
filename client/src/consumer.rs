@@ -432,14 +432,16 @@ impl<T: DeserializeMessage> MultiTopicConsumer<T> {
     }
 
     fn send_state(&mut self) {
-        let state = ConsumerState {
-            connected_topics: self.consumers.keys().cloned().collect(),
-            last_message_received: self.last_message_received,
-            messages_received: self.messages_received,
-        };
-        self.state_streams.retain(|s| {
-            s.unbounded_send(state.clone()).is_ok()
-        });
+        if !self.state_streams.is_empty() {
+            let state = ConsumerState {
+                connected_topics: self.consumers.keys().cloned().collect(),
+                last_message_received: self.last_message_received,
+                messages_received: self.messages_received,
+            };
+            self.state_streams.retain(|s| {
+                s.unbounded_send(state.clone()).is_ok()
+            });
+        }
     }
 
     fn record_message(&mut self) {
