@@ -425,7 +425,7 @@ impl<T: DeserializeMessage> MultiTopicConsumer<T> {
         }
     }
 
-    pub fn get_state_stream(&mut self) -> impl Stream<Item=ConsumerState, Error=()> {
+    pub fn start_state_stream(&mut self) -> impl Stream<Item=ConsumerState, Error=()> {
         let (tx, rx) = unbounded();
         self.state_streams.push(tx);
         rx
@@ -609,7 +609,7 @@ mod tests {
             .with_topic_refresh(Duration::from_secs(1))
             .build();
 
-        let consumer_state = consumer.get_state_stream();
+        let consumer_state = consumer.start_state_stream();
 
         let error: Arc<Mutex<Option<Error>>> = Arc::new(Mutex::new(None));
         let successes = Arc::new(AtomicUsize::new(0));
