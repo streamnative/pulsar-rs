@@ -1,11 +1,13 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
 use futures::{Async, Stream, sync::mpsc};
 use futures::Future;
+use futures::sync::mpsc::{unbounded, UnboundedSender};
 use rand;
 use regex::Regex;
 use tokio::runtime::TaskExecutor;
@@ -64,7 +66,7 @@ impl<T: DeserializeMessage> Consumer<T> {
                     messages,
                     batch_size,
                     remaining_messages: batch_size,
-                    data_type: PhantomData
+                    data_type: PhantomData,
                 }
             })
     }
@@ -100,6 +102,10 @@ impl<T: DeserializeMessage> Consumer<T> {
                     data_type: PhantomData,
                 }
             })
+    }
+
+    fn topic(&self) -> &str {
+        &self.topic
     }
 }
 
@@ -366,16 +372,27 @@ impl<'a> ConsumerBuilder<'a, Set<Regex>, Set<String>, Set<SubType>> {
     }
 }
 
+/// Details about the current state of the Consumer
+#[derive(Debug, Clone)]
+pub struct ConsumerState {
+    pub connected_topics: Vec<String>,
+    pub last_message_received: Option<DateTime<Utc>>,
+    pub messages_received: u64,
+}
+
 pub struct MultiTopicConsumer<T: DeserializeMessage> {
     namespace: String,
     topic_regex: Regex,
     pulsar: Pulsar,
     consumers: BTreeMap<String, Consumer<T>>,
     topics: VecDeque<String>,
-    new_consumers: Option<Box<dyn Future<Item=Vec<(String, Consumer<T>)>, Error=Error> + Send>>,
+    new_consumers: Option<Box<dyn Future<Item=Vec<Consumer<T>>, Error=Error> + Send>>,
     refresh: Box<dyn Stream<Item=(), Error=()> + Send>,
     subscription: String,
     sub_type: SubType,
+    last_message_received: Option<DateTime<Utc>>,
+    messages_received: u64,
+    state_streams: Vec<UnboundedSender<ConsumerState>>,
 }
 
 impl<T: DeserializeMessage> MultiTopicConsumer<T> {
@@ -402,7 +419,53 @@ impl<T: DeserializeMessage> MultiTopicConsumer<T> {
                 .map_err(|e| panic!("error creating referesh timer: {}", e))),
             subscription: subscription.into(),
             sub_type,
+            last_message_received: None,
+            messages_received: 0,
+            state_streams: vec![],
         }
+    }
+
+    pub fn start_state_stream(&mut self) -> impl Stream<Item=ConsumerState, Error=()> {
+        let (tx, rx) = unbounded();
+        self.state_streams.push(tx);
+        rx
+    }
+
+    fn send_state(&mut self) {
+        if !self.state_streams.is_empty() {
+            let state = ConsumerState {
+                connected_topics: self.consumers.keys().cloned().collect(),
+                last_message_received: self.last_message_received,
+                messages_received: self.messages_received,
+            };
+            self.state_streams.retain(|s| {
+                s.unbounded_send(state.clone()).is_ok()
+            });
+        }
+    }
+
+    fn record_message(&mut self) {
+        self.last_message_received = Some(Utc::now());
+        self.messages_received += 1;
+        self.send_state();
+    }
+
+    fn add_consumers<I: IntoIterator<Item=Consumer<T>>>(&mut self, consumers: I) {
+        for consumer in consumers {
+            let topic = consumer.topic().to_owned();
+            self.consumers.insert(topic.clone(), consumer);
+            self.topics.push_back(topic);
+        }
+
+        self.send_state();
+    }
+
+    fn remove_consumers(&mut self, topics: &[String]) {
+        self.topics.retain(|t| !topics.contains(t));
+        for topic in topics {
+            self.consumers.remove(topic);
+        }
+        self.send_state();
     }
 }
 
@@ -426,10 +489,7 @@ impl<T: 'static + DeserializeMessage> Stream for MultiTopicConsumer<T> {
         if let Some(mut new_consumers) = self.new_consumers.take() {
             match new_consumers.poll() {
                 Ok(Async::Ready(new_consumers)) => {
-                    for (topic, consumer) in new_consumers {
-                        self.consumers.insert(topic.clone(), consumer);
-                        self.topics.push_back(topic);
-                    }
+                    self.add_consumers(new_consumers);
                 }
                 Ok(Async::NotReady) => {
                     self.new_consumers = Some(new_consumers);
@@ -447,17 +507,17 @@ impl<T: 'static + DeserializeMessage> Stream for MultiTopicConsumer<T> {
             let pulsar = self.pulsar.clone();
             let subscription = self.subscription.clone();
             let sub_type = self.sub_type;
+            let existing_topics: BTreeSet<String> = self.consumers.keys().cloned().collect();
             let new_consumers = Box::new(self.pulsar.get_topics_of_namespace(self.namespace.clone())
                 .and_then(move |topics: Vec<String>| {
                     trace!("fetched topics: {:?}", &topics);
                     futures::future::collect(topics.into_iter()
-                        .filter(move |topic| regex.is_match(topic.as_str()))
+                        .filter(move |topic| !existing_topics.contains(topic) && regex.is_match(topic.as_str()))
                         .map(move |topic| {
                             trace!("creating consumer for topic {}", topic);
                             let pulsar = pulsar.clone();
                             let subscription = subscription.clone();
-                            pulsar.create_consumer(topic.clone(), subscription, sub_type, None, None, None)
-                                .map(|c| (topic, c))
+                            pulsar.create_consumer(topic, subscription, sub_type, None, None, None)
                         })
                     )
                 }));
@@ -465,31 +525,35 @@ impl<T: 'static + DeserializeMessage> Stream for MultiTopicConsumer<T> {
             return self.poll();
         }
 
+        let mut topics_to_remove = Vec::new();
+        let mut result = None;
         for _ in 0..self.topics.len() {
+            if result.is_some() {
+                break;
+            }
             let topic = self.topics.pop_front().unwrap();
-            let mut result = None;
             if let Some(item) = self.consumers.get_mut(&topic).map(|c| c.poll()) {
                 match item {
                     Ok(Async::NotReady) => {}
                     Ok(Async::Ready(Some(msg))) => result = Some(msg),
                     Ok(Async::Ready(None)) => {
-                        error!("Unexpected end of stream for pulsar topic {}", topic);
-                        self.consumers.remove(&topic);
-                        continue; //continue to avoid re-adding topic to list of topics
+                        error!("Unexpected end of stream for pulsar topic {}", &topic);
+                        topics_to_remove.push(topic.clone());
                     }
                     Err(e) => {
-                        error!("Unexpected error consuming from pulsar topic {}: {}", topic, e);
-                        self.consumers.remove(&topic);
-                        continue; //continue to avoid re-adding topic to list of topics
+                        error!("Unexpected error consuming from pulsar topic {}: {}", &topic, e);
+                        topics_to_remove.push(topic.clone());
                     }
                 }
             } else {
                 println!("BUG: Missing consumer for topic {}", &topic);
             }
             self.topics.push_back(topic);
-            if let Some(result) = result {
-                return Ok(Async::Ready(Some(result)));
-            }
+        }
+        self.remove_consumers(&topics_to_remove);
+        if let Some(result) = result {
+            self.record_message();
+            return Ok(Async::Ready(Some(result)));
         }
 
         Ok(Async::NotReady)
@@ -529,6 +593,7 @@ mod tests {
 
         let client: Pulsar = Pulsar::new(addr, None, rt.executor()).wait().unwrap();
 
+        let send_start = Utc::now();
         client.send_json(topic1, &data1, None).wait().unwrap();
         client.send_json(topic1, &data2, None).wait().unwrap();
         client.send_json(topic2, &data3, None).wait().unwrap();
@@ -536,13 +601,15 @@ mod tests {
 
         let data = vec![data1, data2, data3, data4];
 
-        let consumer: MultiTopicConsumer<serde_json::Value> = client.consumer()
+        let mut consumer: MultiTopicConsumer<serde_json::Value> = client.consumer()
             .multi_topic(Regex::new("mt_test_[ab]").unwrap())
             .with_namespace(namespace)
             .with_subscription("test_sub")
             .with_subscription_type(SubType::Shared)
             .with_topic_refresh(Duration::from_secs(1))
             .build();
+
+        let consumer_state = consumer.start_state_stream();
 
         let error: Arc<Mutex<Option<Error>>> = Arc::new(Mutex::new(None));
         let successes = Arc::new(AtomicUsize::new(0));
@@ -579,5 +646,13 @@ mod tests {
             }
             thread::sleep(Duration::from_millis(100));
         }
+
+        let consumer_state: Vec<ConsumerState> = consumer_state.collect()
+            .wait()
+            .unwrap();
+        let latest_state = consumer_state.last().unwrap();
+        assert!(latest_state.messages_received >= 4);
+        assert!(latest_state.connected_topics.len() >= 2);
+        assert!(latest_state.last_message_received.unwrap() >= send_start);
     }
 }
