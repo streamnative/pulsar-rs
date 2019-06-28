@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -12,6 +12,7 @@ use tokio_codec;
 
 use crate::error::{ConnectionError, SharedError};
 use crate::message::{Codec, Message, proto::{self, command_subscribe::SubType}};
+use crate::producer;
 
 pub enum Register {
     Request { key: RequestKey, resolver: oneshot::Sender<Message> },
@@ -231,16 +232,22 @@ impl ConnectionSender {
         }
     }
 
-    pub fn send(&mut self,
-                producer_id: u64,
-                producer_name: String,
-                sequence_id: u64,
-                num_messages: Option<i32>,
-                data: Vec<u8>,
-                properties: Option<HashMap<String, String>>,
+    pub fn send(
+        &self,
+        producer_id: u64,
+        producer_name: String,
+        sequence_id: u64,
+        num_messages: Option<i32>,
+        message: producer::Message
     ) -> impl Future<Item=proto::CommandSendReceipt, Error=ConnectionError> {
         let key = RequestKey::ProducerSend { producer_id, sequence_id };
-        let msg = messages::send(producer_id, producer_name, sequence_id, num_messages, data, properties);
+        let msg = messages::send(
+            producer_id,
+            producer_name,
+            sequence_id,
+            num_messages,
+            message,
+        );
         self.send_message(msg, key, |resp| resp.command.send_receipt)
     }
 
@@ -465,12 +472,11 @@ fn extract_message<T: Debug, F>(message: Message, extract: F) -> Result<T, Conne
 }
 
 pub(crate) mod messages {
-    use std::collections::HashMap;
-
     use chrono::Utc;
 
     use crate::connection::Authentication;
     use crate::message::{Message, Payload, proto::{self, base_command::Type as CommandType, command_subscribe::SubType}};
+    use crate::producer;
 
     pub fn connect(auth: Option<Authentication>, proxy_to_broker_url: Option<String>) -> Message {
         let (auth_method_name, auth_data) = match auth {
@@ -553,12 +559,11 @@ pub(crate) mod messages {
         producer_name: String,
         sequence_id: u64,
         num_messages: Option<i32>,
-        data: Vec<u8>,
-        properties: Option<HashMap<String, String>>,
+        message: producer::Message,
     ) -> Message {
-        let properties = properties.map(|mut h| h.drain().map(|(key, value)| {
+        let properties = message.properties.into_iter().map(|(key, value)| {
             proto::KeyValue { key, value }
-        }).collect()).unwrap_or(vec![]);
+        }).collect();
 
         Message {
             command: proto::BaseCommand {
@@ -576,9 +581,19 @@ pub(crate) mod messages {
                     sequence_id,
                     properties,
                     publish_time: Utc::now().timestamp_millis() as u64,
-                    ..Default::default()
+                    replicated_from: None,
+                    partition_key: message.partition_key,
+                    replicate_to: message.replicate_to,
+                    compression: message.compression,
+                    uncompressed_size: message.uncompressed_size,
+                    num_messages_in_batch: message.num_messages_in_batch,
+                    event_time: message.event_time,
+                    encryption_keys: message.encryption_keys,
+                    encryption_algo: message.encryption_algo,
+                    encryption_param: message.encryption_param,
+                    schema_version: message.schema_version,
                 },
-                data,
+                data: message.payload,
             }),
         }
     }
