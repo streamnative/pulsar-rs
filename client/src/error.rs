@@ -149,6 +149,7 @@ impl std::error::Error for ConsumerError {
 pub enum ProducerError {
     Connection(ConnectionError),
     Serde(serde_json::Error),
+    Custom(String),
 }
 
 impl From<ConnectionError> for ProducerError {
@@ -168,6 +169,7 @@ impl fmt::Display for ProducerError {
     match self {
       ProducerError::Connection(e) => write!(f, "Connection error: {}", e),
       ProducerError::Serde(e) => write!(f, "Serialization error: {}", e),
+      ProducerError::Custom(s) => write!(f, "Custom error: {}", s),
     }
   }
 }
@@ -177,6 +179,7 @@ impl std::error::Error for ProducerError {
         match self {
             ProducerError::Connection(e) => Some(e),
             ProducerError::Serde(e) => Some(e),
+            ProducerError::Custom(_) => None,
         }
     }
 }
