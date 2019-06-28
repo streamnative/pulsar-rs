@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use futures::{Future, future::{self, Either}};
 use rand;
-use serde::export::PhantomData;
 use serde::Serialize;
 use serde_json;
 use tokio::prelude::*;
@@ -49,29 +48,26 @@ pub struct Message {
 }
 
 #[derive(Clone)]
-pub struct MultiTopicProducer<T: SerializeMessage> {
+pub struct MultiTopicProducer {
     message_sender: UnboundedSender<ProducerMessage>,
-    deserialize: PhantomData<fn(T::Input) -> Result<Message, ProducerError>>
 }
 
-impl<T: SerializeMessage> MultiTopicProducer<T> {
-    pub fn new(pulsar: Pulsar) -> MultiTopicProducer<T> {
+impl MultiTopicProducer {
+    pub fn new(pulsar: Pulsar) -> MultiTopicProducer {
         let (tx, rx) = unbounded();
         let executor = pulsar.executor().clone();
-        executor.spawn(ProducerEngine::<T> {
+        executor.spawn(ProducerEngine {
             pulsar,
             inbound: rx,
             producers: BTreeMap::new(),
             new_producers: BTreeMap::new(),
-            serialize: PhantomData,
         });
         MultiTopicProducer {
             message_sender: tx,
-            deserialize: PhantomData,
         }
     }
 
-    pub fn send<S: Into<String>>(&self, topic: S, message: &T::Input) -> impl Future<Item=proto::CommandSendReceipt, Error=ProducerError> {
+    pub fn send<T: SerializeMessage, S: Into<String>>(&self, topic: S, message: &T) -> impl Future<Item=proto::CommandSendReceipt, Error=ProducerError> {
         match T::serialize_message(message) {
             Ok(message) => {
                 let (resolver, future) = oneshot::channel();
@@ -93,15 +89,14 @@ impl<T: SerializeMessage> MultiTopicProducer<T> {
     }
 }
 
-struct ProducerEngine<T: SerializeMessage> {
+struct ProducerEngine {
     pulsar: Pulsar,
     inbound: UnboundedReceiver<ProducerMessage>,
-    producers: BTreeMap<String, Arc<Producer<T>>>,
-    new_producers: BTreeMap<String, oneshot::Receiver<Result<Arc<Producer<T>>, Error>>>,
-    serialize: PhantomData<fn(T::Input) -> Result<Message, ProducerError>>,
+    producers: BTreeMap<String, Arc<Producer>>,
+    new_producers: BTreeMap<String, oneshot::Receiver<Result<Arc<Producer>, Error>>>,
 }
 
-impl<T: SerializeMessage> Future for ProducerEngine<T> {
+impl Future for ProducerEngine {
     type Item = ();
     type Error = ();
 
@@ -173,16 +168,15 @@ struct ProducerMessage {
     resolver: oneshot::Sender<Result<proto::CommandSendReceipt, ProducerError>>,
 }
 
-pub struct Producer<T: SerializeMessage> {
+pub struct Producer {
     connection: Arc<Connection>,
     id: ProducerId,
     name: ProducerName,
     topic: String,
     message_id: SerialId,
-    serialize: PhantomData<fn(T::Input) -> Result<Message, ProducerError>>,
 }
 
-impl<T: SerializeMessage> Producer<T> {
+impl Producer {
     pub fn new<S1, S2>(
         addr: S1,
         topic: S2,
@@ -190,7 +184,7 @@ impl<T: SerializeMessage> Producer<T> {
         auth: Option<Authentication>,
         proxy_to_broker_url: Option<String>,
         executor: TaskExecutor,
-    ) -> impl Future<Item=Producer<T>, Error=ConnectionError>
+    ) -> impl Future<Item=Producer, Error=ConnectionError>
         where S1: Into<String>,
               S2: Into<String>,
     {
@@ -198,7 +192,7 @@ impl<T: SerializeMessage> Producer<T> {
             .and_then(move |conn| Producer::from_connection(Arc::new(conn), topic.into(), name))
     }
 
-    pub fn from_connection<S: Into<String>>(connection: Arc<Connection>, topic: S, name: Option<String>) -> impl Future<Item=Producer<T>, Error=ConnectionError> {
+    pub fn from_connection<S: Into<String>>(connection: Arc<Connection>, topic: S, name: Option<String>) -> impl Future<Item=Producer, Error=ConnectionError> {
         let topic = topic.into();
         let producer_id = rand::random();
         let sequence_ids = SerialId::new();
@@ -216,7 +210,6 @@ impl<T: SerializeMessage> Producer<T> {
                     name: success.producer_name,
                     topic,
                     message_id: sequence_ids,
-                    serialize: PhantomData,
                 }
             })
     }
@@ -244,11 +237,19 @@ impl<T: SerializeMessage> Producer<T> {
         )
     }
 
-    pub fn send(&self, message: &T::Input, num_messages: Option<i32>) -> impl Future<Item=proto::CommandSendReceipt, Error=ProducerError> {
+    pub fn send<T: SerializeMessage>(&self, message: &T, num_messages: Option<i32>) -> impl Future<Item=proto::CommandSendReceipt, Error=ProducerError> {
         match T::serialize_message(message) {
             Ok(message) => Either::A(self.send_message(message, num_messages)),
             Err(e) => Either::B(future::failed(e))
         }
+    }
+
+    pub fn send_json<T: Serialize>(&mut self, msg: &T, properties: Option<HashMap<String, String>>) -> impl Future<Item=proto::CommandSendReceipt, Error=ProducerError> {
+        let data = match serde_json::to_vec(msg) {
+            Ok(data) => data,
+            Err(e) => return Either::A(future::failed(e.into())),
+        };
+        Either::B(self.send_raw(data, properties).map_err(|e| e.into()))
     }
 
     pub fn error(&self) -> Option<ConnectionError> {
@@ -261,18 +262,7 @@ impl<T: SerializeMessage> Producer<T> {
     }
 }
 
-
-impl Producer<serde_json::Value> {
-    pub fn send_json<T: Serialize>(&mut self, msg: &T, properties: Option<HashMap<String, String>>) -> impl Future<Item=proto::CommandSendReceipt, Error=ProducerError> {
-        let data = match serde_json::to_vec(msg) {
-            Ok(data) => data,
-            Err(e) => return Either::A(future::failed(e.into())),
-        };
-        Either::B(self.send_raw(data, properties).map_err(|e| e.into()))
-    }
-}
-
-impl<T: SerializeMessage> Drop for Producer<T> {
+impl Drop for Producer {
     fn drop(&mut self) {
         let _ = self.connection.sender().close_producer(self.id);
     }

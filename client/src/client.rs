@@ -60,30 +60,25 @@ impl DeserializeMessage for String {
 }
 
 pub trait SerializeMessage: 'static {
-    type Input: ?Sized;
-    fn serialize_message(input: &Self::Input) -> Result<producer::Message, ProducerError>;
+    fn serialize_message(input: &Self) -> Result<producer::Message, ProducerError>;
 }
 
 impl SerializeMessage for serde_json::Value {
-    type Input = Self;
-    fn serialize_message(input: &serde_json::Value) -> Result<producer::Message, ProducerError> {
+    fn serialize_message(input: &Self) -> Result<producer::Message, ProducerError> {
         let payload = serde_json::to_vec(input)?;
         Ok(producer::Message { payload, .. Default::default() })
     }
 }
 
-impl SerializeMessage for Vec<u8> {
-    type Input = [u8];
-
-    fn serialize_message(input: &[u8]) -> Result<producer::Message, ProducerError> {
+impl SerializeMessage for [u8] {
+    fn serialize_message(input: &Self) -> Result<producer::Message, ProducerError> {
         //TODO figure out how to avoid copying here
         Ok(producer::Message { payload: input.to_vec(), .. Default::default() })
     }
 }
 
 impl SerializeMessage for String {
-    type Input = str;
-    fn serialize_message(input: &str) -> Result<producer::Message, ProducerError> {
+    fn serialize_message(input: &Self) -> Result<producer::Message, ProducerError> {
         let payload = input.as_bytes().to_vec();
         Ok(producer::Message { payload, .. Default::default() })
     }
@@ -255,11 +250,11 @@ impl Pulsar {
             })
     }
 
-    pub fn create_producer<T: SerializeMessage, S: Into<String>>(
+    pub fn create_producer<S: Into<String>>(
         &self,
         topic: S,
         name: Option<String>,
-    ) -> impl Future<Item=Producer<T>, Error=Error> {
+    ) -> impl Future<Item=Producer, Error=Error> {
         let manager = self.manager.clone();
         let topic = topic.into();
         self.service_discovery
@@ -269,10 +264,10 @@ impl Pulsar {
             .and_then(move |conn| Producer::from_connection(conn, topic, name).from_err())
     }
 
-    pub fn create_partitioned_producers<T: SerializeMessage, S: Into<String> + Clone>(
+    pub fn create_partitioned_producers<S: Into<String> + Clone>(
         &self,
         topic: S,
-    ) -> impl Future<Item=Vec<Producer<T>>, Error=Error> {
+    ) -> impl Future<Item=Vec<Producer>, Error=Error> {
         let manager = self.manager.clone();
 
         self.service_discovery
@@ -300,7 +295,7 @@ impl Pulsar {
         data: Vec<u8>,
         properties: Option<HashMap<String, String>>,
     ) -> impl Future<Item=CommandSendReceipt, Error=Error> {
-        self.create_producer::<Vec<u8>, _>(topic, None)
+        self.create_producer(topic, None)
             .and_then(|producer| {
                 producer.send_raw(data, properties)
                     .from_err()
@@ -324,7 +319,7 @@ impl Pulsar {
         Either::B(self.send_raw(topic, data, properties))
     }
     
-    pub fn producer<T: SerializeMessage>(&self) -> MultiTopicProducer<T> {
+    pub fn producer<T: SerializeMessage>(&self) -> MultiTopicProducer {
         MultiTopicProducer::new(self.clone())
     }
 

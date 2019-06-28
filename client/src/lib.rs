@@ -40,9 +40,7 @@ mod tests {
     }
 
     impl SerializeMessage for TestData {
-        type Input = Self;
-
-        fn serialize_message(input: &Self::Input) -> Result<producer::Message, ProducerError> {
+        fn serialize_message(input: &Self) -> Result<producer::Message, ProducerError> {
             let payload = serde_json::to_vec(input)?;
             Ok(producer::Message { payload, ..Default::default() })
         }
