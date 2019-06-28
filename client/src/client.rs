@@ -59,7 +59,7 @@ impl DeserializeMessage for String {
     }
 }
 
-pub trait SerializeMessage: 'static {
+pub trait SerializeMessage {
     fn serialize_message(input: &Self) -> Result<producer::Message, ProducerError>;
 }
 
