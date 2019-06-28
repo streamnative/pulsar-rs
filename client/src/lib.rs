@@ -105,7 +105,7 @@ mod tests {
 
     #[test]
     #[ignore]
-    fn connect() {
+    fn round_trip() {
         let addr = "127.0.0.1:6650".parse().unwrap();
         let runtime = tokio::runtime::Runtime::new().unwrap();
 
