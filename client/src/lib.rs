@@ -32,10 +32,20 @@ mod tests {
     use message::proto::command_subscribe::SubType;
     use crate::consumer::Message;
     use crate::message::Payload;
+    use crate::client::SerializeMessage;
 
     #[derive(Debug, Serialize, Deserialize)]
     struct TestData {
         pub data: String
+    }
+
+    impl SerializeMessage for TestData {
+        type Input = Self;
+
+        fn serialize_message(input: &Self::Input) -> Result<producer::Message, ProducerError> {
+            let payload = serde_json::to_vec(input)?;
+            Ok(producer::Message { payload, ..Default::default() })
+        }
     }
 
     impl DeserializeMessage for TestData {
@@ -52,18 +62,14 @@ mod tests {
         let addr = "127.0.0.1:6650".parse().unwrap();
         let runtime = tokio::runtime::Runtime::new().unwrap();
 
-        let pulsar = Pulsar::new(addr, None, runtime.executor())
+        let pulsar: Pulsar = Pulsar::new(addr, None, runtime.executor())
             .wait().unwrap();
 
-        //TODO replace with new producer API when available
-        let mut producer = Producer::new(addr.to_string(), None, None, None, runtime.executor())
-            .wait()
-            .unwrap();
+        let producer = pulsar.producer::<TestData>();
 
         let produce = {
-            let producer = &mut producer;
-            future::join_all((0..5000).map(move |_| {
-                producer.send_json("test", &TestData { data: "data".to_string() }, None)
+            future::join_all((0..5000).map(|_| {
+                producer.send("test", &TestData { data: "data".to_string() })
             }))
         };
 
