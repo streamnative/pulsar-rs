@@ -41,8 +41,8 @@ mod tests {
 
     use crate::client::SerializeMessage;
     use crate::consumer::Message;
-    use crate::message::Payload;
     use crate::Error as PulsarError;
+    use crate::message::Payload;
 
     use super::*;
 
@@ -51,12 +51,27 @@ mod tests {
         pub data: String
     }
 
+    impl SerializeMessage for TestData {
+        fn serialize_message(input: &Self) -> Result<producer::Message, ProducerError> {
+            let payload = serde_json::to_vec(input)?;
+            Ok(producer::Message { payload, ..Default::default() })
+        }
+    }
+
+    impl DeserializeMessage for TestData {
+        type Output = Result<TestData, serde_json::Error>;
+
+        fn deserialize_message(payload: Payload) -> Self::Output {
+            serde_json::from_slice(&payload.data)
+        }
+    }
+
     #[derive(Debug)]
     enum Error {
         Pulsar(PulsarError),
         Message(String),
         Timeout(std::io::Error),
-        Serde(serde_json::Error)
+        Serde(serde_json::Error),
     }
 
     impl From<std::io::Error> for Error {
@@ -88,21 +103,6 @@ mod tests {
         }
     }
 
-    impl SerializeMessage for TestData {
-        fn serialize_message(input: &Self) -> Result<producer::Message, ProducerError> {
-            let payload = serde_json::to_vec(input)?;
-            Ok(producer::Message { payload, ..Default::default() })
-        }
-    }
-
-    impl DeserializeMessage for TestData {
-        type Output = Result<TestData, serde_json::Error>;
-
-        fn deserialize_message(payload: Payload) -> Self::Output {
-            serde_json::from_slice(&payload.data)
-        }
-    }
-
     #[test]
     #[ignore]
     fn round_trip() {
@@ -114,10 +114,12 @@ mod tests {
 
         let producer = pulsar.producer::<TestData>();
 
-
-        future::join_all(
-            (0..5000).map(|_| producer.send("test", &TestData { data: "data".to_string() }))
-        ).wait().unwrap();
+        future::join_all((0..5000)
+            .map(|_| producer.send("test", &TestData { data: "data".to_string() })))
+            .map_err(|e| Error::from(PulsarError::Producer(e)))
+            .timeout(Duration::from_secs(5))
+            .wait()
+            .unwrap();
 
         let consumer: Consumer<TestData> = pulsar.consumer()
             .with_topic("test")
