@@ -21,8 +21,8 @@ pub use producer::{Producer, MultiTopicProducer};
 pub use service_discovery::ServiceDiscovery;
 
 pub mod message;
+pub mod producer;
 mod consumer;
-mod producer;
 mod error;
 mod connection;
 mod connection_manager;
