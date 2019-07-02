@@ -319,7 +319,7 @@ impl Pulsar {
         Either::B(self.send_raw(topic, data, properties))
     }
     
-    pub fn producer<T: SerializeMessage>(&self) -> MultiTopicProducer {
+    pub fn producer(&self) -> MultiTopicProducer {
         MultiTopicProducer::new(self.clone())
     }
 

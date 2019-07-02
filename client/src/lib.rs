@@ -112,7 +112,7 @@ mod tests {
         let pulsar: Pulsar = Pulsar::new(addr, None, runtime.executor())
             .wait().unwrap();
 
-        let producer = pulsar.producer::<TestData>();
+        let producer = pulsar.producer();
 
         future::join_all((0..5000)
             .map(|_| producer.send("test", &TestData { data: "data".to_string() })))
