@@ -10,7 +10,7 @@ extern crate prost_derive;
 #[macro_use]
 extern crate serde_derive;
 
-pub use client::{DeserializeMessage, Pulsar};
+pub use client::{SerializeMessage, DeserializeMessage, Pulsar};
 pub use connection::{Authentication, Connection};
 pub use connection_manager::ConnectionManager;
 pub use consumer::{Ack, Consumer, ConsumerBuilder, ConsumerState, Message, MultiTopicConsumer};
