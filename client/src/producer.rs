@@ -87,6 +87,16 @@ impl MultiTopicProducer {
             Err(e) => Either::B(future::failed(e))
         }
     }
+
+    pub fn send_all<'a, T, S, I>(&self, topic: S, messages: I) -> impl Future<Item=Vec<proto::CommandSendReceipt>, Error=ProducerError>
+        where T: 'a + SerializeMessage, I: IntoIterator<Item=&'a T>, S: Into<String>
+    {
+        let topic = topic.into();
+        let results: Vec<_> = messages.into_iter()
+            .map(|m| self.send(topic.clone(), m))
+            .collect();
+        future::collect(results)
+    }
 }
 
 struct ProducerEngine {
