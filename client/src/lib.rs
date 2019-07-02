@@ -17,7 +17,7 @@ pub use consumer::{Ack, Consumer, ConsumerBuilder, ConsumerState, Message, Multi
 pub use error::{ConnectionError, ConsumerError, Error, ProducerError, ServiceDiscoveryError};
 pub use message::proto;
 pub use message::proto::command_subscribe::SubType;
-pub use producer::Producer;
+pub use producer::{Producer, MultiTopicProducer};
 pub use service_discovery::ServiceDiscovery;
 
 pub mod message;
