@@ -67,35 +67,47 @@ impl MultiTopicProducer {
         }
     }
 
-    pub fn send<T: SerializeMessage, S: Into<String>>(&self, topic: S, message: &T) -> impl Future<Item=proto::CommandSendReceipt, Error=ProducerError> {
+    //TODO return impl Future once https://github.com/rust-lang/rust/issues/42940 is resolved
+    pub fn send<T: SerializeMessage, S: Into<String>>(&self, topic: S, message: &T) -> Box<dyn Future<Item=proto::CommandSendReceipt, Error=ProducerError> + 'static + Send> {
+        let topic = topic.into();
         match T::serialize_message(message) {
-            Ok(message) => {
-                let (resolver, future) = oneshot::channel();
-                match self.message_sender.unbounded_send(ProducerMessage {
-                    topic: topic.into(),
-                    message,
-                    resolver
-                }) {
-                    Ok(_) => Either::A(future.then(|r| match r {
-                        Ok(Ok(data)) => Ok(data),
-                        Ok(Err(e)) => Err(e),
-                        Err(oneshot::Canceled) => Err(ProducerError::Custom("Unexpected error: pulsar producer engine unexpectedly dropped".to_owned()))
-                    })),
-                    Err(_) => Either::B(future::failed(ProducerError::Custom("Unexpected error: pulsar producer engine unexpectedly dropped".to_owned())))
-                }
-            },
-            Err(e) => Either::B(future::failed(e))
+            Ok(message) => Box::new(self.send_message(topic, message)),
+            Err(e) => Box::new(future::failed(e))
         }
     }
 
-    pub fn send_all<'a, T, S, I>(&self, topic: S, messages: I) -> impl Future<Item=Vec<proto::CommandSendReceipt>, Error=ProducerError>
-        where T: 'a + SerializeMessage, I: IntoIterator<Item=&'a T>, S: Into<String>
+    //TODO return impl Future once https://github.com/rust-lang/rust/issues/42940 is resolved
+    pub fn send_all<'a, 'b, T, S, I>(&self, topic: S, messages: I) -> Box<dyn Future<Item=Vec<proto::CommandSendReceipt>, Error=ProducerError> + 'static + Send>
+        where 'b: 'a, T: 'b + SerializeMessage, I: IntoIterator<Item=&'a T>, S: Into<String>
     {
         let topic = topic.into();
-        let results: Vec<_> = messages.into_iter()
-            .map(|m| self.send(topic.clone(), m))
-            .collect();
-        future::collect(results)
+        // TODO determine whether to keep this approach or go with the partial send, but more mem friendly lazy approach.
+        // serialize all messages before sending to avoid a partial send
+        match messages.into_iter().map(|m| T::serialize_message(m)).collect::<Result<Vec<_>, _>>() {
+            Ok(messages) => Box::new(future::collect(
+                messages.into_iter()
+                    .map(|m| self.send_message(topic.clone(), m))
+                    .collect::<Vec<_>>())
+            ),
+            Err(e) => Box::new(future::failed(e))
+        }
+
+    }
+
+    fn send_message<S: Into<String>>(&self, topic: S, message: Message) -> impl Future<Item=proto::CommandSendReceipt, Error=ProducerError> + 'static {
+        let (resolver, future) = oneshot::channel();
+        match self.message_sender.unbounded_send(ProducerMessage {
+            topic: topic.into(),
+            message,
+            resolver
+        }) {
+            Ok(_) => Either::A(future.then(|r| match r {
+                Ok(Ok(data)) => Ok(data),
+                Ok(Err(e)) => Err(e),
+                Err(oneshot::Canceled) => Err(ProducerError::Custom("Unexpected error: pulsar producer engine unexpectedly dropped".to_owned()))
+            })),
+            Err(_) => Either::B(future::failed(ProducerError::Custom("Unexpected error: pulsar producer engine unexpectedly dropped".to_owned())))
+        }
     }
 }
 
