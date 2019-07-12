@@ -36,7 +36,7 @@ extern crate serde_json;
 #### Producing
 ```rust
 use tokio::runtime::Runtime;
-use futures::future;
+use futures::future::{self, Future};
 use pulsar::Producer;
 
 pub struct SomeData {
@@ -52,15 +52,15 @@ fn main() {
     let producer_name = "some_producer_name";
     let runtime = Runtime::new().unwrap();
 
-    let producer = Producer::new(pulsar_addr, producer_name, runtime.executor())
+    let producer = Producer::new(pulsar_addr, Some(producer_name.to_string()), None, None, runtime.executor())
        .wait()
        .unwrap();
 
     let data = SomeData { ... };
     let serialized = serialize(&data);
-    let send_1 = producer.send_raw("some_topic", serialized);
-    let send_2 = producer.send_raw("some_topic", serialized);
-    let send_3 = producer.send_raw("some_topic", serialized);
+    let send_1 = producer.send_raw("some_topic", serialized, None);
+    let send_2 = producer.send_raw("some_topic", serialized, None);
+    let send_3 = producer.send_raw("some_topic", serialized, None);
 
     future::join_all(vec![send_1, send_2, send_3]).wait().unwrap();
     runtime.shutdown_now().wait().unwrap();
@@ -70,8 +70,9 @@ fn main() {
 #### Consuming
 ```rust
 use tokio::runtime::Runtime;
-use futures::{Stream, future};
-use pulsar::{Ack, Consumer, Error, SubType};
+use futures::future::Future;
+use futures::stream::Stream;
+use pulsar::{Ack, ConsumerBuilder, ConsumerError, SubType};
 
 pub struct SomeData {
     ...
@@ -85,7 +86,7 @@ fn main() {
     let pulsar_addr = "...";
     let runtime = Runtime::new().unwrap();
 
-    let consumer = ConsumerBuilder::new(pulsar_addr, None, None, runtime.executor())
+    let consumer = ConsumerBuilder::new(pulsar_addr, runtime.executor())
         .with_topic("some_topic")
         .with_subscription_type(SubType::Exclusive)
         .with_subscription("some_subscription_name")
@@ -148,7 +149,7 @@ struct SomeData {
     ...
 }
 
-fn process_data(data: Result<SomeData, Error>) -> Result<(), Error> {
+fn process_data(data: Result<SomeData, ConsumerError>, ack: Ack) -> Result<(), ConsumerError> {
     ...
 }
 
@@ -168,14 +169,14 @@ fn main() {
         .wait()
         .unwrap();
 
-    let send_1 = producer.send_json("some_topic", &SomeData { ... });
-    let send_2 = producer.send_json("some_topic", &SomeData { ... });
-    let send_3 = producer.send_json("some_topic", &SomeData { ... });
+    let send_1 = producer.send_json("some_topic", &SomeData { ... }, None);
+    let send_2 = producer.send_json("some_topic", &SomeData { ... }, None);
+    let send_3 = producer.send_json("some_topic", &SomeData { ... }, None);
 
     future::join_all(vec![send_1, send_2, send_3]).wait().unwrap();
 
     let consumption_result = consumer
-        .for_each(|(msg, ack)| process_data(msg, ack))
+        .for_each(|(msg, ack): (Result<SomeData, ConsumerError>, Ack)| process_data(msg, ack))
         .wait();
 
     runtime.shutdown_now().wait().unwrap();
