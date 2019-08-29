@@ -116,7 +116,7 @@ mod tests {
 
         future::join_all((0..5000)
             .map(|_| producer.send("test", &TestData { data: "data".to_string() })))
-            .map_err(|e| Error::from(PulsarError::Producer(e)))
+            .map_err(|e| Error::from(e))
             .timeout(Duration::from_secs(5))
             .wait()
             .unwrap();
@@ -132,7 +132,7 @@ mod tests {
 
         let _ = consumer
             .take(5000)
-            .map_err(|e| PulsarError::Consumer(e).into())
+            .map_err(|e| e.into())
             .for_each(move |Message { payload, ack, .. }| {
                 ack.ack();
                 let data = payload?;
