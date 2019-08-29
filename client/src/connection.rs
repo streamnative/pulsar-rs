@@ -316,8 +316,8 @@ impl ConnectionSender {
             .map_err(|_| ConnectionError::Disconnected)
     }
 
-    pub fn send_ack(&self, consumer_id: u64, messages: Vec<proto::MessageIdData>) -> Result<(), ConnectionError> {
-        self.tx.unbounded_send(messages::ack(consumer_id, messages))
+    pub fn send_ack(&self, consumer_id: u64, messages: Vec<proto::MessageIdData>, cumulative: bool) -> Result<(), ConnectionError> {
+        self.tx.unbounded_send(messages::ack(consumer_id, messages, cumulative))
             .map_err(|_| ConnectionError::Disconnected)
     }
 
@@ -683,13 +683,17 @@ pub(crate) mod messages {
         }
     }
 
-    pub fn ack(consumer_id: u64, message_id: Vec<proto::MessageIdData>) -> Message {
+    pub fn ack(consumer_id: u64, message_id: Vec<proto::MessageIdData>, cumulative: bool) -> Message {
         Message {
             command: proto::BaseCommand {
                 type_: CommandType::Ack as i32,
                 ack: Some(proto::CommandAck {
                     consumer_id,
-                    ack_type: proto::command_ack::AckType::Individual as i32,
+                    ack_type: if cumulative {
+                      proto::command_ack::AckType::Cumulative as i32
+                    } else {
+                      proto::command_ack::AckType::Individual as i32
+                    },
                     message_id,
                     validation_error: None,
                     properties: Vec::new(),

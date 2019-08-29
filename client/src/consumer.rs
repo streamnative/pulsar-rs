@@ -131,7 +131,11 @@ impl Ack {
     }
 
     pub fn ack(self) {
-        let _ = self.connection.sender().send_ack(self.consumer_id, self.message_id);
+        let _ = self.connection.sender().send_ack(self.consumer_id, self.message_id, false);
+    }
+
+    pub fn cumulative_ack(self) {
+        let _ = self.connection.sender().send_ack(self.consumer_id, self.message_id, true);
     }
 }
 
