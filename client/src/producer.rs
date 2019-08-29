@@ -67,29 +67,27 @@ impl MultiTopicProducer {
         }
     }
 
-    //TODO return impl Future once https://github.com/rust-lang/rust/issues/42940 is resolved
-    pub fn send<T: SerializeMessage, S: Into<String>>(&self, topic: S, message: &T) -> Box<dyn Future<Item=proto::CommandSendReceipt, Error=ProducerError> + 'static + Send> {
+    pub fn send<T: SerializeMessage, S: Into<String>>(&self, topic: S, message: &T) -> impl Future<Item=proto::CommandSendReceipt, Error=ProducerError> {
         let topic = topic.into();
         match T::serialize_message(message) {
-            Ok(message) => Box::new(self.send_message(topic, message)),
-            Err(e) => Box::new(future::failed(e))
+            Ok(message) => Either::A(self.send_message(topic, message)),
+            Err(e) => Either::B(future::failed(e))
         }
     }
 
-    //TODO return impl Future once https://github.com/rust-lang/rust/issues/42940 is resolved
-    pub fn send_all<'a, 'b, T, S, I>(&self, topic: S, messages: I) -> Box<dyn Future<Item=Vec<proto::CommandSendReceipt>, Error=ProducerError> + 'static + Send>
+    pub fn send_all<'a, 'b, T, S, I>(&self, topic: S, messages: I) -> impl Future<Item=Vec<proto::CommandSendReceipt>, Error=ProducerError>
         where 'b: 'a, T: 'b + SerializeMessage, I: IntoIterator<Item=&'a T>, S: Into<String>
     {
         let topic = topic.into();
         // TODO determine whether to keep this approach or go with the partial send, but more mem friendly lazy approach.
         // serialize all messages before sending to avoid a partial send
         match messages.into_iter().map(|m| T::serialize_message(m)).collect::<Result<Vec<_>, _>>() {
-            Ok(messages) => Box::new(future::collect(
+            Ok(messages) => Either::A(future::collect(
                 messages.into_iter()
                     .map(|m| self.send_message(topic.clone(), m))
                     .collect::<Vec<_>>())
             ),
-            Err(e) => Box::new(future::failed(e))
+            Err(e) => Either::B(future::failed(e))
         }
 
     }
