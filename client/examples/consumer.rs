@@ -13,7 +13,7 @@ use futures::{
 use std::net::SocketAddr;
 use tokio::runtime::Runtime;
 
-use pulsar::{message::Payload, Authentication, DeserializeMessage, Pulsar, SubType};
+use pulsar::{message::Payload, Authentication, DeserializeMessage, Pulsar, SubType, ConsumerOptions};
 
 #[derive(Debug, Deserialize)]
 pub struct Data {
@@ -58,6 +58,7 @@ fn main() {
                 topic,
                 "my_subscriber",
                 SubType::Shared,
+                ConsumerOptions::default()
             )
         })
         .and_then(|mut v| {

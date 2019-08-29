@@ -13,11 +13,11 @@ extern crate serde_derive;
 pub use client::{SerializeMessage, DeserializeMessage, Pulsar};
 pub use connection::{Authentication, Connection};
 pub use connection_manager::ConnectionManager;
-pub use consumer::{Ack, Consumer, ConsumerBuilder, ConsumerState, Message, MultiTopicConsumer};
+pub use consumer::{Ack, Consumer, ConsumerBuilder, ConsumerState, Message, MultiTopicConsumer, ConsumerOptions};
 pub use error::{ConnectionError, ConsumerError, Error, ProducerError, ServiceDiscoveryError};
 pub use message::proto;
 pub use message::proto::command_subscribe::SubType;
-pub use producer::{Producer, MultiTopicProducer};
+pub use producer::{Producer, MultiTopicProducer, ProducerOptions};
 pub use service_discovery::ServiceDiscovery;
 
 pub mod message;

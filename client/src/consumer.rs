@@ -16,7 +16,19 @@ use tokio::timer::Interval;
 use crate::{DeserializeMessage, Pulsar};
 use crate::connection::{Authentication, Connection};
 use crate::error::{ConnectionError, ConsumerError, Error};
-use crate::message::{Message as RawMessage, Payload, proto::{self, command_subscribe::SubType}};
+use crate::message::{Message as RawMessage, Payload, proto::{self, command_subscribe::SubType, Schema, MessageIdData}};
+
+#[derive(Clone, Default)]
+pub struct ConsumerOptions {
+  pub priority_level: Option<i32>,
+  pub durable: Option<bool>,
+  pub start_message_id: Option<MessageIdData>,
+  pub metadata: BTreeMap<String, String>,
+  pub read_compacted: Option<bool>,
+  pub schema: Option<Schema>,
+  pub initial_position: Option<i32>,
+
+}
 
 pub struct Consumer<T: DeserializeMessage> {
     connection: Arc<Connection>,
@@ -27,6 +39,7 @@ pub struct Consumer<T: DeserializeMessage> {
     remaining_messages: u32,
     #[allow(unused)]
     data_type: PhantomData<fn(Payload) -> T::Output>,
+    options: ConsumerOptions,
 }
 
 impl<T: DeserializeMessage> Consumer<T> {
@@ -41,16 +54,18 @@ impl<T: DeserializeMessage> Consumer<T> {
         proxy_to_broker_url: Option<String>,
         executor: TaskExecutor,
         batch_size: Option<u32>,
+        options: ConsumerOptions,
     ) -> impl Future<Item=Consumer<T>, Error=Error> {
         let consumer_id = consumer_id.unwrap_or_else(rand::random);
         let (resolver, messages) = mpsc::unbounded();
         let batch_size = batch_size.unwrap_or(1000);
 
+        let opt = options.clone();
         Connection::new(addr, auth_data, proxy_to_broker_url, executor.clone())
             .and_then({
                 let topic = topic.clone();
                 move |conn|
-                    conn.sender().subscribe(resolver, topic, subscription, sub_type, consumer_id, consumer_name)
+                    conn.sender().subscribe(resolver, topic, subscription, sub_type, consumer_id, consumer_name, opt)
                         .map(move |resp| (resp, conn))
             })
             .and_then(move |(_, conn)| {
@@ -67,6 +82,7 @@ impl<T: DeserializeMessage> Consumer<T> {
                     batch_size,
                     remaining_messages: batch_size,
                     data_type: PhantomData,
+                    options,
                 }
             })
     }
@@ -79,12 +95,13 @@ impl<T: DeserializeMessage> Consumer<T> {
         consumer_id: Option<u64>,
         consumer_name: Option<String>,
         batch_size: Option<u32>,
+        options: ConsumerOptions,
     ) -> impl Future<Item=Consumer<T>, Error=Error> {
         let consumer_id = consumer_id.unwrap_or_else(rand::random);
         let (resolver, messages) = mpsc::unbounded();
         let batch_size = batch_size.unwrap_or(1000);
 
-        conn.sender().subscribe(resolver, topic.clone(), subscription, sub_type, consumer_id, consumer_name)
+        conn.sender().subscribe(resolver, topic.clone(), subscription, sub_type, consumer_id, consumer_name, options.clone())
             .map(move |resp| (resp, conn))
             .and_then(move |(_, conn)| {
                 conn.sender().send_flow(consumer_id, batch_size)
@@ -100,12 +117,17 @@ impl<T: DeserializeMessage> Consumer<T> {
                     batch_size,
                     remaining_messages: batch_size,
                     data_type: PhantomData,
+                    options,
                 }
             })
     }
 
-    fn topic(&self) -> &str {
+    pub fn topic(&self) -> &str {
         &self.topic
+    }
+
+    pub fn options(&self) -> &ConsumerOptions {
+        &self.options
     }
 }
 
@@ -198,6 +220,7 @@ pub struct ConsumerBuilder<'a, Topic, Subscription, SubscriptionType> {
     consumer_id: Option<u64>,
     consumer_name: Option<String>,
     batch_size: Option<u32>,
+    consumer_options: Option<ConsumerOptions>,
 
     // Currently only used for multi-topic
     namespace: Option<String>,
@@ -214,6 +237,7 @@ impl<'a> ConsumerBuilder<'a, Unset, Unset, Unset> {
             consumer_id: None,
             consumer_name: None,
             batch_size: None,
+            consumer_options: None,
             namespace: None,
             topic_refresh: None,
         }
@@ -229,6 +253,7 @@ impl<'a, Subscription, SubscriptionType> ConsumerBuilder<'a, Unset, Subscription
             subscription_type: self.subscription_type,
             consumer_id: self.consumer_id,
             consumer_name: self.consumer_name,
+            consumer_options: self.consumer_options,
             batch_size: self.batch_size,
             namespace: self.namespace,
             topic_refresh: self.topic_refresh,
@@ -243,6 +268,7 @@ impl<'a, Subscription, SubscriptionType> ConsumerBuilder<'a, Unset, Subscription
             subscription_type: self.subscription_type,
             consumer_id: self.consumer_id,
             consumer_name: self.consumer_name,
+            consumer_options: self.consumer_options,
             batch_size: self.batch_size,
             namespace: self.namespace,
             topic_refresh: self.topic_refresh,
@@ -259,6 +285,7 @@ impl<'a, Topic, SubscriptionType> ConsumerBuilder<'a, Topic, Unset, Subscription
             subscription_type: self.subscription_type,
             consumer_id: self.consumer_id,
             consumer_name: self.consumer_name,
+            consumer_options: self.consumer_options,
             batch_size: self.batch_size,
             namespace: self.namespace,
             topic_refresh: self.topic_refresh,
@@ -275,6 +302,7 @@ impl<'a, Topic, Subscription> ConsumerBuilder<'a, Topic, Subscription, Unset> {
             subscription: self.subscription,
             consumer_id: self.consumer_id,
             consumer_name: self.consumer_name,
+            consumer_options: self.consumer_options,
             batch_size: self.batch_size,
             namespace: self.namespace,
             topic_refresh: self.topic_refresh,
@@ -291,6 +319,7 @@ impl<'a, Subscription, SubscriptionType> ConsumerBuilder<'a, Set<Regex>, Subscri
             subscription_type: self.subscription_type,
             consumer_name: self.consumer_name,
             consumer_id: self.consumer_id,
+            consumer_options: self.consumer_options,
             batch_size: self.batch_size,
             namespace: Some(namespace.into()),
             topic_refresh: self.topic_refresh,
@@ -305,6 +334,7 @@ impl<'a, Subscription, SubscriptionType> ConsumerBuilder<'a, Set<Regex>, Subscri
             subscription_type: self.subscription_type,
             consumer_name: self.consumer_name,
             consumer_id: self.consumer_id,
+            consumer_options: self.consumer_options,
             batch_size: self.batch_size,
             namespace: self.namespace,
             topic_refresh: Some(refresh_interval),
@@ -327,6 +357,11 @@ impl<'a, Topic, Subscription, SubscriptionType> ConsumerBuilder<'a, Topic, Subsc
         self.batch_size = Some(batch_size);
         self
     }
+
+    pub fn with_options(mut self, options: ConsumerOptions) -> ConsumerBuilder<'a, Topic, Subscription, SubscriptionType> {
+        self.consumer_options = Some(options);
+        self
+    }
 }
 
 impl<'a> ConsumerBuilder<'a, Set<String>, Set<String>, Set<SubType>> {
@@ -338,11 +373,13 @@ impl<'a> ConsumerBuilder<'a, Set<String>, Set<String>, Set<SubType>> {
             subscription_type: Set(sub_type),
             consumer_id,
             consumer_name,
+            consumer_options,
             batch_size,
             ..
         } = self;
 
-        pulsar.create_consumer(topic, subscription, sub_type, batch_size, consumer_name, consumer_id)
+        pulsar.create_consumer(topic, subscription, sub_type, batch_size, consumer_name, consumer_id,
+          consumer_options.unwrap_or_else(ConsumerOptions::default))
     }
 }
 
@@ -372,7 +409,7 @@ impl<'a> ConsumerBuilder<'a, Set<Regex>, Set<String>, Set<SubType>> {
         let namespace = namespace.unwrap_or_else(|| "public/default".to_owned());
         let topic_refresh = topic_refresh.unwrap_or_else(|| Duration::from_secs(30));
 
-        pulsar.create_multi_topic_consumer(topic, subscription, namespace, sub_type, topic_refresh)
+        pulsar.create_multi_topic_consumer(topic, subscription, namespace, sub_type, topic_refresh, ConsumerOptions::default())
     }
 }
 
@@ -394,6 +431,7 @@ pub struct MultiTopicConsumer<T: DeserializeMessage> {
     refresh: Box<dyn Stream<Item=(), Error=()> + Send>,
     subscription: String,
     sub_type: SubType,
+    options: ConsumerOptions,
     last_message_received: Option<DateTime<Utc>>,
     messages_received: u64,
     state_streams: Vec<UnboundedSender<ConsumerState>>,
@@ -407,6 +445,7 @@ impl<T: DeserializeMessage> MultiTopicConsumer<T> {
         subscription: S2,
         sub_type: SubType,
         topic_refresh: Duration,
+        options: ConsumerOptions,
     ) -> Self
         where S1: Into<String>,
               S2: Into<String>,
@@ -426,6 +465,7 @@ impl<T: DeserializeMessage> MultiTopicConsumer<T> {
             last_message_received: None,
             messages_received: 0,
             state_streams: vec![],
+            options,
         }
     }
 
@@ -512,6 +552,8 @@ impl<T: 'static + DeserializeMessage> Stream for MultiTopicConsumer<T> {
             let subscription = self.subscription.clone();
             let sub_type = self.sub_type;
             let existing_topics: BTreeSet<String> = self.consumers.keys().cloned().collect();
+            let options = self.options.clone();
+
             let new_consumers = Box::new(self.pulsar.get_topics_of_namespace(self.namespace.clone())
                 .and_then(move |topics: Vec<String>| {
                     trace!("fetched topics: {:?}", &topics);
@@ -521,7 +563,7 @@ impl<T: 'static + DeserializeMessage> Stream for MultiTopicConsumer<T> {
                             trace!("creating consumer for topic {}", topic);
                             let pulsar = pulsar.clone();
                             let subscription = subscription.clone();
-                            pulsar.create_consumer(topic, subscription, sub_type, None, None, None)
+                            pulsar.create_consumer(topic, subscription, sub_type, None, None, None, options.clone())
                         })
                     )
                 }));
@@ -579,6 +621,7 @@ mod tests {
     use crate::Pulsar;
 
     use super::*;
+    use crate::producer::ProducerOptions;
 
     #[test]
     #[ignore]
@@ -598,10 +641,10 @@ mod tests {
         let client: Pulsar = Pulsar::new(addr, None, rt.executor()).wait().unwrap();
 
         let send_start = Utc::now();
-        client.send_json(topic1, &data1, None).wait().unwrap();
-        client.send_json(topic1, &data2, None).wait().unwrap();
-        client.send_json(topic2, &data3, None).wait().unwrap();
-        client.send_json(topic2, &data4, None).wait().unwrap();
+        client.send_json(topic1, &data1, None, ProducerOptions::default()).wait().unwrap();
+        client.send_json(topic1, &data2, None, ProducerOptions::default()).wait().unwrap();
+        client.send_json(topic2, &data3, None, ProducerOptions::default()).wait().unwrap();
+        client.send_json(topic2, &data4, None, ProducerOptions::default()).wait().unwrap();
 
         let data = vec![data1, data2, data3, data4];
 

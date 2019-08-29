@@ -7,7 +7,7 @@ extern crate serde_derive;
 extern crate log;
 
 use futures::future::Future;
-use pulsar::{Authentication, Pulsar};
+use pulsar::{Authentication, Pulsar, ProducerOptions};
 use std::net::SocketAddr;
 use tokio::runtime::Runtime;
 
@@ -46,6 +46,7 @@ fn main() {
                     world: "!".to_string(),
                 },
                 None,
+                ProducerOptions::default()
             )
         })
         .wait()

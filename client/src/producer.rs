@@ -12,7 +12,7 @@ use tokio::runtime::TaskExecutor;
 use crate::client::SerializeMessage;
 use crate::connection::{Authentication, Connection, SerialId};
 use crate::error::ProducerError;
-use crate::message::proto::{self, EncryptionKeys};
+use crate::message::proto::{self, EncryptionKeys, Schema};
 use crate::{Pulsar, Error};
 use futures::sync::oneshot;
 use futures::sync::mpsc::{unbounded, UnboundedSender, UnboundedReceiver};
@@ -45,6 +45,14 @@ pub struct Message {
     /// Additional parameters required by encryption
     pub encryption_param: ::std::option::Option<Vec<u8>>,
     pub schema_version: ::std::option::Option<Vec<u8>>,
+}
+
+#[derive(Clone,Default)]
+pub struct ProducerOptions {
+  pub encrypted: Option<bool>,
+  pub metadata: BTreeMap<String, String>,
+  pub schema: Option<Schema>,
+  pub batch_size: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -151,7 +159,8 @@ impl Future for ProducerEngine {
                                 .unwrap_or_else(|| {
                                     let (tx, rx) = oneshot::channel();
                                     tokio::spawn({
-                                        self.pulsar.create_producer(topic.clone(), None)
+                                        //FIXME: the producer options should be stored and reused
+                                        self.pulsar.create_producer(topic.clone(), None, ProducerOptions::default())
                                             .then(|r| tx.send(r.map(|producer| Arc::new(producer))).map_err(drop))
                                     });
                                     rx
@@ -194,6 +203,7 @@ pub struct Producer {
     name: ProducerName,
     topic: String,
     message_id: SerialId,
+    options: ProducerOptions,
 }
 
 impl Producer {
@@ -203,6 +213,7 @@ impl Producer {
         name: Option<String>,
         auth: Option<Authentication>,
         proxy_to_broker_url: Option<String>,
+        options: ProducerOptions,
         executor: TaskExecutor,
     ) -> impl Future<Item=Producer, Error=Error>
         where S1: Into<String>,
@@ -210,20 +221,21 @@ impl Producer {
     {
         Connection::new(addr.into(), auth, proxy_to_broker_url, executor)
             .map_err(|e| e.into())
-            .and_then(move |conn| Producer::from_connection(Arc::new(conn), topic.into(), name))
+            .and_then(move |conn| Producer::from_connection(Arc::new(conn), topic.into(), name, options))
     }
 
-    pub fn from_connection<S: Into<String>>(connection: Arc<Connection>, topic: S, name: Option<String>) -> impl Future<Item=Producer, Error=Error> {
+    pub fn from_connection<S: Into<String>>(connection: Arc<Connection>, topic: S, name: Option<String>, options: ProducerOptions) -> impl Future<Item=Producer, Error=Error> {
         let topic = topic.into();
         let producer_id = rand::random();
         let sequence_ids = SerialId::new();
+        let opt = options.clone();
 
         let sender = connection.sender().clone();
         connection.sender().lookup_topic(topic.clone(), false)
             .map_err(|e| e.into())
             .and_then({
                 let topic = topic.clone();
-                move |_| sender.create_producer(topic.clone(), producer_id, name)
+                move |_| sender.create_producer(topic.clone(), producer_id, name, opt)
             .map_err(|e| e.into())
             })
             .map(move |success| {
@@ -233,6 +245,7 @@ impl Producer {
                     name: success.producer_name,
                     topic,
                     message_id: sequence_ids,
+                    options,
                 }
             })
     }
@@ -290,4 +303,9 @@ impl Drop for Producer {
     fn drop(&mut self) {
         let _ = self.connection.sender().close_producer(self.id);
     }
+}
+
+pub struct MessageGenerator {
+  batch_size: Option<u32>,
+
 }
