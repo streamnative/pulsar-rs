@@ -41,7 +41,7 @@ impl<T: DeserializeMessage> Consumer<T> {
         proxy_to_broker_url: Option<String>,
         executor: TaskExecutor,
         batch_size: Option<u32>,
-    ) -> impl Future<Item=Consumer<T>, Error=ConsumerError> {
+    ) -> impl Future<Item=Consumer<T>, Error=Error> {
         let consumer_id = consumer_id.unwrap_or_else(rand::random);
         let (resolver, messages) = mpsc::unbounded();
         let batch_size = batch_size.unwrap_or(1000);
@@ -79,7 +79,7 @@ impl<T: DeserializeMessage> Consumer<T> {
         consumer_id: Option<u64>,
         consumer_name: Option<String>,
         batch_size: Option<u32>,
-    ) -> impl Future<Item=Consumer<T>, Error=ConsumerError> {
+    ) -> impl Future<Item=Consumer<T>, Error=Error> {
         let consumer_id = consumer_id.unwrap_or_else(rand::random);
         let (resolver, messages) = mpsc::unbounded();
         let batch_size = batch_size.unwrap_or(1000);
@@ -90,7 +90,7 @@ impl<T: DeserializeMessage> Consumer<T> {
                 conn.sender().send_flow(consumer_id, batch_size)
                     .map(move |()| conn)
             })
-            .map_err(|e| e.into())
+            .map_err(|e| Error::Consumer(ConsumerError::Connection(e)))
             .map(move |connection| {
                 Consumer {
                     connection,
@@ -137,12 +137,12 @@ impl Ack {
 
 impl<T: DeserializeMessage> Stream for Consumer<T> {
     type Item = Message<T::Output>;
-    type Error = ConsumerError;
+    type Error = Error;
 
     fn poll(&mut self) -> Result<Async<Option<Self::Item>>, Self::Error> {
         if !self.connection.is_valid() {
             if let Some(err) = self.connection.error() {
-                return Err(err.into());
+                return Err(Error::Consumer(ConsumerError::Connection(err)));
             }
         }
 
@@ -169,7 +169,7 @@ impl<T: DeserializeMessage> Stream for Consumer<T> {
                     ack: Ack::new(self.id, message.message_id, self.connection.clone()),
                 })))
             }
-            Some(None) => Err(ConsumerError::MissingPayload(format!("Missing payload for message {:?}", message))),
+            Some(None) => Err(Error::Consumer(ConsumerError::MissingPayload(format!("Missing payload for message {:?}", message)))),
             None => Ok(Async::Ready(None))
         }
     }

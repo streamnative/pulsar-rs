@@ -11,7 +11,7 @@ use tokio::runtime::TaskExecutor;
 
 use crate::client::SerializeMessage;
 use crate::connection::{Authentication, Connection, SerialId};
-use crate::error::{ConnectionError, ProducerError};
+use crate::error::ProducerError;
 use crate::message::proto::{self, EncryptionKeys};
 use crate::{Pulsar, Error};
 use futures::sync::oneshot;
@@ -68,16 +68,16 @@ impl MultiTopicProducer {
     }
 
     //TODO return impl Future once https://github.com/rust-lang/rust/issues/42940 is resolved
-    pub fn send<T: SerializeMessage, S: Into<String>>(&self, topic: S, message: &T) -> Box<dyn Future<Item=proto::CommandSendReceipt, Error=ProducerError> + 'static + Send> {
+    pub fn send<T: SerializeMessage, S: Into<String>>(&self, topic: S, message: &T) -> Box<dyn Future<Item=proto::CommandSendReceipt, Error=Error> + 'static + Send> {
         let topic = topic.into();
         match T::serialize_message(message) {
             Ok(message) => Box::new(self.send_message(topic, message)),
-            Err(e) => Box::new(future::failed(e))
+            Err(e) => Box::new(future::failed(e.into()))
         }
     }
 
     //TODO return impl Future once https://github.com/rust-lang/rust/issues/42940 is resolved
-    pub fn send_all<'a, 'b, T, S, I>(&self, topic: S, messages: I) -> Box<dyn Future<Item=Vec<proto::CommandSendReceipt>, Error=ProducerError> + 'static + Send>
+    pub fn send_all<'a, 'b, T, S, I>(&self, topic: S, messages: I) -> Box<dyn Future<Item=Vec<proto::CommandSendReceipt>, Error=Error> + 'static + Send>
         where 'b: 'a, T: 'b + SerializeMessage, I: IntoIterator<Item=&'a T>, S: Into<String>
     {
         let topic = topic.into();
@@ -89,12 +89,12 @@ impl MultiTopicProducer {
                     .map(|m| self.send_message(topic.clone(), m))
                     .collect::<Vec<_>>())
             ),
-            Err(e) => Box::new(future::failed(e))
+            Err(e) => Box::new(future::failed(e.into()))
         }
 
     }
 
-    fn send_message<S: Into<String>>(&self, topic: S, message: Message) -> impl Future<Item=proto::CommandSendReceipt, Error=ProducerError> + 'static {
+    fn send_message<S: Into<String>>(&self, topic: S, message: Message) -> impl Future<Item=proto::CommandSendReceipt, Error=Error> + 'static {
         let (resolver, future) = oneshot::channel();
         match self.message_sender.unbounded_send(ProducerMessage {
             topic: topic.into(),
@@ -103,10 +103,10 @@ impl MultiTopicProducer {
         }) {
             Ok(_) => Either::A(future.then(|r| match r {
                 Ok(Ok(data)) => Ok(data),
-                Ok(Err(e)) => Err(e),
-                Err(oneshot::Canceled) => Err(ProducerError::Custom("Unexpected error: pulsar producer engine unexpectedly dropped".to_owned()))
+                Ok(Err(e)) => Err(e.into()),
+                Err(oneshot::Canceled) => Err(ProducerError::Custom("Unexpected error: pulsar producer engine unexpectedly dropped".to_owned()).into())
             })),
-            Err(_) => Either::B(future::failed(ProducerError::Custom("Unexpected error: pulsar producer engine unexpectedly dropped".to_owned())))
+            Err(_) => Either::B(future::failed(ProducerError::Custom("Unexpected error: pulsar producer engine unexpectedly dropped".to_owned()).into()))
         }
     }
 }
@@ -169,7 +169,7 @@ impl Future for ProducerEngine {
                                 }
                                 Err(e) => {
                                     // TODO find better error propogation here
-                                    let _ = resolver.send(Err(ProducerError::Custom(e.to_string())));
+                                    let _ = resolver.send(Err(Error::Producer(ProducerError::Custom(e.to_string()))));
                                     let _ = tx.send(Err(e));
                                     Either::B(future::failed(()))
                                 }
@@ -187,7 +187,7 @@ impl Future for ProducerEngine {
 struct ProducerMessage {
     topic: String,
     message: Message,
-    resolver: oneshot::Sender<Result<proto::CommandSendReceipt, ProducerError>>,
+    resolver: oneshot::Sender<Result<proto::CommandSendReceipt, Error>>,
 }
 
 pub struct Producer {
@@ -206,24 +206,27 @@ impl Producer {
         auth: Option<Authentication>,
         proxy_to_broker_url: Option<String>,
         executor: TaskExecutor,
-    ) -> impl Future<Item=Producer, Error=ConnectionError>
+    ) -> impl Future<Item=Producer, Error=Error>
         where S1: Into<String>,
               S2: Into<String>,
     {
         Connection::new(addr.into(), auth, proxy_to_broker_url, executor)
+            .map_err(|e| e.into())
             .and_then(move |conn| Producer::from_connection(Arc::new(conn), topic.into(), name))
     }
 
-    pub fn from_connection<S: Into<String>>(connection: Arc<Connection>, topic: S, name: Option<String>) -> impl Future<Item=Producer, Error=ConnectionError> {
+    pub fn from_connection<S: Into<String>>(connection: Arc<Connection>, topic: S, name: Option<String>) -> impl Future<Item=Producer, Error=Error> {
         let topic = topic.into();
         let producer_id = rand::random();
         let sequence_ids = SerialId::new();
 
         let sender = connection.sender().clone();
         connection.sender().lookup_topic(topic.clone(), false)
+            .map_err(|e| e.into())
             .and_then({
                 let topic = topic.clone();
                 move |_| sender.create_producer(topic.clone(), producer_id, name)
+            .map_err(|e| e.into())
             })
             .map(move |success| {
                 Producer {
@@ -244,43 +247,44 @@ impl Producer {
         &self.topic
     }
 
-    pub fn check_connection(&self) -> impl Future<Item=(), Error=ConnectionError> {
+    pub fn check_connection(&self) -> impl Future<Item=(), Error=Error> {
         self.connection.sender().lookup_topic("test", false)
             .map(|_| ())
+            .map_err(|e| e.into())
     }
 
-    pub fn send_raw(&self, data: Vec<u8>, properties: Option<HashMap<String, String>>) -> impl Future<Item=proto::CommandSendReceipt, Error=ConnectionError> {
+    pub fn send_raw(&self, data: Vec<u8>, properties: Option<HashMap<String, String>>) -> impl Future<Item=proto::CommandSendReceipt, Error=Error> {
         self.connection.sender().send(
             self.id,
             self.name.clone(),
             self.message_id.get(),
             None,
             Message { payload: data, properties: properties.unwrap_or_else(|| HashMap::new()), ..Default::default() },
-        )
+        ).map_err(|e| e.into())
     }
 
-    pub fn send<T: SerializeMessage>(&self, message: &T, num_messages: Option<i32>) -> impl Future<Item=proto::CommandSendReceipt, Error=ProducerError> {
+    pub fn send<T: SerializeMessage>(&self, message: &T, num_messages: Option<i32>) -> impl Future<Item=proto::CommandSendReceipt, Error=Error> {
         match T::serialize_message(message) {
             Ok(message) => Either::A(self.send_message(message, num_messages)),
-            Err(e) => Either::B(future::failed(e))
+            Err(e) => Either::B(future::failed(e.into()))
         }
     }
 
-    pub fn send_json<T: Serialize>(&mut self, msg: &T, properties: Option<HashMap<String, String>>) -> impl Future<Item=proto::CommandSendReceipt, Error=ProducerError> {
+    pub fn send_json<T: Serialize>(&mut self, msg: &T, properties: Option<HashMap<String, String>>) -> impl Future<Item=proto::CommandSendReceipt, Error=Error> {
         let data = match serde_json::to_vec(msg) {
             Ok(data) => data,
-            Err(e) => return Either::A(future::failed(e.into())),
+            Err(e) => return Either::A(future::failed(ProducerError::Serde(e).into())),
         };
         Either::B(self.send_raw(data, properties).map_err(|e| e.into()))
     }
 
-    pub fn error(&self) -> Option<ConnectionError> {
-        self.connection.error()
+    pub fn error(&self) -> Option<Error> {
+       self.connection.error().map(|e| ProducerError::Connection(e).into())
     }
 
-    fn send_message(&self, message: Message, num_messages: Option<i32>) -> impl Future<Item=proto::CommandSendReceipt, Error=ProducerError> {
+    fn send_message(&self, message: Message, num_messages: Option<i32>) -> impl Future<Item=proto::CommandSendReceipt, Error=Error> {
         self.connection.sender().send(self.id, self.name.clone(), self.message_id.get(), num_messages, message)
-            .map_err(|e| e.into())
+            .map_err(|e| ProducerError::Connection(e).into())
     }
 }
 
