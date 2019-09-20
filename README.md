@@ -3,7 +3,7 @@
 
 [Documentation](https://docs.rs/pulsar)
 
-Current status: Rough pass of simplest functionality. Should be in a good place to add additional features, but nothing but the barest of basics is implemented yet.
+Current status: Simple functionality, but expect API to change. Major API changes will come simultaneous with async-await stability, so look for that.
 ### Getting Started
 Cargo.toml
 ```toml
@@ -11,14 +11,6 @@ futures = "0.1.23"
 pulsar = "0.1.1"
 tokio = "0.1.11"
 
-# If you want connection pooling
-r2d2 = "0.8.2"
-r2d2_pulsar = "0.1.1"
-
-# If you want to use serde
-serde = "1.0.80"
-serde_derive = "1.0"
-serde_json = "1.0.32"
 ```
 main.rs
 ```rust

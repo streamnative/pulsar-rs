@@ -1,6 +1,5 @@
 use std::{io, fmt};
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
-use serde_json;
 
 #[derive(Debug)]
 pub enum Error {
@@ -109,7 +108,6 @@ impl std::error::Error for ConnectionError {
 pub enum ConsumerError {
     Connection(ConnectionError),
     MissingPayload(String),
-    Serde(serde_json::Error),
 }
 
 impl From<ConnectionError> for ConsumerError {
@@ -118,18 +116,11 @@ impl From<ConnectionError> for ConsumerError {
     }
 }
 
-impl From<serde_json::Error> for ConsumerError {
-    fn from(err: serde_json::Error) -> Self {
-        ConsumerError::Serde(err)
-    }
-}
-
 impl fmt::Display for ConsumerError {
   fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
     match self {
       ConsumerError::Connection(e) => write!(f, "Connection error: {}", e),
       ConsumerError::MissingPayload(s) => write!(f, "Missing payload: {}", s),
-      ConsumerError::Serde(e) => write!(f, "Deserialization error: {}", e),
     }
   }
 }
@@ -138,17 +129,14 @@ impl std::error::Error for ConsumerError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             ConsumerError::Connection(e) => Some(e),
-            ConsumerError::Serde(e) => Some(e),
             _ => None,
         }
     }
 }
 
-
 #[derive(Debug)]
 pub enum ProducerError {
     Connection(ConnectionError),
-    Serde(serde_json::Error),
     Custom(String),
 }
 
@@ -158,17 +146,10 @@ impl From<ConnectionError> for ProducerError {
     }
 }
 
-impl From<serde_json::Error> for ProducerError {
-    fn from(err: serde_json::Error) -> Self {
-        ProducerError::Serde(err)
-    }
-}
-
 impl fmt::Display for ProducerError {
   fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
     match self {
       ProducerError::Connection(e) => write!(f, "Connection error: {}", e),
-      ProducerError::Serde(e) => write!(f, "Serialization error: {}", e),
       ProducerError::Custom(s) => write!(f, "Custom error: {}", s),
     }
   }
@@ -178,7 +159,6 @@ impl std::error::Error for ProducerError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             ProducerError::Connection(e) => Some(e),
-            ProducerError::Serde(e) => Some(e),
             ProducerError::Custom(_) => None,
         }
     }

@@ -1,24 +1,19 @@
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::string::FromUtf8Error;
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::{
-    future::{self, Either, join_all},
-    Future,
-};
-use serde::{de::DeserializeOwned, Serialize};
-use tokio::runtime::TaskExecutor;
+use futures::future::Either;
+use tokio::{prelude::*, runtime::TaskExecutor};
 
+use crate::{ConsumerBuilder, producer, ProducerError};
 use crate::connection::Authentication;
 use crate::connection_manager::{BrokerAddress, ConnectionManager};
 use crate::consumer::{Consumer, MultiTopicConsumer, Unset};
-use crate::{ConsumerBuilder, producer, ProducerError};
-use crate::error::{ConsumerError, Error};
+use crate::error::Error;
 use crate::message::Payload;
 use crate::message::proto::{command_subscribe::SubType, CommandSendReceipt};
-use crate::producer::{Producer, MultiTopicProducer};
+use crate::producer::{MultiTopicProducer, Producer};
 use crate::service_discovery::ServiceDiscovery;
 
 /// Helper trait for consumer deserialization
@@ -43,14 +38,6 @@ impl DeserializeMessage for Vec<u8> {
     }
 }
 
-impl DeserializeMessage for serde_json::Value {
-    type Output = Result<serde_json::Value, serde_json::Error>;
-
-    fn deserialize_message(payload: Payload) -> Self::Output {
-        serde_json::from_slice(&payload.data)
-    }
-}
-
 impl DeserializeMessage for String {
     type Output = Result<String, FromUtf8Error>;
 
@@ -63,24 +50,17 @@ pub trait SerializeMessage {
     fn serialize_message(input: &Self) -> Result<producer::Message, ProducerError>;
 }
 
-impl SerializeMessage for serde_json::Value {
-    fn serialize_message(input: &Self) -> Result<producer::Message, ProducerError> {
-        let payload = serde_json::to_vec(input)?;
-        Ok(producer::Message { payload, .. Default::default() })
-    }
-}
-
 impl SerializeMessage for [u8] {
     fn serialize_message(input: &Self) -> Result<producer::Message, ProducerError> {
         //TODO figure out how to avoid copying here
-        Ok(producer::Message { payload: input.to_vec(), .. Default::default() })
+        Ok(producer::Message { payload: input.to_vec(), ..Default::default() })
     }
 }
 
 impl SerializeMessage for String {
     fn serialize_message(input: &Self) -> Result<producer::Message, ProducerError> {
         let payload = input.as_bytes().to_vec();
-        Ok(producer::Message { payload, .. Default::default() })
+        Ok(producer::Message { payload, ..Default::default() })
     }
 }
 
@@ -90,7 +70,7 @@ impl SerializeMessage for String {
 pub struct Pulsar {
     manager: Arc<ConnectionManager>,
     service_discovery: Arc<ServiceDiscovery>,
-    executor: TaskExecutor
+    executor: TaskExecutor,
 }
 
 impl Pulsar {
@@ -108,7 +88,7 @@ impl Pulsar {
                 Pulsar {
                     manager,
                     service_discovery,
-                    executor
+                    executor,
                 }
             })
     }
@@ -207,7 +187,7 @@ impl Pulsar {
     }
 
     pub fn create_partitioned_consumers<
-        T: DeserializeOwned + DeserializeMessage + Sized,
+        T: DeserializeMessage + Sized,
         S1: Into<String> + Clone,
         S2: Into<String> + Clone,
     >(
@@ -246,7 +226,7 @@ impl Pulsar {
                     })
                     .collect::<Vec<_>>();
 
-                join_all(res)
+                future::join_all(res)
             })
     }
 
@@ -285,40 +265,22 @@ impl Pulsar {
                     })
                     .collect::<Vec<_>>();
 
-                join_all(res)
+                future::join_all(res)
             })
     }
 
-    pub fn send_raw<S: Into<String> + Clone>(
-        &self,
-        topic: S,
-        data: Vec<u8>,
-        properties: Option<HashMap<String, String>>,
-    ) -> impl Future<Item=CommandSendReceipt, Error=Error> {
+    pub fn send<S: Into<String>, M: SerializeMessage>(&self, message: &M, topic: S) -> impl Future<Item=CommandSendReceipt, Error=Error> {
+        match M::serialize_message(message) {
+            Ok(message) => Either::A(self.send_raw(message, topic)),
+            Err(e) => Either::B(future::failed(e.into()))
+        }
+    }
+
+    pub fn send_raw<S: Into<String>>(&self, message: producer::Message, topic: S) -> impl Future<Item=CommandSendReceipt, Error=Error> {
         self.create_producer(topic, None)
-            .and_then(|producer| {
-                producer.send_raw(data, properties)
-                    .from_err()
-            })
+            .and_then(|producer| producer.send_raw(message).from_err())
     }
 
-    pub fn send_json<S: Into<String> + Clone, T: Serialize>(
-        &self,
-        topic: S,
-        msg: &T,
-        properties: Option<HashMap<String, String>>,
-    ) -> impl Future<Item=CommandSendReceipt, Error=Error> {
-        let data = match serde_json::to_vec(msg) {
-            Ok(data) => data,
-            Err(e) => {
-                let e: ConsumerError = e.into();
-                return Either::A(future::failed(e.into()));
-            }
-        };
-
-        Either::B(self.send_raw(topic, data, properties))
-    }
-    
     pub fn producer(&self) -> MultiTopicProducer {
         MultiTopicProducer::new(self.clone())
     }

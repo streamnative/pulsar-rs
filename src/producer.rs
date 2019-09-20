@@ -4,8 +4,6 @@ use std::sync::Arc;
 
 use futures::{Future, future::{self, Either}};
 use rand;
-use serde::Serialize;
-use serde_json;
 use tokio::prelude::*;
 use tokio::runtime::TaskExecutor;
 
@@ -253,13 +251,13 @@ impl Producer {
             .map_err(|e| e.into())
     }
 
-    pub fn send_raw(&self, data: Vec<u8>, properties: Option<HashMap<String, String>>) -> impl Future<Item=proto::CommandSendReceipt, Error=Error> {
+    pub fn send_raw(&self, message: Message) -> impl Future<Item=proto::CommandSendReceipt, Error=Error> {
         self.connection.sender().send(
             self.id,
             self.name.clone(),
             self.message_id.get(),
             None,
-            Message { payload: data, properties: properties.unwrap_or_else(|| HashMap::new()), ..Default::default() },
+            message,
         ).map_err(|e| e.into())
     }
 
@@ -270,16 +268,8 @@ impl Producer {
         }
     }
 
-    pub fn send_json<T: Serialize>(&mut self, msg: &T, properties: Option<HashMap<String, String>>) -> impl Future<Item=proto::CommandSendReceipt, Error=Error> {
-        let data = match serde_json::to_vec(msg) {
-            Ok(data) => data,
-            Err(e) => return Either::A(future::failed(ProducerError::Serde(e).into())),
-        };
-        Either::B(self.send_raw(data, properties).map_err(|e| e.into()))
-    }
-
     pub fn error(&self) -> Option<Error> {
-       self.connection.error().map(|e| ProducerError::Connection(e).into())
+        self.connection.error().map(|e| ProducerError::Connection(e).into())
     }
 
     fn send_message(&self, message: Message, num_messages: Option<i32>) -> impl Future<Item=proto::CommandSendReceipt, Error=Error> {

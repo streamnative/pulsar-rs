@@ -6,9 +6,10 @@ extern crate log;
 extern crate nom;
 #[macro_use]
 extern crate prost_derive;
+
 #[cfg(test)]
 #[macro_use]
-extern crate serde_derive;
+extern crate serde;
 
 pub use client::{SerializeMessage, DeserializeMessage, Pulsar};
 pub use connection::{Authentication, Connection};
@@ -53,7 +54,8 @@ mod tests {
 
     impl SerializeMessage for TestData {
         fn serialize_message(input: &Self) -> Result<producer::Message, ProducerError> {
-            let payload = serde_json::to_vec(input)?;
+            let payload = serde_json::to_vec(input)
+                .map_err(|e| ProducerError::Custom(e.to_string()))?;
             Ok(producer::Message { payload, ..Default::default() })
         }
     }
