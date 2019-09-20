@@ -72,7 +72,7 @@ fn run() {
 
     let consumer: Consumer<SomeData> = pulsar.consumer()
         .with_topic("some_topic")
-        .with_consumer_name("some_consumer_na,e")
+        .with_consumer_name("some_consumer_name")
         .with_subscription_type(SubType::Exclusive)
         .with_subscription("some_subscription")
         .build()

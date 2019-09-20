@@ -1,10 +1,15 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::string::FromUtf8Error;
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::future::Either;
-use tokio::{prelude::*, runtime::TaskExecutor};
+use futures::{
+    future::{self, Either},
+    Future,
+};
+use serde::{de::DeserializeOwned, Serialize};
+use tokio::runtime::TaskExecutor;
 
 use crate::{ConsumerBuilder, producer, ProducerError};
 use crate::connection::Authentication;
