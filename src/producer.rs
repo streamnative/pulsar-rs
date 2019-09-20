@@ -46,12 +46,12 @@ pub struct Message {
 }
 
 #[derive(Clone)]
-pub struct MultiTopicProducer {
+pub struct Producer {
     message_sender: UnboundedSender<ProducerMessage>,
 }
 
-impl MultiTopicProducer {
-    pub fn new(pulsar: Pulsar) -> MultiTopicProducer {
+impl Producer {
+    pub fn new(pulsar: Pulsar) -> Producer {
         let (tx, rx) = unbounded();
         let executor = pulsar.executor().clone();
         executor.spawn(ProducerEngine {
@@ -60,7 +60,7 @@ impl MultiTopicProducer {
             producers: BTreeMap::new(),
             new_producers: BTreeMap::new(),
         });
-        MultiTopicProducer {
+        Producer {
             message_sender: tx,
         }
     }
@@ -112,8 +112,8 @@ impl MultiTopicProducer {
 struct ProducerEngine {
     pulsar: Pulsar,
     inbound: UnboundedReceiver<ProducerMessage>,
-    producers: BTreeMap<String, Arc<Producer>>,
-    new_producers: BTreeMap<String, oneshot::Receiver<Result<Arc<Producer>, Error>>>,
+    producers: BTreeMap<String, Arc<TopicProducer>>,
+    new_producers: BTreeMap<String, oneshot::Receiver<Result<Arc<TopicProducer>, Error>>>,
 }
 
 impl Future for ProducerEngine {
@@ -188,7 +188,7 @@ struct ProducerMessage {
     resolver: oneshot::Sender<Result<proto::CommandSendReceipt, Error>>,
 }
 
-pub struct Producer {
+pub struct TopicProducer {
     connection: Arc<Connection>,
     id: ProducerId,
     name: ProducerName,
@@ -196,7 +196,7 @@ pub struct Producer {
     message_id: SerialId,
 }
 
-impl Producer {
+impl TopicProducer {
     pub fn new<S1, S2>(
         addr: S1,
         topic: S2,
@@ -204,16 +204,16 @@ impl Producer {
         auth: Option<Authentication>,
         proxy_to_broker_url: Option<String>,
         executor: TaskExecutor,
-    ) -> impl Future<Item=Producer, Error=Error>
+    ) -> impl Future<Item=TopicProducer, Error=Error>
         where S1: Into<String>,
               S2: Into<String>,
     {
         Connection::new(addr.into(), auth, proxy_to_broker_url, executor)
             .map_err(|e| e.into())
-            .and_then(move |conn| Producer::from_connection(Arc::new(conn), topic.into(), name))
+            .and_then(move |conn| TopicProducer::from_connection(Arc::new(conn), topic.into(), name))
     }
 
-    pub fn from_connection<S: Into<String>>(connection: Arc<Connection>, topic: S, name: Option<String>) -> impl Future<Item=Producer, Error=Error> {
+    pub fn from_connection<S: Into<String>>(connection: Arc<Connection>, topic: S, name: Option<String>) -> impl Future<Item=TopicProducer, Error=Error> {
         let topic = topic.into();
         let producer_id = rand::random();
         let sequence_ids = SerialId::new();
@@ -227,7 +227,7 @@ impl Producer {
             .map_err(|e| e.into())
             })
             .map(move |success| {
-                Producer {
+                TopicProducer {
                     connection,
                     id: producer_id,
                     name: success.producer_name,
@@ -278,7 +278,7 @@ impl Producer {
     }
 }
 
-impl Drop for Producer {
+impl Drop for TopicProducer {
     fn drop(&mut self) {
         let _ = self.connection.sender().close_producer(self.id);
     }

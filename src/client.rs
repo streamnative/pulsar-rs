@@ -13,7 +13,7 @@ use crate::consumer::{Consumer, MultiTopicConsumer, Unset};
 use crate::error::Error;
 use crate::message::Payload;
 use crate::message::proto::{command_subscribe::SubType, CommandSendReceipt};
-use crate::producer::{MultiTopicProducer, Producer};
+use crate::producer::{Producer, TopicProducer};
 use crate::service_discovery::ServiceDiscovery;
 
 /// Helper trait for consumer deserialization
@@ -234,20 +234,20 @@ impl Pulsar {
         &self,
         topic: S,
         name: Option<String>,
-    ) -> impl Future<Item=Producer, Error=Error> {
+    ) -> impl Future<Item=TopicProducer, Error=Error> {
         let manager = self.manager.clone();
         let topic = topic.into();
         self.service_discovery
             .lookup_topic(topic.clone())
             .from_err()
             .and_then(move |broker_address| manager.get_connection(&broker_address).from_err())
-            .and_then(move |conn| Producer::from_connection(conn, topic, name).from_err())
+            .and_then(move |conn| TopicProducer::from_connection(conn, topic, name).from_err())
     }
 
     pub fn create_partitioned_producers<S: Into<String> + Clone>(
         &self,
         topic: S,
-    ) -> impl Future<Item=Vec<Producer>, Error=Error> {
+    ) -> impl Future<Item=Vec<TopicProducer>, Error=Error> {
         let manager = self.manager.clone();
 
         self.service_discovery
@@ -261,7 +261,7 @@ impl Pulsar {
                         manager
                             .get_connection(&broker_address)
                             .from_err()
-                            .and_then(move |conn| Producer::from_connection(conn, topic, None).from_err())
+                            .and_then(move |conn| TopicProducer::from_connection(conn, topic, None).from_err())
                     })
                     .collect::<Vec<_>>();
 
@@ -281,8 +281,8 @@ impl Pulsar {
             .and_then(|producer| producer.send_raw(message).from_err())
     }
 
-    pub fn producer(&self) -> MultiTopicProducer {
-        MultiTopicProducer::new(self.clone())
+    pub fn producer(&self) -> Producer {
+        Producer::new(self.clone())
     }
 
     pub(crate) fn executor(&self) -> &TaskExecutor {
