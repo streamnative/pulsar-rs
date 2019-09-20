@@ -66,7 +66,7 @@ impl MultiTopicProducer {
     }
 
     //TODO return impl Future once https://github.com/rust-lang/rust/issues/42940 is resolved
-    pub fn send<T: SerializeMessage, S: Into<String>>(&self, topic: S, message: &T) -> Box<dyn Future<Item=proto::CommandSendReceipt, Error=Error> + 'static + Send> {
+    pub fn send<T: SerializeMessage, S: Into<String>>(&self, message: &T, topic: S) -> Box<dyn Future<Item=proto::CommandSendReceipt, Error=Error> + 'static + Send> {
         let topic = topic.into();
         match T::serialize_message(message) {
             Ok(message) => Box::new(self.send_message(topic, message)),
