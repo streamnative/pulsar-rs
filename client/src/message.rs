@@ -753,7 +753,20 @@ pub mod proto {
         pub request_id: u64,
         #[prost(string, required, tag="2")]
         pub namespace: String,
+        #[prost(enumeration="get_topics::Mode", optional, tag="3")]
+        pub mode: ::std::option::Option<i32>,
+
     }
+
+    pub mod get_topics {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Enumeration)]
+        pub enum Mode {
+            Persistent = 0,
+            NonPersistent = 1,
+            All = 2,
+        }
+    }
+
     #[derive(Clone, PartialEq, Message)]
     pub struct CommandGetTopicsOfNamespaceResponse {
         #[prost(uint64, required, tag="1")]

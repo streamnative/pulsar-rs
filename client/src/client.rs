@@ -139,9 +139,9 @@ impl Pulsar {
             .from_err()
     }
 
-    pub fn get_topics_of_namespace(&self, namespace: String) -> impl Future<Item=Vec<String>, Error=Error> {
+    pub fn get_topics_of_namespace(&self, namespace: String, mode: crate::proto::get_topics::Mode) -> impl Future<Item=Vec<String>, Error=Error> {
         self.manager.get_base_connection()
-            .and_then(move |conn| conn.sender().get_topics_of_namespace(namespace))
+            .and_then(move |conn| conn.sender().get_topics_of_namespace(namespace, mode))
             .from_err()
             .map(|topics| topics.topics)
     }
