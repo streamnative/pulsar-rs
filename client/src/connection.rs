@@ -1,11 +1,13 @@
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+use std::task::{Context, Poll};
 
-use futures::{self, Async, AsyncSink, Future, future::{self, Either}, IntoFuture, Sink, Stream,
-              sync::{mpsc, oneshot}};
+use futures::{self, AsyncSink, Future, future::{self, err, Either, IntoFuture}, Sink, Stream,
+    channel::{mpsc, oneshot}};
 use tokio::net::TcpStream;
 use tokio::runtime::TaskExecutor;
 use tokio_codec;
@@ -31,7 +33,7 @@ pub struct Authentication {
     pub data: Vec<u8>,
 }
 
-pub struct Receiver<S: Stream<Item=Message, Error=ConnectionError>> {
+pub struct Receiver<S: Stream<Item=Result<Message, ConnectionError>>> {
     inbound: S,
     outbound: mpsc::UnboundedSender<Message>,
     error: SharedError,
@@ -42,7 +44,7 @@ pub struct Receiver<S: Stream<Item=Message, Error=ConnectionError>> {
     shutdown: oneshot::Receiver<()>,
 }
 
-impl<S: Stream<Item=Message, Error=ConnectionError>> Receiver<S> {
+impl<S: Stream<Item=Result<Message, ConnectionError>>> Receiver<S> {
     pub fn new(
         inbound: S,
         outbound: mpsc::UnboundedSender<Message>,
@@ -63,20 +65,19 @@ impl<S: Stream<Item=Message, Error=ConnectionError>> Receiver<S> {
     }
 }
 
-impl<S: Stream<Item=Message, Error=ConnectionError>> Future for Receiver<S> {
-    type Item = ();
-    type Error = ();
+impl<S: Stream<Item=Result<Message, ConnectionError>>> Future for Receiver<S> {
+    type Output = Result<(), ()>;
 
-    fn poll(&mut self) -> Result<Async<()>, ()> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         match self.shutdown.poll() {
-            Ok(Async::Ready(())) | Err(futures::Canceled) => return Err(()),
-            Ok(Async::NotReady) => {}
+            Ok(Poll::Ready(())) | Err(ConnectionError::Canceled) => return Err(()),
+            Ok(Poll::Pending) => {}
         }
 
         //Are we worried about starvation here?
         loop {
             match self.registrations.poll() {
-                Ok(Async::Ready(Some(Register::Request { key, resolver }))) => {
+                Ok(Poll::Ready(Some(Register::Request { key, resolver }))) => {
                     match self.received_messages.remove(&key) {
                         Some(msg) => {
                             let _ = resolver.send(msg);
@@ -86,20 +87,20 @@ impl<S: Stream<Item=Message, Error=ConnectionError>> Future for Receiver<S> {
                         }
                     }
                 }
-                Ok(Async::Ready(Some(Register::Consumer { consumer_id, resolver }))) => {
+                Ok(Poll::Ready(Some(Register::Consumer { consumer_id, resolver }))) => {
                     self.consumers.insert(consumer_id, resolver);
                 }
-                Ok(Async::Ready(None)) | Err(_) => {
+                Ok(Poll::Ready(None)) | Err(_) => {
                     self.error.set(ConnectionError::Disconnected);
                     return Err(());
                 }
-                Ok(Async::NotReady) => break,
+                Ok(Poll::Pending) => break,
             }
         }
 
         loop {
             match self.inbound.poll() {
-                Ok(Async::Ready(Some(msg))) => {
+                Ok(Poll::Ready(Some(msg))) => {
                     if msg.command.ping.is_some() {
                         let _ = self.outbound.unbounded_send(messages::pong());
                     } else if msg.command.message.is_some() {
@@ -119,11 +120,11 @@ impl<S: Stream<Item=Message, Error=ConnectionError>> Future for Receiver<S> {
                         }
                     }
                 }
-                Ok(Async::Ready(None)) => {
+                Ok(Poll::Ready(None)) => {
                     self.error.set(ConnectionError::Disconnected);
                     return Err(());
                 }
-                Ok(Async::NotReady) => return Ok(Async::NotReady),
+                Ok(Poll::Pending) => return Ok(Poll::Pending),
                 Err(e) => {
                     self.error.set(e);
                     return Err(());
@@ -133,7 +134,7 @@ impl<S: Stream<Item=Message, Error=ConnectionError>> Future for Receiver<S> {
     }
 }
 
-pub struct Sender<S: Sink<SinkItem=Message, SinkError=ConnectionError>> {
+pub struct Sender<S: Stream<Item=Result<Message, ConnectionError>>> {
     sink: S,
     outbound: mpsc::UnboundedReceiver<Message>,
     buffered: Option<Message>,
@@ -157,39 +158,38 @@ impl<S: Sink<SinkItem=Message, SinkError=ConnectionError>> Sender<S> {
         }
     }
 
-    fn try_start_send(&mut self, item: Message) -> futures::Poll<(), ConnectionError> {
+    fn try_start_send(&mut self, item: Message) -> Poll<Result<(), ConnectionError>> {
         if let AsyncSink::NotReady(item) = self.sink.start_send(item)? {
             self.buffered = Some(item);
-            return Ok(Async::NotReady);
+            return Ok(Poll::Pending);
         }
-        Ok(Async::Ready(()))
+        Ok(Poll::Ready(()))
     }
 }
 
 impl<S: Sink<SinkItem=Message, SinkError=ConnectionError>> Future for Sender<S> {
-    type Item = ();
-    type Error = ();
+    type Output = Result<(), ()>;
 
-    fn poll(&mut self) -> Result<Async<()>, ()> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         match self.shutdown.poll() {
-            Ok(Async::Ready(())) | Err(futures::Canceled) => return Err(()),
-            Ok(Async::NotReady) => {}
+            Ok(Poll::Ready(())) | Err(ConnectionError::Canceled) => return Err(()),
+            Ok(Poll::Pending) => {}
         }
 
         if let Some(item) = self.buffered.take() {
-            try_ready!(self.try_start_send(item).map_err(|e| self.error.set(e)))
+            self.try_start_send(item).map_err(|e| self.error.set(e))?;
         }
 
         loop {
             match self.outbound.poll()? {
-                Async::Ready(Some(item)) => try_ready!(self.try_start_send(item).map_err(|e| self.error.set(e))),
-                Async::Ready(None) => {
-                    try_ready!(self.sink.close().map_err(|e| self.error.set(e)));
-                    return Ok(Async::Ready(()));
+                Poll::Ready(Some(item)) => self.try_start_send(item).map_err(|e| self.error.set(e))?,
+                Poll::Ready(None) => {
+                    self.sink.close().map_err(|e| self.error.set(e))?;
+                    return Ok(Poll::Ready(()));
                 }
-                Async::NotReady => {
-                    try_ready!(self.sink.poll_complete().map_err(|e| self.error.set(e)));
-                    return Ok(Async::NotReady);
+                Poll::Pending => {
+                    self.sink.poll_complete().map_err(|e| self.error.set(e))?;
+                    return Ok(Poll::Pending);
                 }
             }
         }
@@ -305,7 +305,7 @@ impl ConnectionSender {
             Ok(_) => {}
             Err(_) => {
                 self.error.set(ConnectionError::Disconnected);
-                return Either::A(future::failed(ConnectionError::Disconnected));
+                return Either::A(err(ConnectionError::Disconnected));
             }
         }
         Either::B(self.send_message(msg, RequestKey::RequestId(request_id), |resp| resp.command.success))

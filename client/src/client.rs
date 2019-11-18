@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::{
-    future::{self, Either, join_all},
+    future::{err, Either, join_all},
     Future,
 };
 use serde::{de::DeserializeOwned, Serialize};
@@ -312,13 +312,13 @@ impl Pulsar {
             Ok(data) => data,
             Err(e) => {
                 let e: ConsumerError = e.into();
-                return Either::A(future::failed(e.into()));
+                return Either::A(err(e.into()));
             }
         };
 
         Either::B(self.send_raw(topic, data, properties))
     }
-    
+
     pub fn producer(&self) -> MultiTopicProducer {
         MultiTopicProducer::new(self.clone())
     }

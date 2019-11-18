@@ -1,8 +1,10 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
-use futures::{Future, future::{self, Either}};
+use futures::{Future, future::{err, Either}};
 use rand;
 use serde::Serialize;
 use serde_json;
@@ -14,8 +16,7 @@ use crate::connection::{Authentication, Connection, SerialId};
 use crate::error::ProducerError;
 use crate::message::proto::{self, EncryptionKeys};
 use crate::{Pulsar, Error};
-use futures::sync::oneshot;
-use futures::sync::mpsc::{unbounded, UnboundedSender, UnboundedReceiver};
+use futures::channel::{mpsc::{unbounded, UnboundedSender, UnboundedReceiver}, oneshot};
 
 type ProducerId = u64;
 type ProducerName = String;
@@ -71,7 +72,7 @@ impl MultiTopicProducer {
         let topic = topic.into();
         match T::serialize_message(message) {
             Ok(message) => Either::A(self.send_message(topic, message)),
-            Err(e) => Either::B(future::failed(e.into()))
+            Err(e) => Either::B(err(e.into()))
         }
     }
 
@@ -82,12 +83,12 @@ impl MultiTopicProducer {
         // TODO determine whether to keep this approach or go with the partial send, but more mem friendly lazy approach.
         // serialize all messages before sending to avoid a partial send
         match messages.into_iter().map(|m| T::serialize_message(m)).collect::<Result<Vec<_>, _>>() {
-            Ok(messages) => Either::A(future::collect(
+            Ok(messages) => Either::A(futures::stream::iter(
                 messages.into_iter()
                     .map(|m| self.send_message(topic.clone(), m))
                     .collect::<Vec<_>>())
             ),
-            Err(e) => Either::B(future::failed(e.into()))
+            Err(e) => Either::B(err(e.into()))
         }
 
     }
@@ -104,7 +105,7 @@ impl MultiTopicProducer {
                 Ok(Err(e)) => Err(e.into()),
                 Err(oneshot::Canceled) => Err(ProducerError::Custom("Unexpected error: pulsar producer engine unexpectedly dropped".to_owned()).into())
             })),
-            Err(_) => Either::B(future::failed(ProducerError::Custom("Unexpected error: pulsar producer engine unexpectedly dropped".to_owned()).into()))
+            Err(_) => Either::B(err(ProducerError::Custom("Unexpected error: pulsar producer engine unexpectedly dropped".to_owned()).into()))
         }
     }
 }
@@ -117,20 +118,19 @@ struct ProducerEngine {
 }
 
 impl Future for ProducerEngine {
-    type Item = ();
-    type Error = ();
+    type Output = Result<(), ()>;
 
-    fn poll(&mut self) -> Result<Async<Self::Item>, Self::Error> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         if !self.new_producers.is_empty() {
             let mut resolved_topics = Vec::new();
             for (topic, producer) in self.new_producers.iter_mut() {
                 match producer.poll() {
-                    Ok(Async::Ready(Ok(producer))) => {
+                    Ok(Poll::Ready(Ok(producer))) => {
                         self.producers.insert(producer.topic().to_owned(), producer);
                         resolved_topics.push(topic.clone());
                     }
-                    Ok(Async::Ready(Err(_))) | Err(_) => resolved_topics.push(topic.clone()),
-                    Ok(Async::NotReady) => {},
+                    Ok(Poll::Ready(Err(_))) | Err(_) => resolved_topics.push(topic.clone()),
+                    Ok(Poll::Pending) => {},
                 }
             }
             for topic in resolved_topics {
@@ -139,7 +139,7 @@ impl Future for ProducerEngine {
         }
 
         loop {
-            match try_ready!(self.inbound.poll()) {
+            match self.inbound.poll()? {
                 Some(ProducerMessage { topic, message, resolver }) => {
                     match self.producers.get(&topic) {
                         Some(producer) => {
@@ -169,14 +169,14 @@ impl Future for ProducerEngine {
                                     // TODO find better error propogation here
                                     let _ = resolver.send(Err(Error::Producer(ProducerError::Custom(e.to_string()))));
                                     let _ = tx.send(Err(e));
-                                    Either::B(future::failed(()))
+                                    Either::B(err(()))
                                 }
                             }));
                             self.new_producers.insert(topic, rx);
                         }
                     }
                 }
-                None => return Ok(Async::Ready(()))
+                None => return Ok(Poll::Ready(()))
             }
         }
     }
@@ -264,14 +264,14 @@ impl Producer {
     pub fn send<T: SerializeMessage>(&self, message: &T, num_messages: Option<i32>) -> impl Future<Item=proto::CommandSendReceipt, Error=Error> {
         match T::serialize_message(message) {
             Ok(message) => Either::A(self.send_message(message, num_messages)),
-            Err(e) => Either::B(future::failed(e.into()))
+            Err(e) => Either::B(err(e.into()))
         }
     }
 
     pub fn send_json<T: Serialize>(&mut self, msg: &T, properties: Option<HashMap<String, String>>) -> impl Future<Item=proto::CommandSendReceipt, Error=Error> {
         let data = match serde_json::to_vec(msg) {
             Ok(data) => data,
-            Err(e) => return Either::A(future::failed(ProducerError::Serde(e).into())),
+            Err(e) => return Either::A(err(ProducerError::Serde(e).into())),
         };
         Either::B(self.send_raw(data, properties).map_err(|e| e.into()))
     }

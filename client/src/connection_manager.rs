@@ -2,7 +2,7 @@ use crate::connection::{Authentication, Connection};
 use crate::error::ConnectionError;
 use futures::{
     future::{self, Either},
-    sync::{mpsc, oneshot},
+    channel::{mpsc, oneshot},
     Future, Stream,
 };
 use std::collections::HashMap;

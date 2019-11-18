@@ -21,22 +21,22 @@ travis-ci = {repository = "wyyerd/pulsar-rs"}
 [dependencies]
 bytes = "0.4.0"
 crc = "1.0.0"
-futures = "0.1.23"
+futures = "0.3.1"
 nom = "4.0.0"
-prost = "0.4.0"
-prost-derive = "0.4.0"
-tokio = "0.1.11"
-tokio-codec = "0.1.1"
-rand = "0.5.5"
+prost = { git = "https://github.com/vivint-smarthome/prost", branch = "syn-quote-proc_macro2-1.0" }
+prost-derive = { git = "https://github.com/vivint-smarthome/prost", branch = "syn-quote-proc_macro2-1.0" }
+tokio = "0.2.0-alpha.6"
+tokio-codec = "0.2.0-alpha.6"
+rand = "0.7.2"
 serde = "1.0.80"
 serde_derive = "1.0"
 serde_json = "1.0.32"
 chrono = "0.4.6"
-futures-timer = "0.1.1"
+futures-timer = "2.0.2"
 log = "0.4.6"
-trust-dns-resolver = "0.11"
-url = "1.7"
+trust-dns-resolver = "0.18.0-alpha.1"
+url = "2.1.0"
 regex = "1.1.7"
 
 [build-dependencies]
-prost-build = "0.4.0"
+prost-build = { git = "https://github.com/vivint-smarthome/prost", branch = "syn-quote-proc_macro2-1.0" }

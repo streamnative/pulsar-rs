@@ -3,8 +3,8 @@ use crate::connection_manager::{BrokerAddress, ConnectionManager};
 use crate::error::ServiceDiscoveryError;
 use crate::message::proto::{command_lookup_topic_response, CommandLookupTopicResponse};
 use futures::{
-    future::{self, join_all, Either},
-    sync::{mpsc, oneshot},
+    future::{self, join_all, Either, TryFutureExt},
+    channel::{mpsc, oneshot},
     Future, Stream,
 };
 use std::net::SocketAddr;
