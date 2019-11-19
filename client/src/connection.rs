@@ -6,11 +6,18 @@ use std::str::FromStr;
 use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 use std::task::{Context, Poll};
 
-use futures::{self, AsyncSink, Future, future::{self, err, Either, IntoFuture}, Sink, Stream,
-    channel::{mpsc, oneshot}};
+use futures::{
+    self,
+    future::{self, err, ready, Either, FutureExt, IntoFuture, TryFutureExt},
+    sink::SinkExt,
+    Future,
+    Sink,
+    Stream,
+    channel::{mpsc, oneshot}
+};
+use tokio::codec;
 use tokio::net::TcpStream;
 use tokio::runtime::TaskExecutor;
-use tokio_codec;
 
 use crate::error::{ConnectionError, SharedError};
 use crate::message::{Codec, Message, proto::{self, command_subscribe::SubType}};
@@ -134,7 +141,7 @@ impl<S: Stream<Item=Result<Message, ConnectionError>>> Future for Receiver<S> {
     }
 }
 
-pub struct Sender<S: Stream<Item=Result<Message, ConnectionError>>> {
+pub struct Sender<S: Sink<Message, Error=ConnectionError>> {
     sink: S,
     outbound: mpsc::UnboundedReceiver<Message>,
     buffered: Option<Message>,
@@ -142,7 +149,7 @@ pub struct Sender<S: Stream<Item=Result<Message, ConnectionError>>> {
     shutdown: oneshot::Receiver<()>,
 }
 
-impl<S: Sink<SinkItem=Message, SinkError=ConnectionError>> Sender<S> {
+impl<S: Sink<Message, Error=ConnectionError>> Sender<S> {
     pub fn new(
         sink: S,
         outbound: mpsc::UnboundedReceiver<Message>,
@@ -159,7 +166,7 @@ impl<S: Sink<SinkItem=Message, SinkError=ConnectionError>> Sender<S> {
     }
 
     fn try_start_send(&mut self, item: Message) -> Poll<Result<(), ConnectionError>> {
-        if let AsyncSink::NotReady(item) = self.sink.start_send(item)? {
+        if let Err(_e) = self.sink.start_send(item)? {
             self.buffered = Some(item);
             return Ok(Poll::Pending);
         }
@@ -167,7 +174,7 @@ impl<S: Sink<SinkItem=Message, SinkError=ConnectionError>> Sender<S> {
     }
 }
 
-impl<S: Sink<SinkItem=Message, SinkError=ConnectionError>> Future for Sender<S> {
+impl<S: Sink<Message, Error=ConnectionError>> Future for Sender<S> {
     type Output = Result<(), ()>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
@@ -239,7 +246,7 @@ impl ConnectionSender {
         sequence_id: u64,
         num_messages: Option<i32>,
         message: producer::Message
-    ) -> impl Future<Item=proto::CommandSendReceipt, Error=ConnectionError> {
+    ) -> impl Future<Output=Result<proto::CommandSendReceipt, ConnectionError>> {
         let key = RequestKey::ProducerSend { producer_id, sequence_id };
         let msg = messages::send(
             producer_id,
@@ -256,13 +263,13 @@ impl ConnectionSender {
             .map_err(|_| ConnectionError::Disconnected)
     }
 
-    pub fn lookup_topic<S: Into<String>>(&self, topic: S, authoritative: bool) -> impl Future<Item=proto::CommandLookupTopicResponse, Error=ConnectionError> {
+    pub fn lookup_topic<S: Into<String>>(&self, topic: S, authoritative: bool) -> impl Future<Output=Result<proto::CommandLookupTopicResponse, ConnectionError>> {
         let request_id = self.request_id.get();
         let msg = messages::lookup_topic(topic.into(), authoritative, request_id);
         self.send_message(msg, RequestKey::RequestId(request_id), |resp| resp.command.lookup_topic_response)
     }
 
-    pub fn lookup_partitioned_topic<S: Into<String>>(&self, topic: S) -> impl Future<Item=proto::CommandPartitionedTopicMetadataResponse, Error=ConnectionError> {
+    pub fn lookup_partitioned_topic<S: Into<String>>(&self, topic: S) -> impl Future<Output=Result<proto::CommandPartitionedTopicMetadataResponse, ConnectionError>> {
         let request_id = self.request_id.get();
         let msg = messages::lookup_partitioned_topic(topic.into(), request_id);
         self.send_message(msg, RequestKey::RequestId(request_id), |resp| resp.command.partition_metadata_response)
@@ -273,19 +280,19 @@ impl ConnectionSender {
                            topic: String,
                            producer_id: u64,
                            producer_name: Option<String>,
-    ) -> impl Future<Item=proto::CommandProducerSuccess, Error=ConnectionError> {
+    ) -> impl Future<Output=Result<proto::CommandProducerSuccess, ConnectionError>> {
         let request_id = self.request_id.get();
         let msg = messages::create_producer(topic, producer_name, producer_id, request_id);
         self.send_message(msg, RequestKey::RequestId(request_id), |resp| resp.command.producer_success)
     }
 
-    pub fn get_topics_of_namespace(&self, namespace: String) -> impl Future<Item=proto::CommandGetTopicsOfNamespaceResponse, Error=ConnectionError> {
+    pub fn get_topics_of_namespace(&self, namespace: String) -> impl Future<Output=Result<proto::CommandGetTopicsOfNamespaceResponse, ConnectionError>> {
         let request_id = self.request_id.get();
         let msg = messages::get_topics_of_namespace(request_id, namespace);
         self.send_message(msg, RequestKey::RequestId(request_id), |resp| resp.command.get_topics_of_namespace_response)
     }
 
-    pub fn close_producer(&self, producer_id: u64) -> impl Future<Item=proto::CommandSuccess, Error=ConnectionError> {
+    pub fn close_producer(&self, producer_id: u64) -> impl Future<Output=Result<proto::CommandSuccess, ConnectionError>> {
         let request_id = self.request_id.get();
         let msg = messages::close_producer(producer_id, request_id);
         self.send_message(msg, RequestKey::RequestId(request_id), |resp| resp.command.success)
@@ -298,7 +305,7 @@ impl ConnectionSender {
                      sub_type: SubType,
                      consumer_id: u64,
                      consumer_name: Option<String>,
-    ) -> impl Future<Item=proto::CommandSuccess, Error=ConnectionError> {
+    ) -> impl Future<Output=Result<proto::CommandSuccess, ConnectionError>> {
         let request_id = self.request_id.get();
         let msg = messages::subscribe(topic, subscription, sub_type, consumer_id, request_id, consumer_name);
         match self.registrations.unbounded_send(Register::Consumer { consumer_id, resolver }) {
@@ -321,13 +328,13 @@ impl ConnectionSender {
             .map_err(|_| ConnectionError::Disconnected)
     }
 
-    pub fn close_consumer(&self, consumer_id: u64) -> impl Future<Item=proto::CommandSuccess, Error=ConnectionError> {
+    pub fn close_consumer(&self, consumer_id: u64) -> impl Future<Output=Result<proto::CommandSuccess, ConnectionError>> {
         let request_id = self.request_id.get();
         let msg = messages::close_consumer(consumer_id, request_id);
         self.send_message(msg, RequestKey::RequestId(request_id), |resp| resp.command.success)
     }
 
-    fn send_message<R: Debug, F>(&self, msg: Message, key: RequestKey, extract: F) -> impl Future<Item=R, Error=ConnectionError>
+    fn send_message<R: Debug, F>(&self, msg: Message, key: RequestKey, extract: F) -> impl Future<Output=Result<R, ConnectionError>>
         where F: FnOnce(Message) -> Option<R>
     {
         let (resolver, response) = oneshot::channel();
@@ -361,14 +368,15 @@ impl Connection {
         auth_data: Option<Authentication>,
         proxy_to_broker_url: Option<String>,
         executor: TaskExecutor,
-    ) -> impl Future<Item=Connection, Error=ConnectionError> {
-        SocketAddr::from_str(&addr).into_future()
+    ) -> impl Future<Output=Result<Connection, ConnectionError>> {
+        ready(SocketAddr::from_str(&addr))
             .map_err(|e| ConnectionError::SocketAddr(e.to_string()))
             .and_then(|addr| {
                 TcpStream::connect(&addr)
                     .map_err(|e| e.into())
-                    .map(|stream| tokio_codec::Framed::new(stream, Codec))
-                    .and_then(|stream|
+                    .map_ok(|stream| codec::Framed::new(stream, Codec))
+                    .and_then(|stream| {
+                        use futures::sink::SinkExt;
                         stream.send({
                             let msg = messages::connect(auth_data, proxy_to_broker_url);
                             trace!("connection message: {:?}", msg);
@@ -388,9 +396,10 @@ impl Connection {
                                 None => {
                                     Err(ConnectionError::Disconnected)
                                 }
-                            }))
+                            })
+                    })
             })
-            .map(move |pulsar| {
+            .map_ok(move |pulsar| {
                 let (sink, stream) = pulsar.split();
                 let (tx, rx) = mpsc::unbounded();
                 let (registrations_tx, registrations_rx) = mpsc::unbounded();

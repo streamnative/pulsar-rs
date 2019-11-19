@@ -26,7 +26,6 @@ nom = "4.0.0"
 prost = { git = "https://github.com/vivint-smarthome/prost", branch = "syn-quote-proc_macro2-1.0" }
 prost-derive = { git = "https://github.com/vivint-smarthome/prost", branch = "syn-quote-proc_macro2-1.0" }
 tokio = "0.2.0-alpha.6"
-tokio-codec = "0.2.0-alpha.6"
 rand = "0.7.2"
 serde = "1.0.80"
 serde_derive = "1.0"

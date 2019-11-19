@@ -5,7 +5,7 @@ use crc::crc32;
 use nom::{be_u16, be_u32};
 use prost::{self, Message as ImplProtobuf};
 use std::io::Cursor;
-use tokio_codec::{Encoder, Decoder};
+use tokio::codec::{Encoder, Decoder};
 
 
 pub use self::proto::BaseCommand;
@@ -1001,7 +1001,7 @@ impl From<prost::DecodeError> for ConnectionError {
 mod tests {
     use crate::message::Codec;
     use bytes::BytesMut;
-    use tokio_codec::{Encoder, Decoder};
+    use tokio::codec::{Encoder, Decoder};
 
     #[test]
     fn parse_simple_command() {
