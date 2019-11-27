@@ -2,7 +2,7 @@ use crate::connection::RequestKey;
 use crate::error::ConnectionError;
 use bytes::{Buf, BufMut, IntoBuf, BytesMut};
 use crc::crc32;
-use nom::{be_u16, be_u32};
+use nom::number::streaming::{be_u16, be_u32};
 use prost::{self, Message as ImplProtobuf};
 use std::io::Cursor;
 use tokio_codec::{Encoder, Decoder};
@@ -115,13 +115,13 @@ impl Decoder for Codec {
             if src.len() >= message_size {
                 let msg = {
                     let (buf, command_frame) = command_frame(&src[..message_size])
-                        .map_err(|err| ConnectionError::Decoding(format!("Error decoding command frame: {}", err)))?;
+                        .map_err(|err| ConnectionError::Decoding(format!("Error decoding command frame: {:?}", err)))?;
                     let command = BaseCommand::decode(command_frame.command)?;
 
                     let payload =
                         if buf.len() > 0 {
                             let (buf, payload_frame) = payload_frame(buf)
-                                .map_err(|err| ConnectionError::Decoding(format!("Error decoding payload frame: {}", err)))?;
+                                .map_err(|err| ConnectionError::Decoding(format!("Error decoding payload frame: {:?}", err)))?;
 
                             // TODO: Check crc32 of payload data
 
