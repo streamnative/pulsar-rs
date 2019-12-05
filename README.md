@@ -39,7 +39,7 @@ fn run() {
     let message = SomeData {};
 
     runtime.executor().spawn({
-        producer.send(&message, "some_topic")
+        producer.send("some_topic", &message)
             .map(drop)
             .map_err(|e| eprintln!("Error handling! {}", e))
     });

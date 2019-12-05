@@ -117,7 +117,7 @@ mod tests {
         let producer = pulsar.producer();
 
         future::join_all((0..5000)
-            .map(|_| producer.send(&TestData { data: "data".to_string() }, "test")))
+            .map(|_| producer.send("test", &TestData { data: "data".to_string() })))
             .map_err(|e| Error::from(e))
             .timeout(Duration::from_secs(5))
             .wait()
@@ -147,93 +147,5 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .wait()
             .unwrap();
-    }
-}
-
-mod producing {
-    use crate::{Pulsar, SerializeMessage, ProducerError, producer};
-
-    use tokio::prelude::*;
-
-    #[derive(Debug)]
-    pub struct SomeData {
-
-    }
-
-    impl SerializeMessage for SomeData {
-        fn serialize_message(input: &Self) -> Result<producer::Message, ProducerError> {
-            unimplemented!()
-        }
-    }
-
-    fn run() {
-        let addr = "127.0.0.1:6650".parse().unwrap();
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-
-        let pulsar: Pulsar = Pulsar::new(addr, None, runtime.executor())
-            .wait().unwrap();
-
-        let producer = pulsar.producer();
-
-        let message = SomeData {};
-
-        runtime.executor().spawn({
-            producer.send(&message, "some_topic")
-                .map(drop)
-                .map_err(|e| eprintln!("Error handling! {}", e))
-        });
-    }
-}
-
-mod consuming {
-    use crate::{Pulsar, Consumer, SubType, DeserializeMessage, consumer, message};
-
-    use tokio::prelude::*;
-
-    #[derive(Debug)]
-    pub struct SomeData {
-
-    }
-
-    impl DeserializeMessage for SomeData {
-        type Output = Result<Self, ()>;
-
-        fn deserialize_message(payload: message::Payload) -> Self::Output {
-            unimplemented!()
-        }
-    }
-
-    fn run() {
-        let addr = "127.0.0.1:6650".parse().unwrap();
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-
-        let pulsar: Pulsar = Pulsar::new(addr, None, runtime.executor())
-            .wait().unwrap();
-
-        let consumer: Consumer<SomeData> = pulsar.consumer()
-            .with_topic("some_topic")
-            .with_consumer_name("some_consumer_na,e")
-            .with_subscription_type(SubType::Exclusive)
-            .with_subscription("some_subscription")
-            .build()
-            .wait()
-            .unwrap();
-
-        runtime.executor().spawn({
-            consumer
-                .for_each(move |consumer::Message { payload, ack, .. }| {
-                    ack.ack(); // or maybe not ack unless Ok - whatever makes sense in your use case
-                    match payload {
-                        Ok(data) => {
-                            //process data
-                        },
-                        Err(e) => {
-                            // handle error
-                        }
-                    }
-                    Ok(()) // or Err if you want the consumer to shutdown
-                })
-                .map_err(|_| { /* handle connection errors, etc */ })
-        })
     }
 }

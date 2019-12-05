@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::string::FromUtf8Error;
 use std::sync::Arc;
@@ -8,7 +7,6 @@ use futures::{
     future::{self, Either},
     Future,
 };
-use serde::{de::DeserializeOwned, Serialize};
 use tokio::runtime::TaskExecutor;
 
 use crate::{ConsumerBuilder, producer, ProducerError};
