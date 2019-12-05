@@ -572,13 +572,34 @@ mod tests {
     use std::thread;
 
     use regex::Regex;
-    use serde_json::json;
     use tokio::prelude::*;
     use tokio::runtime::Runtime;
 
-    use crate::Pulsar;
+    use crate::{Pulsar, SerializeMessage, ProducerError, producer};
 
     use super::*;
+
+    #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct TestData {
+        topic: String,
+        msg: u32,
+    }
+
+    impl SerializeMessage for TestData {
+        fn serialize_message(input: &Self) -> Result<producer::Message, ProducerError> {
+            let payload = serde_json::to_vec(input)
+                .map_err(|e| ProducerError::Custom(e.to_string()))?;
+            Ok(producer::Message { payload, ..Default::default() })
+        }
+    }
+
+    impl DeserializeMessage for TestData {
+        type Output = Result<TestData, serde_json::Error>;
+
+        fn deserialize_message(payload: Payload) -> Self::Output {
+            serde_json::from_slice(&payload.data)
+        }
+    }
 
     #[test]
     #[ignore]
@@ -590,22 +611,22 @@ mod tests {
         let topic1 = "mt_test_a";
         let topic2 = "mt_test_b";
 
-        let data1 = json!({"topic": "a", "msg": 1});
-        let data2 = json!({"topic": "a", "msg": 2});
-        let data3 = json!({"topic": "b", "msg": 1});
-        let data4 = json!({"topic": "b", "msg": 2});
+        let data1 = TestData { topic: "a".to_owned(), msg: 1 };
+        let data2 = TestData { topic: "a".to_owned(), msg: 2 };
+        let data3 = TestData { topic: "b".to_owned(), msg: 1 };
+        let data4 = TestData { topic: "b".to_owned(), msg: 2 };
 
         let client: Pulsar = Pulsar::new(addr, None, rt.executor()).wait().unwrap();
 
         let send_start = Utc::now();
-        client.send_json(topic1, &data1, None).wait().unwrap();
-        client.send_json(topic1, &data2, None).wait().unwrap();
-        client.send_json(topic2, &data3, None).wait().unwrap();
-        client.send_json(topic2, &data4, None).wait().unwrap();
+        client.send(&data1, topic1).wait().unwrap();
+        client.send(&data2, topic1).wait().unwrap();
+        client.send(&data3, topic2).wait().unwrap();
+        client.send(&data4, topic2).wait().unwrap();
 
         let data = vec![data1, data2, data3, data4];
 
-        let mut consumer: MultiTopicConsumer<serde_json::Value> = client.consumer()
+        let mut consumer: MultiTopicConsumer<TestData> = client.consumer()
             .multi_topic(Regex::new("mt_test_[ab]").unwrap())
             .with_namespace(namespace)
             .with_subscription("test_sub")

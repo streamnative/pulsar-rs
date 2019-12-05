@@ -1,5 +1,43 @@
-[workspace]
-members = [
-  "client",
-  "r2d2",
+[package]
+name = "pulsar"
+version = "0.3.0"
+edition = "2018"
+authors = [
+    "Colin Stearns <cstearns@developers.wyyerd.com>",
+    "Kevin Stenerson <kstenerson@developers.wyyerd.com>"
 ]
+
+license = "MIT/Apache-2.0"
+readme = "../README.md"
+repository = "https://github.com/wyyerd/pulsar-rs"
+documentation = "https://docs.rs/pulsar"
+description = "Rust API bindings for Apache Pulsar"
+keywords = ["pulsar", "api"]
+categories = ["api-bindings"]
+
+[badges]
+travis-ci = {repository = "wyyerd/pulsar-rs"}
+
+[dependencies]
+bytes = "0.4.0"
+crc = "1.0.0"
+futures = "0.1.23"
+nom = "4.0.0"
+prost = "0.4.0"
+prost-derive = "0.4.0"
+tokio = "0.1.11"
+tokio-codec = "0.1.1"
+rand = "0.5.5"
+chrono = "0.4.6"
+futures-timer = "0.1.1"
+log = "0.4.6"
+trust-dns-resolver = "0.11"
+url = "1.7"
+regex = "1.1.7"
+
+[dev-dependencies]
+serde = { version = "1.0.101", features = ["derive"] }
+serde_json = "1.0.40"
+
+[build-dependencies]
+prost-build = "0.4.0"

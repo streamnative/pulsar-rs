@@ -6,9 +6,10 @@ extern crate log;
 extern crate nom;
 #[macro_use]
 extern crate prost_derive;
+
 #[cfg(test)]
 #[macro_use]
-extern crate serde_derive;
+extern crate serde;
 
 pub use client::{SerializeMessage, DeserializeMessage, Pulsar};
 pub use connection::{Authentication, Connection};
@@ -17,7 +18,7 @@ pub use consumer::{Ack, Consumer, ConsumerBuilder, ConsumerState, Message, Multi
 pub use error::{ConnectionError, ConsumerError, Error, ProducerError, ServiceDiscoveryError};
 pub use message::proto;
 pub use message::proto::command_subscribe::SubType;
-pub use producer::{Producer, MultiTopicProducer};
+pub use producer::{TopicProducer, Producer};
 pub use service_discovery::ServiceDiscovery;
 
 pub mod message;
@@ -53,7 +54,8 @@ mod tests {
 
     impl SerializeMessage for TestData {
         fn serialize_message(input: &Self) -> Result<producer::Message, ProducerError> {
-            let payload = serde_json::to_vec(input)?;
+            let payload = serde_json::to_vec(input)
+                .map_err(|e| ProducerError::Custom(e.to_string()))?;
             Ok(producer::Message { payload, ..Default::default() })
         }
     }
@@ -130,7 +132,7 @@ mod tests {
             .wait()
             .unwrap();
 
-        let _ = consumer
+        consumer
             .take(5000)
             .map_err(|e| e.into())
             .for_each(move |Message { payload, ack, .. }| {
