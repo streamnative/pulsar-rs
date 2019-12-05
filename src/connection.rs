@@ -281,9 +281,9 @@ impl ConnectionSender {
         self.send_message(msg, RequestKey::RequestId(request_id), |resp| resp.command.producer_success)
     }
 
-    pub fn get_topics_of_namespace(&self, namespace: String) -> impl Future<Item=proto::CommandGetTopicsOfNamespaceResponse, Error=ConnectionError> {
+    pub fn get_topics_of_namespace(&self, namespace: String, mode: proto::get_topics::Mode) -> impl Future<Item=proto::CommandGetTopicsOfNamespaceResponse, Error=ConnectionError> {
         let request_id = self.request_id.get();
-        let msg = messages::get_topics_of_namespace(request_id, namespace);
+        let msg = messages::get_topics_of_namespace(request_id, namespace, mode);
         self.send_message(msg, RequestKey::RequestId(request_id), |resp| resp.command.get_topics_of_namespace_response)
     }
 
@@ -547,13 +547,14 @@ pub(crate) mod messages {
         }
     }
 
-    pub fn get_topics_of_namespace(request_id: u64, namespace: String) -> Message {
+    pub fn get_topics_of_namespace(request_id: u64, namespace: String, mode: proto::get_topics::Mode) -> Message {
         Message {
             command: proto::BaseCommand {
                 type_: CommandType::GetTopicsOfNamespace as i32,
                 get_topics_of_namespace: Some(proto::CommandGetTopicsOfNamespace {
                     request_id,
                     namespace,
+                    mode: Some(mode as i32),
                 }),
                 ..Default::default()
             },

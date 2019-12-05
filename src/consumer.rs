@@ -554,7 +554,7 @@ impl<T: 'static + DeserializeMessage> Stream for MultiTopicConsumer<T> {
             let existing_topics: BTreeSet<String> = self.consumers.keys().cloned().collect();
             let options = self.options.clone();
 
-            let new_consumers = Box::new(self.pulsar.get_topics_of_namespace(self.namespace.clone())
+            let new_consumers = Box::new(self.pulsar.get_topics_of_namespace(self.namespace.clone(), proto::get_topics::Mode::All)
                 .and_then(move |topics: Vec<String>| {
                     trace!("fetched topics: {:?}", &topics);
                     futures::future::collect(topics.into_iter()
