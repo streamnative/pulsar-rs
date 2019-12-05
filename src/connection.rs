@@ -12,7 +12,8 @@ use tokio_codec;
 
 use crate::error::{ConnectionError, SharedError};
 use crate::message::{Codec, Message, proto::{self, command_subscribe::SubType}};
-use crate::producer;
+use crate::producer::{self, ProducerOptions};
+use crate::consumer::ConsumerOptions;
 
 pub enum Register {
     Request { key: RequestKey, resolver: oneshot::Sender<Message> },
@@ -273,9 +274,10 @@ impl ConnectionSender {
                            topic: String,
                            producer_id: u64,
                            producer_name: Option<String>,
+                           options: ProducerOptions,
     ) -> impl Future<Item=proto::CommandProducerSuccess, Error=ConnectionError> {
         let request_id = self.request_id.get();
-        let msg = messages::create_producer(topic, producer_name, producer_id, request_id);
+        let msg = messages::create_producer(topic, producer_name, producer_id, request_id, options);
         self.send_message(msg, RequestKey::RequestId(request_id), |resp| resp.command.producer_success)
     }
 
@@ -298,9 +300,10 @@ impl ConnectionSender {
                      sub_type: SubType,
                      consumer_id: u64,
                      consumer_name: Option<String>,
+                     options: ConsumerOptions
     ) -> impl Future<Item=proto::CommandSuccess, Error=ConnectionError> {
         let request_id = self.request_id.get();
-        let msg = messages::subscribe(topic, subscription, sub_type, consumer_id, request_id, consumer_name);
+        let msg = messages::subscribe(topic, subscription, sub_type, consumer_id, request_id, consumer_name, options);
         match self.registrations.unbounded_send(Register::Consumer { consumer_id, resolver }) {
             Ok(_) => {}
             Err(_) => {
@@ -476,7 +479,8 @@ pub(crate) mod messages {
 
     use crate::connection::Authentication;
     use crate::message::{Message, Payload, proto::{self, base_command::Type as CommandType, command_subscribe::SubType}};
-    use crate::producer;
+    use crate::producer::{self, ProducerOptions};
+    use crate::consumer::ConsumerOptions;
 
     pub fn connect(auth: Option<Authentication>, proxy_to_broker_url: Option<String>) -> Message {
         let (auth_method_name, auth_data) = match auth {
@@ -523,7 +527,7 @@ pub(crate) mod messages {
         }
     }
 
-    pub fn create_producer(topic: String, producer_name: Option<String>, producer_id: u64, request_id: u64) -> Message {
+    pub fn create_producer(topic: String, producer_name: Option<String>, producer_id: u64, request_id: u64, options: ProducerOptions) -> Message {
         Message {
             command: proto::BaseCommand {
                 type_: CommandType::Producer as i32,
@@ -532,6 +536,9 @@ pub(crate) mod messages {
                     producer_id,
                     request_id,
                     producer_name,
+                    encrypted: options.encrypted,
+                    metadata: options.metadata.iter().map(|(k,v)| proto::KeyValue { key: k.clone(), value: v.clone() }).collect(),
+                    schema: options.schema,
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -650,6 +657,7 @@ pub(crate) mod messages {
         consumer_id: u64,
         request_id: u64,
         consumer_name: Option<String>,
+        options: ConsumerOptions,
     ) -> Message {
         Message {
             command: proto::BaseCommand {
@@ -661,6 +669,13 @@ pub(crate) mod messages {
                     consumer_id,
                     request_id,
                     consumer_name,
+                    priority_level: options.priority_level,
+                    durable: options.durable,
+                    metadata: options.metadata.iter().map(|(k, v)| proto::KeyValue { key: k.clone(), value: v.clone() }).collect(),
+                    read_compacted: options.read_compacted,
+                    initial_position: options.initial_position,
+                    schema: options.schema,
+                    start_message_id: options.start_message_id,
                     ..Default::default()
                 }),
                 ..Default::default()

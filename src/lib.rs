@@ -14,11 +14,11 @@ extern crate serde;
 pub use client::{SerializeMessage, DeserializeMessage, Pulsar};
 pub use connection::{Authentication, Connection};
 pub use connection_manager::ConnectionManager;
-pub use consumer::{Ack, Consumer, ConsumerBuilder, ConsumerState, Message, MultiTopicConsumer};
+pub use consumer::{Ack, Consumer, ConsumerBuilder, ConsumerState, Message, MultiTopicConsumer, ConsumerOptions};
 pub use error::{ConnectionError, ConsumerError, Error, ProducerError, ServiceDiscoveryError};
 pub use message::proto;
 pub use message::proto::command_subscribe::SubType;
-pub use producer::{TopicProducer, Producer};
+pub use producer::{TopicProducer, Producer, ProducerOptions};
 pub use service_discovery::ServiceDiscovery;
 
 pub mod message;
@@ -53,9 +53,9 @@ mod tests {
     }
 
     impl SerializeMessage for TestData {
-        fn serialize_message(input: &Self) -> Result<producer::Message, ProducerError> {
+        fn serialize_message(input: &Self) -> Result<producer::Message, PulsarError> {
             let payload = serde_json::to_vec(input)
-                .map_err(|e| ProducerError::Custom(e.to_string()))?;
+                .map_err(|e| PulsarError::Custom(e.to_string()))?;
             Ok(producer::Message { payload, ..Default::default() })
         }
     }
@@ -114,7 +114,7 @@ mod tests {
         let pulsar: Pulsar = Pulsar::new(addr, None, runtime.executor())
             .wait().unwrap();
 
-        let producer = pulsar.producer();
+        let producer = pulsar.producer(None);
 
         future::join_all((0..5000)
             .map(|_| producer.send("test", &TestData { data: "data".to_string() })))
