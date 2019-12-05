@@ -117,7 +117,7 @@ mod tests {
         let producer = pulsar.producer();
 
         future::join_all((0..5000)
-            .map(|_| producer.send(&TestData { data: "data".to_string() }, "test")))
+            .map(|_| producer.send("test", &TestData { data: "data".to_string() })))
             .map_err(|e| Error::from(e))
             .timeout(Duration::from_secs(5))
             .wait()
@@ -132,7 +132,7 @@ mod tests {
             .wait()
             .unwrap();
 
-        let _ = consumer
+        consumer
             .take(5000)
             .map_err(|e| e.into())
             .for_each(move |Message { payload, ack, .. }| {

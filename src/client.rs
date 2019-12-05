@@ -64,6 +64,13 @@ impl SerializeMessage for String {
     }
 }
 
+impl SerializeMessage for str {
+    fn serialize_message(input: &Self) -> Result<producer::Message, ProducerError> {
+        let payload = input.as_bytes().to_vec();
+        Ok(producer::Message { payload, ..Default::default() })
+    }
+}
+
 //TODO add more DeserializeMessage impls
 
 #[derive(Clone)]
