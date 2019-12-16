@@ -58,15 +58,16 @@ impl std::error::Error for Error {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ConnectionError {
-    Io(io::Error),
+    Io(String),
     Disconnected,
     PulsarError(String),
     Unexpected(String),
     Decoding(String),
     Encoding(String),
-    SocketAddr(String),
+    Dns(String),
+    Url(String),
     UnexpectedResponse(String),
     Canceled,
     Shutdown,
@@ -74,20 +75,21 @@ pub enum ConnectionError {
 
 impl From<io::Error> for ConnectionError {
     fn from(err: io::Error) -> Self {
-        ConnectionError::Io(err)
+        ConnectionError::Io(err.to_string())
     }
 }
 
 impl fmt::Display for ConnectionError {
   fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
     match self {
-      ConnectionError::Io(e) => write!(f, "{}", e),
+      ConnectionError::Io(e) => write!(f, "IO Error: {}", e),
       ConnectionError::Disconnected => write!(f, "Disconnected"),
       ConnectionError::PulsarError(e) => write!(f, "{}", e),
       ConnectionError::Unexpected(e) => write!(f, "{}", e),
       ConnectionError::Decoding(e) => write!(f, "Error decoding message: {}", e),
       ConnectionError::Encoding(e) => write!(f, "Error encoding message: {}", e),
-      ConnectionError::SocketAddr(e) => write!(f, "Error obtaning socket address: {}", e),
+      ConnectionError::Dns(e) => write!(f, "Error resolving DNS: {}", e),
+      ConnectionError::Url(e) => write!(f, "Error parsing URL: {}", e),
       ConnectionError::UnexpectedResponse(e) => write!(f, "Unexpected response from pulsar: {}", e),
       ConnectionError::Canceled => write!(f, "canceled request"),
       ConnectionError::Shutdown => write!(f, "The connection was shut down"),
@@ -95,14 +97,7 @@ impl fmt::Display for ConnectionError {
   }
 }
 
-impl std::error::Error for ConnectionError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            ConnectionError::Io(e) => Some(e),
-            _ => None,
-        }
-    }
-}
+impl std::error::Error for ConnectionError {}
 
 #[derive(Debug)]
 pub enum ConsumerError {

@@ -10,11 +10,10 @@ use futures::Future;
 use futures::sync::mpsc::{unbounded, UnboundedSender};
 use rand;
 use regex::Regex;
-use tokio::runtime::TaskExecutor;
 use tokio::timer::Interval;
 
 use crate::{DeserializeMessage, Pulsar};
-use crate::connection::{Authentication, Connection};
+use crate::connection::Connection;
 use crate::error::{ConnectionError, ConsumerError, Error};
 use crate::message::{Message as RawMessage, Payload, proto::{self, command_subscribe::SubType, Schema, MessageIdData}};
 
@@ -44,50 +43,6 @@ pub struct Consumer<T: DeserializeMessage> {
 
 impl<T: DeserializeMessage> Consumer<T> {
     pub fn new(
-        addr: String,
-        topic: String,
-        subscription: String,
-        sub_type: SubType,
-        consumer_id: Option<u64>,
-        consumer_name: Option<String>,
-        auth_data: Option<Authentication>,
-        proxy_to_broker_url: Option<String>,
-        executor: TaskExecutor,
-        batch_size: Option<u32>,
-        options: ConsumerOptions,
-    ) -> impl Future<Item=Consumer<T>, Error=Error> {
-        let consumer_id = consumer_id.unwrap_or_else(rand::random);
-        let (resolver, messages) = mpsc::unbounded();
-        let batch_size = batch_size.unwrap_or(1000);
-
-        let opt = options.clone();
-        Connection::new(addr, auth_data, proxy_to_broker_url, executor.clone())
-            .and_then({
-                let topic = topic.clone();
-                move |conn|
-                    conn.sender().subscribe(resolver, topic, subscription, sub_type, consumer_id, consumer_name, opt)
-                        .map(move |resp| (resp, conn))
-            })
-            .and_then(move |(_, conn)| {
-                conn.sender().send_flow(consumer_id, batch_size)
-                    .map(move |()| conn)
-            })
-            .map_err(|e| e.into())
-            .map(move |connection| {
-                Consumer {
-                    connection: Arc::new(connection),
-                    topic,
-                    id: consumer_id,
-                    messages,
-                    batch_size,
-                    remaining_messages: batch_size,
-                    data_type: PhantomData,
-                    options,
-                }
-            })
-    }
-
-    pub fn from_connection(
         conn: Arc<Connection>,
         topic: String,
         subscription: String,

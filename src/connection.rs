@@ -1,10 +1,9 @@
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::net::SocketAddr;
-use std::str::FromStr;
 use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 
-use futures::{self, Async, AsyncSink, Future, future::{self, Either}, IntoFuture, Sink, Stream,
+use futures::{self, Async, AsyncSink, Future, future::{self, Either}, Sink, Stream,
               sync::{mpsc, oneshot}};
 use tokio::net::TcpStream;
 use tokio::runtime::TaskExecutor;
@@ -352,7 +351,7 @@ impl ConnectionSender {
 }
 
 pub struct Connection {
-    addr: String,
+    addr: SocketAddr,
     sender: ConnectionSender,
     sender_shutdown: Option<oneshot::Sender<()>>,
     receiver_shutdown: Option<oneshot::Sender<()>>,
@@ -360,39 +359,36 @@ pub struct Connection {
 
 impl Connection {
     pub fn new(
-        addr: String,
+        addr: SocketAddr,
         auth_data: Option<Authentication>,
         proxy_to_broker_url: Option<String>,
         executor: TaskExecutor,
     ) -> impl Future<Item=Connection, Error=ConnectionError> {
-        SocketAddr::from_str(&addr).into_future()
-            .map_err(|e| ConnectionError::SocketAddr(e.to_string()))
-            .and_then(|addr| {
-                TcpStream::connect(&addr)
-                    .map_err(|e| e.into())
-                    .map(|stream| tokio_codec::Framed::new(stream, Codec))
-                    .and_then(|stream|
-                        stream.send({
-                            let msg = messages::connect(auth_data, proxy_to_broker_url);
-                            trace!("connection message: {:?}", msg);
-                            msg
-                        })
-                            .and_then(|stream| stream.into_future().map_err(|(err, _)| err))
-                            .and_then(move |(msg, stream)| match msg {
-                                Some(Message { command: proto::BaseCommand { error: Some(error), .. }, .. }) =>
-                                    Err(ConnectionError::PulsarError(format!("{:?}", error))),
-                                Some(msg) => {
-                                    let cmd = msg.command.clone();
-                                    trace!("received connection response: {:?}", msg);
-                                    msg.command.connected
-                                        .ok_or_else(|| ConnectionError::PulsarError(format!("Unexpected message from pulsar: {:?}", cmd)))
-                                        .map(|_msg| stream)
-                                }
-                                None => {
-                                    Err(ConnectionError::Disconnected)
-                                }
-                            }))
-            })
+        TcpStream::connect(&addr)
+            .map_err(|e| e.into())
+            .map(|stream| tokio_codec::Framed::new(stream, Codec))
+            .and_then(|stream|
+                stream.send({
+                    let msg = messages::connect(auth_data, proxy_to_broker_url);
+                    trace!("connection message: {:?}", msg);
+                    msg
+                })
+                    .and_then(|stream| stream.into_future().map_err(|(err, _)| err))
+                    .and_then(move |(msg, stream)| match msg {
+                        Some(Message { command: proto::BaseCommand { error: Some(error), .. }, .. }) =>
+                            Err(ConnectionError::PulsarError(format!("{:?}", error))),
+                        Some(msg) => {
+                            let cmd = msg.command.clone();
+                            trace!("received connection response: {:?}", msg);
+                            msg.command.connected
+                                .ok_or_else(|| ConnectionError::PulsarError(format!("Unexpected message from pulsar: {:?}", cmd)))
+                                .map(|_msg| stream)
+                        }
+                        None => {
+                            Err(ConnectionError::Disconnected)
+                        }
+                    })
+            )
             .map(move |pulsar| {
                 let (sink, stream) = pulsar.split();
                 let (tx, rx) = mpsc::unbounded();
@@ -432,10 +428,10 @@ impl Connection {
     }
 
     pub fn is_valid(&self) -> bool {
-        self.sender.error.is_set()
+        !self.sender.error.is_set()
     }
 
-    pub fn addr(&self) -> &str {
+    pub fn addr(&self) -> &SocketAddr {
         &self.addr
     }
 

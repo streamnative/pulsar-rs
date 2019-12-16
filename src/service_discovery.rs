@@ -7,11 +7,8 @@ use futures::{
     sync::{mpsc, oneshot},
     Future, Stream,
 };
-use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::runtime::TaskExecutor;
-use trust_dns_resolver::config::*;
-use trust_dns_resolver::AsyncResolver;
 use url::Url;
 
 /// Look up broker addresses for topics and partitioned topics
@@ -26,13 +23,11 @@ pub struct ServiceDiscovery {
 
 impl ServiceDiscovery {
     pub fn new(
-        addr: SocketAddr,
+        addr: String,
         auth: Option<Authentication>,
         executor: TaskExecutor,
-    ) -> impl Future<Item = Self, Error = ServiceDiscoveryError> {
-        ConnectionManager::new(addr, auth.clone(), executor.clone())
-            .map_err(|e| e.into())
-            .map(move |conn| ServiceDiscovery::with_manager(Arc::new(conn), executor))
+    ) -> Self {
+        ServiceDiscovery::with_manager(Arc::new(ConnectionManager::new(addr, auth, executor.clone())), executor)
     }
 
     pub fn with_manager(
@@ -165,15 +160,11 @@ fn lookup_topic<S: Into<String>>(
 fn engine(manager: Arc<ConnectionManager>, executor: TaskExecutor) -> mpsc::UnboundedSender<Query> {
     let (tx, rx) = mpsc::unbounded();
     let tx2 = tx.clone();
-    let (resolver, resolver_future) =
-        AsyncResolver::new(ResolverConfig::default(), ResolverOpts::default());
-    executor.spawn(resolver_future);
 
     let f = move || {
         rx.for_each(move |query: Query| {
             let self_tx = tx2.clone();
             let base_address = manager.address.clone();
-            let resolver = resolver.clone();
             let manager = manager.clone();
 
             match query {
@@ -192,7 +183,6 @@ fn engine(manager: Arc<ConnectionManager>, executor: TaskExecutor) -> mpsc::Unbo
                                     topic.to_string(),
                                     proxied_query,
                                     conn.sender(),
-                                    resolver,
                                     base_address,
                                     authoritative,
                                     manager,
@@ -327,15 +317,14 @@ fn lookup(
     topic: String,
     proxied_query: bool,
     sender: &ConnectionSender,
-    resolver: AsyncResolver,
-    base_address: SocketAddr,
+    base_address: String,
     authoritative: bool,
     manager: Arc<ConnectionManager>,
     tx: oneshot::Sender<Result<BrokerAddress, ServiceDiscoveryError>>,
     self_tx: mpsc::UnboundedSender<Query>,
 ) -> impl Future<Item = (), Error = ()> {
     sender
-        .lookup_topic(topic.to_string(), authoritative)
+        .lookup_topic(topic.clone(), authoritative)
         .then(move |res| {
             match res {
                 Err(e) => {
@@ -361,26 +350,18 @@ fn lookup(
 
                     // get the IP and port for the broker_name
                     // if going through a proxy, we use the base address,
-                    // otherwise we look it up by DNS query
-                    let address_query = if proxied_query || proxy {
-                        Either::A(future::ok(base_address.clone()))
+                    // otherwise we use the broker name
+                    let url = if proxied_query || proxy {
+                        base_address.clone()
                     } else {
-                        Either::B(
-                            resolver
-                                .lookup_ip(broker_name.as_str())
-                                .map_err(move |e| {
-                                    error!("DNS lookup error: {:?}", e);
-                                    ServiceDiscoveryError::DnsLookupError
-                                })
-                                .map(move |results| {
-                                    SocketAddr::new(results.iter().next().unwrap(), broker_port)
-                                }),
-                        )
+                        broker_name.clone()
                     };
 
                     Either::B(
-                        address_query
-                            .map(move |address| {
+                        manager.resolve_dns(url)
+                            .from_err()
+                            .map(move |mut address| {
+                                address.set_port(broker_port);
                                 let b = BrokerAddress {
                                     address,
                                     broker_url,

@@ -7,11 +7,10 @@ use futures::sync::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use futures::sync::oneshot;
 use rand;
 use tokio::prelude::*;
-use tokio::runtime::TaskExecutor;
 
 use crate::{Error, Pulsar};
 use crate::client::SerializeMessage;
-use crate::connection::{Authentication, Connection, SerialId};
+use crate::connection::{Connection, SerialId};
 use crate::error::ProducerError;
 use crate::message::proto::{self, EncryptionKeys, Schema};
 
@@ -123,6 +122,20 @@ struct ProducerEngine {
     producer_options: ProducerOptions,
 }
 
+impl ProducerEngine {
+    fn get_producer(&mut self, topic: &String) -> Option<Arc<TopicProducer>> {
+        if let Some(producer) = self.producers.get(topic).map(|p| p.clone()) {
+            if producer.is_valid() {
+                return Some(producer);
+            } else {
+                println!("removing producer: {}", topic);
+                self.producers.remove(topic);
+            }
+        }
+        None
+    }
+}
+
 impl Future for ProducerEngine {
     type Item = ();
     type Error = ();
@@ -133,6 +146,7 @@ impl Future for ProducerEngine {
             for (topic, producer) in self.new_producers.iter_mut() {
                 match producer.poll() {
                     Ok(Async::Ready(Ok(producer))) => {
+                        println!("Adding producer: {}", producer.topic());
                         self.producers.insert(producer.topic().to_owned(), producer);
                         resolved_topics.push(topic.clone());
                     }
@@ -148,7 +162,7 @@ impl Future for ProducerEngine {
         loop {
             match try_ready!(self.inbound.poll()) {
                 Some(ProducerMessage { topic, message, resolver }) => {
-                    match self.producers.get(&topic) {
+                    match self.get_producer(&topic) {
                         Some(producer) => {
                             tokio::spawn(producer.send_message(message, None)
                                 .then(|r| resolver.send(r).map_err(drop)));
@@ -204,24 +218,7 @@ pub struct TopicProducer {
 }
 
 impl TopicProducer {
-    pub fn new<S1, S2>(
-        addr: S1,
-        topic: S2,
-        name: Option<String>,
-        auth: Option<Authentication>,
-        proxy_to_broker_url: Option<String>,
-        options: ProducerOptions,
-        executor: TaskExecutor,
-    ) -> impl Future<Item=TopicProducer, Error=Error>
-        where S1: Into<String>,
-              S2: Into<String>,
-    {
-        Connection::new(addr.into(), auth, proxy_to_broker_url, executor)
-            .map_err(|e| e.into())
-            .and_then(move |conn| TopicProducer::from_connection(Arc::new(conn), topic.into(), name, options))
-    }
-
-    pub fn from_connection<S: Into<String>>(connection: Arc<Connection>, topic: S, name: Option<String>, options: ProducerOptions) -> impl Future<Item=TopicProducer, Error=Error> {
+    pub fn new<S: Into<String>>(connection: Arc<Connection>, topic: S, name: Option<String>, options: ProducerOptions) -> impl Future<Item=TopicProducer, Error=Error> {
         let topic = topic.into();
         let producer_id = rand::random();
         let sequence_ids = SerialId::new();

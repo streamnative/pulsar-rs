@@ -1,4 +1,3 @@
-use std::net::SocketAddr;
 use std::string::FromUtf8Error;
 use std::sync::Arc;
 use std::time::Duration;
@@ -83,23 +82,19 @@ pub struct Pulsar {
 }
 
 impl Pulsar {
-    pub fn new(
-        addr: SocketAddr,
+    pub fn new<S: Into<String>>(
+        addr: S,
         auth: Option<Authentication>,
         executor: TaskExecutor,
-    ) -> impl Future<Item=Self, Error=Error> {
-        ConnectionManager::new(addr, auth.clone(), executor.clone())
-            .from_err()
-            .map(|manager| {
-                let manager = Arc::new(manager);
-                let service_discovery =
-                    Arc::new(ServiceDiscovery::with_manager(manager.clone(), executor.clone()));
-                Pulsar {
-                    manager,
-                    service_discovery,
-                    executor,
-                }
-            })
+    ) -> Self {
+        let manager = Arc::new(ConnectionManager::new(addr.into(), auth.clone(), executor.clone()));
+        let service_discovery =
+            Arc::new(ServiceDiscovery::with_manager(manager.clone(), executor.clone()));
+        Pulsar {
+            manager,
+            service_discovery,
+            executor,
+        }
     }
 
     pub fn lookup_topic<S: Into<String>>(
@@ -185,7 +180,7 @@ impl Pulsar {
             .from_err()
             .and_then(move |broker_address| manager.get_connection(&broker_address).from_err())
             .and_then(move |conn| {
-                Consumer::from_connection(
+                Consumer::new(
                     conn,
                     topic,
                     subscription.into(),
@@ -227,7 +222,7 @@ impl Pulsar {
                             .get_connection(&broker_address)
                             .from_err()
                             .and_then(move |conn| {
-                                Consumer::from_connection(
+                                Consumer::new(
                                     conn,
                                     topic.to_string(),
                                     subscription.into(),
@@ -258,7 +253,7 @@ impl Pulsar {
             .lookup_topic(topic.clone())
             .from_err()
             .and_then(move |broker_address| manager.get_connection(&broker_address).from_err())
-            .and_then(move |conn| TopicProducer::from_connection(conn, topic, name, options).from_err())
+            .and_then(move |conn| TopicProducer::new(conn, topic, name, options).from_err())
     }
 
     pub fn create_partitioned_producers<S: Into<String> + Clone>(
@@ -280,7 +275,7 @@ impl Pulsar {
                         manager
                             .get_connection(&broker_address)
                             .from_err()
-                            .and_then(move |conn| TopicProducer::from_connection(conn, topic, None, options.clone()).from_err())
+                            .and_then(move |conn| TopicProducer::new(conn, topic, None, options.clone()).from_err())
                     })
                     .collect::<Vec<_>>();
 
