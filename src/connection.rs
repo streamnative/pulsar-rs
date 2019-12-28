@@ -2,22 +2,38 @@ use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::net::SocketAddr;
 use std::str::FromStr;
-use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
-use futures::{self, Async, AsyncSink, Future, future::{self, Either}, IntoFuture, Sink, Stream,
-              sync::{mpsc, oneshot}};
+use futures::{
+    self,
+    future::{self, Either},
+    sync::{mpsc, oneshot},
+    Async, AsyncSink, Future, IntoFuture, Sink, Stream,
+};
 use tokio::net::TcpStream;
 use tokio::runtime::TaskExecutor;
 use tokio_codec;
 
-use crate::error::{ConnectionError, SharedError};
-use crate::message::{Codec, Message, proto::{self, command_subscribe::SubType}};
-use crate::producer::{self, ProducerOptions};
 use crate::consumer::ConsumerOptions;
+use crate::error::{ConnectionError, SharedError};
+use crate::message::{
+    proto::{self, command_subscribe::SubType},
+    Codec, Message,
+};
+use crate::producer::{self, ProducerOptions};
 
 pub enum Register {
-    Request { key: RequestKey, resolver: oneshot::Sender<Message> },
-    Consumer { consumer_id: u64, resolver: mpsc::UnboundedSender<Message> },
+    Request {
+        key: RequestKey,
+        resolver: oneshot::Sender<Message>,
+    },
+    Consumer {
+        consumer_id: u64,
+        resolver: mpsc::UnboundedSender<Message>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Ord, PartialOrd, Eq)]
@@ -32,7 +48,7 @@ pub struct Authentication {
     pub data: Vec<u8>,
 }
 
-pub struct Receiver<S: Stream<Item=Message, Error=ConnectionError>> {
+pub struct Receiver<S: Stream<Item = Message, Error = ConnectionError>> {
     inbound: S,
     outbound: mpsc::UnboundedSender<Message>,
     error: SharedError,
@@ -43,7 +59,7 @@ pub struct Receiver<S: Stream<Item=Message, Error=ConnectionError>> {
     shutdown: oneshot::Receiver<()>,
 }
 
-impl<S: Stream<Item=Message, Error=ConnectionError>> Receiver<S> {
+impl<S: Stream<Item = Message, Error = ConnectionError>> Receiver<S> {
     pub fn new(
         inbound: S,
         outbound: mpsc::UnboundedSender<Message>,
@@ -64,7 +80,7 @@ impl<S: Stream<Item=Message, Error=ConnectionError>> Receiver<S> {
     }
 }
 
-impl<S: Stream<Item=Message, Error=ConnectionError>> Future for Receiver<S> {
+impl<S: Stream<Item = Message, Error = ConnectionError>> Future for Receiver<S> {
     type Item = ();
     type Error = ();
 
@@ -87,7 +103,10 @@ impl<S: Stream<Item=Message, Error=ConnectionError>> Future for Receiver<S> {
                         }
                     }
                 }
-                Ok(Async::Ready(Some(Register::Consumer { consumer_id, resolver }))) => {
+                Ok(Async::Ready(Some(Register::Consumer {
+                    consumer_id,
+                    resolver,
+                }))) => {
                     self.consumers.insert(consumer_id, resolver);
                 }
                 Ok(Async::Ready(None)) | Err(_) => {
@@ -104,7 +123,10 @@ impl<S: Stream<Item=Message, Error=ConnectionError>> Future for Receiver<S> {
                     if msg.command.ping.is_some() {
                         let _ = self.outbound.unbounded_send(messages::pong());
                     } else if msg.command.message.is_some() {
-                        if let Some(consumer) = self.consumers.get_mut(&msg.command.message.as_ref().unwrap().consumer_id) {
+                        if let Some(consumer) = self
+                            .consumers
+                            .get_mut(&msg.command.message.as_ref().unwrap().consumer_id)
+                        {
                             let _ = consumer.unbounded_send(msg);
                         }
                     } else {
@@ -116,7 +138,10 @@ impl<S: Stream<Item=Message, Error=ConnectionError>> Future for Receiver<S> {
                                 self.received_messages.insert(request_key, msg);
                             }
                         } else {
-                            println!("Received message with no request_id; dropping. Message: {:?}", msg.command);
+                            println!(
+                                "Received message with no request_id; dropping. Message: {:?}",
+                                msg.command
+                            );
                         }
                     }
                 }
@@ -134,7 +159,7 @@ impl<S: Stream<Item=Message, Error=ConnectionError>> Future for Receiver<S> {
     }
 }
 
-pub struct Sender<S: Sink<SinkItem=Message, SinkError=ConnectionError>> {
+pub struct Sender<S: Sink<SinkItem = Message, SinkError = ConnectionError>> {
     sink: S,
     outbound: mpsc::UnboundedReceiver<Message>,
     buffered: Option<Message>,
@@ -142,7 +167,7 @@ pub struct Sender<S: Sink<SinkItem=Message, SinkError=ConnectionError>> {
     shutdown: oneshot::Receiver<()>,
 }
 
-impl<S: Sink<SinkItem=Message, SinkError=ConnectionError>> Sender<S> {
+impl<S: Sink<SinkItem = Message, SinkError = ConnectionError>> Sender<S> {
     pub fn new(
         sink: S,
         outbound: mpsc::UnboundedReceiver<Message>,
@@ -167,7 +192,7 @@ impl<S: Sink<SinkItem=Message, SinkError=ConnectionError>> Sender<S> {
     }
 }
 
-impl<S: Sink<SinkItem=Message, SinkError=ConnectionError>> Future for Sender<S> {
+impl<S: Sink<SinkItem = Message, SinkError = ConnectionError>> Future for Sender<S> {
     type Item = ();
     type Error = ();
 
@@ -183,7 +208,9 @@ impl<S: Sink<SinkItem=Message, SinkError=ConnectionError>> Future for Sender<S> 
 
         loop {
             match self.outbound.poll()? {
-                Async::Ready(Some(item)) => try_ready!(self.try_start_send(item).map_err(|e| self.error.set(e))),
+                Async::Ready(Some(item)) => {
+                    try_ready!(self.try_start_send(item).map_err(|e| self.error.set(e)))
+                }
                 Async::Ready(None) => {
                     try_ready!(self.sink.close().map_err(|e| self.error.set(e)));
                     return Ok(Async::Ready(()));
@@ -239,9 +266,12 @@ impl ConnectionSender {
         producer_name: String,
         sequence_id: u64,
         num_messages: Option<i32>,
-        message: producer::Message
-    ) -> impl Future<Item=proto::CommandSendReceipt, Error=ConnectionError> {
-        let key = RequestKey::ProducerSend { producer_id, sequence_id };
+        message: producer::Message,
+    ) -> impl Future<Item = proto::CommandSendReceipt, Error = ConnectionError> {
+        let key = RequestKey::ProducerSend {
+            producer_id,
+            sequence_id,
+        };
         let msg = messages::send(
             producer_id,
             producer_name,
@@ -253,85 +283,146 @@ impl ConnectionSender {
     }
 
     pub fn send_ping(&self) -> Result<(), ConnectionError> {
-        self.tx.unbounded_send(messages::ping())
+        self.tx
+            .unbounded_send(messages::ping())
             .map_err(|_| ConnectionError::Disconnected)
     }
 
-    pub fn lookup_topic<S: Into<String>>(&self, topic: S, authoritative: bool) -> impl Future<Item=proto::CommandLookupTopicResponse, Error=ConnectionError> {
+    pub fn lookup_topic<S: Into<String>>(
+        &self,
+        topic: S,
+        authoritative: bool,
+    ) -> impl Future<Item = proto::CommandLookupTopicResponse, Error = ConnectionError> {
         let request_id = self.request_id.get();
         let msg = messages::lookup_topic(topic.into(), authoritative, request_id);
-        self.send_message(msg, RequestKey::RequestId(request_id), |resp| resp.command.lookup_topic_response)
+        self.send_message(msg, RequestKey::RequestId(request_id), |resp| {
+            resp.command.lookup_topic_response
+        })
     }
 
-    pub fn lookup_partitioned_topic<S: Into<String>>(&self, topic: S) -> impl Future<Item=proto::CommandPartitionedTopicMetadataResponse, Error=ConnectionError> {
+    pub fn lookup_partitioned_topic<S: Into<String>>(
+        &self,
+        topic: S,
+    ) -> impl Future<Item = proto::CommandPartitionedTopicMetadataResponse, Error = ConnectionError>
+    {
         let request_id = self.request_id.get();
         let msg = messages::lookup_partitioned_topic(topic.into(), request_id);
-        self.send_message(msg, RequestKey::RequestId(request_id), |resp| resp.command.partition_metadata_response)
+        self.send_message(msg, RequestKey::RequestId(request_id), |resp| {
+            resp.command.partition_metadata_response
+        })
     }
 
-
-    pub fn create_producer(&self,
-                           topic: String,
-                           producer_id: u64,
-                           producer_name: Option<String>,
-                           options: ProducerOptions,
-    ) -> impl Future<Item=proto::CommandProducerSuccess, Error=ConnectionError> {
+    pub fn create_producer(
+        &self,
+        topic: String,
+        producer_id: u64,
+        producer_name: Option<String>,
+        options: ProducerOptions,
+    ) -> impl Future<Item = proto::CommandProducerSuccess, Error = ConnectionError> {
         let request_id = self.request_id.get();
         let msg = messages::create_producer(topic, producer_name, producer_id, request_id, options);
-        self.send_message(msg, RequestKey::RequestId(request_id), |resp| resp.command.producer_success)
+        self.send_message(msg, RequestKey::RequestId(request_id), |resp| {
+            resp.command.producer_success
+        })
     }
 
-    pub fn get_topics_of_namespace(&self, namespace: String, mode: proto::get_topics::Mode) -> impl Future<Item=proto::CommandGetTopicsOfNamespaceResponse, Error=ConnectionError> {
+    pub fn get_topics_of_namespace(
+        &self,
+        namespace: String,
+        mode: proto::get_topics::Mode,
+    ) -> impl Future<Item = proto::CommandGetTopicsOfNamespaceResponse, Error = ConnectionError>
+    {
         let request_id = self.request_id.get();
         let msg = messages::get_topics_of_namespace(request_id, namespace, mode);
-        self.send_message(msg, RequestKey::RequestId(request_id), |resp| resp.command.get_topics_of_namespace_response)
+        self.send_message(msg, RequestKey::RequestId(request_id), |resp| {
+            resp.command.get_topics_of_namespace_response
+        })
     }
 
-    pub fn close_producer(&self, producer_id: u64) -> impl Future<Item=proto::CommandSuccess, Error=ConnectionError> {
+    pub fn close_producer(
+        &self,
+        producer_id: u64,
+    ) -> impl Future<Item = proto::CommandSuccess, Error = ConnectionError> {
         let request_id = self.request_id.get();
         let msg = messages::close_producer(producer_id, request_id);
-        self.send_message(msg, RequestKey::RequestId(request_id), |resp| resp.command.success)
+        self.send_message(msg, RequestKey::RequestId(request_id), |resp| {
+            resp.command.success
+        })
     }
 
-    pub fn subscribe(&self,
-                     resolver: mpsc::UnboundedSender<Message>,
-                     topic: String,
-                     subscription: String,
-                     sub_type: SubType,
-                     consumer_id: u64,
-                     consumer_name: Option<String>,
-                     options: ConsumerOptions
-    ) -> impl Future<Item=proto::CommandSuccess, Error=ConnectionError> {
+    pub fn subscribe(
+        &self,
+        resolver: mpsc::UnboundedSender<Message>,
+        topic: String,
+        subscription: String,
+        sub_type: SubType,
+        consumer_id: u64,
+        consumer_name: Option<String>,
+        options: ConsumerOptions,
+    ) -> impl Future<Item = proto::CommandSuccess, Error = ConnectionError> {
         let request_id = self.request_id.get();
-        let msg = messages::subscribe(topic, subscription, sub_type, consumer_id, request_id, consumer_name, options);
-        match self.registrations.unbounded_send(Register::Consumer { consumer_id, resolver }) {
+        let msg = messages::subscribe(
+            topic,
+            subscription,
+            sub_type,
+            consumer_id,
+            request_id,
+            consumer_name,
+            options,
+        );
+        match self.registrations.unbounded_send(Register::Consumer {
+            consumer_id,
+            resolver,
+        }) {
             Ok(_) => {}
             Err(_) => {
                 self.error.set(ConnectionError::Disconnected);
                 return Either::A(future::failed(ConnectionError::Disconnected));
             }
         }
-        Either::B(self.send_message(msg, RequestKey::RequestId(request_id), |resp| resp.command.success))
+        Either::B(
+            self.send_message(msg, RequestKey::RequestId(request_id), |resp| {
+                resp.command.success
+            }),
+        )
     }
 
     pub fn send_flow(&self, consumer_id: u64, message_permits: u32) -> Result<(), ConnectionError> {
-        self.tx.unbounded_send(messages::flow(consumer_id, message_permits))
+        self.tx
+            .unbounded_send(messages::flow(consumer_id, message_permits))
             .map_err(|_| ConnectionError::Disconnected)
     }
 
-    pub fn send_ack(&self, consumer_id: u64, messages: Vec<proto::MessageIdData>, cumulative: bool) -> Result<(), ConnectionError> {
-        self.tx.unbounded_send(messages::ack(consumer_id, messages, cumulative))
+    pub fn send_ack(
+        &self,
+        consumer_id: u64,
+        messages: Vec<proto::MessageIdData>,
+        cumulative: bool,
+    ) -> Result<(), ConnectionError> {
+        self.tx
+            .unbounded_send(messages::ack(consumer_id, messages, cumulative))
             .map_err(|_| ConnectionError::Disconnected)
     }
 
-    pub fn close_consumer(&self, consumer_id: u64) -> impl Future<Item=proto::CommandSuccess, Error=ConnectionError> {
+    pub fn close_consumer(
+        &self,
+        consumer_id: u64,
+    ) -> impl Future<Item = proto::CommandSuccess, Error = ConnectionError> {
         let request_id = self.request_id.get();
         let msg = messages::close_consumer(consumer_id, request_id);
-        self.send_message(msg, RequestKey::RequestId(request_id), |resp| resp.command.success)
+        self.send_message(msg, RequestKey::RequestId(request_id), |resp| {
+            resp.command.success
+        })
     }
 
-    fn send_message<R: Debug, F>(&self, msg: Message, key: RequestKey, extract: F) -> impl Future<Item=R, Error=ConnectionError>
-        where F: FnOnce(Message) -> Option<R>
+    fn send_message<R: Debug, F>(
+        &self,
+        msg: Message,
+        key: RequestKey,
+        extract: F,
+    ) -> impl Future<Item = R, Error = ConnectionError>
+    where
+        F: FnOnce(Message) -> Option<R>,
     {
         let (resolver, response) = oneshot::channel();
         trace!("sending message(key = {:?}): {:?}", key, msg);
@@ -344,9 +435,13 @@ impl ConnectionSender {
                 extract_message(message, extract)
             });
 
-        match (self.registrations.unbounded_send(Register::Request { key, resolver }), self.tx.unbounded_send(msg)) {
+        match (
+            self.registrations
+                .unbounded_send(Register::Request { key, resolver }),
+            self.tx.unbounded_send(msg),
+        ) {
             (Ok(_), Ok(_)) => Either::A(response),
-            _ => Either::B(future::err(ConnectionError::Disconnected))
+            _ => Either::B(future::err(ConnectionError::Disconnected)),
         }
     }
 }
@@ -364,34 +459,46 @@ impl Connection {
         auth_data: Option<Authentication>,
         proxy_to_broker_url: Option<String>,
         executor: TaskExecutor,
-    ) -> impl Future<Item=Connection, Error=ConnectionError> {
-        SocketAddr::from_str(&addr).into_future()
+    ) -> impl Future<Item = Connection, Error = ConnectionError> {
+        SocketAddr::from_str(&addr)
+            .into_future()
             .map_err(|e| ConnectionError::SocketAddr(e.to_string()))
             .and_then(|addr| {
                 TcpStream::connect(&addr)
                     .map_err(|e| e.into())
                     .map(|stream| tokio_codec::Framed::new(stream, Codec))
-                    .and_then(|stream|
-                        stream.send({
-                            let msg = messages::connect(auth_data, proxy_to_broker_url);
-                            trace!("connection message: {:?}", msg);
-                            msg
-                        })
+                    .and_then(|stream| {
+                        stream
+                            .send({
+                                let msg = messages::connect(auth_data, proxy_to_broker_url);
+                                trace!("connection message: {:?}", msg);
+                                msg
+                            })
                             .and_then(|stream| stream.into_future().map_err(|(err, _)| err))
                             .and_then(move |(msg, stream)| match msg {
-                                Some(Message { command: proto::BaseCommand { error: Some(error), .. }, .. }) =>
-                                    Err(ConnectionError::PulsarError(format!("{:?}", error))),
+                                Some(Message {
+                                    command:
+                                        proto::BaseCommand {
+                                            error: Some(error), ..
+                                        },
+                                    ..
+                                }) => Err(ConnectionError::PulsarError(format!("{:?}", error))),
                                 Some(msg) => {
                                     let cmd = msg.command.clone();
                                     trace!("received connection response: {:?}", msg);
-                                    msg.command.connected
-                                        .ok_or_else(|| ConnectionError::PulsarError(format!("Unexpected message from pulsar: {:?}", cmd)))
+                                    msg.command
+                                        .connected
+                                        .ok_or_else(|| {
+                                            ConnectionError::PulsarError(format!(
+                                                "Unexpected message from pulsar: {:?}",
+                                                cmd
+                                            ))
+                                        })
                                         .map(|_msg| stream)
                                 }
-                                None => {
-                                    Err(ConnectionError::Disconnected)
-                                }
-                            }))
+                                None => Err(ConnectionError::Disconnected),
+                            })
+                    })
             })
             .map(move |pulsar| {
                 let (sink, stream) = pulsar.split();
@@ -409,12 +516,7 @@ impl Connection {
                     receiver_shutdown_rx,
                 ));
 
-                executor.spawn(Sender::new(
-                    sink,
-                    rx,
-                    error.clone(),
-                    sender_shutdown_rx,
-                ));
+                executor.spawn(Sender::new(sink, rx, error.clone(), sender_shutdown_rx));
 
                 let sender = ConnectionSender::new(tx, registrations_tx, SerialId::new(), error);
 
@@ -457,12 +559,19 @@ impl Drop for Connection {
 }
 
 fn extract_message<T: Debug, F>(message: Message, extract: F) -> Result<T, ConnectionError>
-    where F: FnOnce(Message) -> Option<T>
+where
+    F: FnOnce(Message) -> Option<T>,
 {
     if message.command.error.is_some() {
-        Err(ConnectionError::PulsarError(format!("{:?}", message.command.error.unwrap())))
+        Err(ConnectionError::PulsarError(format!(
+            "{:?}",
+            message.command.error.unwrap()
+        )))
     } else if message.command.send_error.is_some() {
-        Err(ConnectionError::PulsarError(format!("{:?}", message.command.error.unwrap())))
+        Err(ConnectionError::PulsarError(format!(
+            "{:?}",
+            message.command.error.unwrap()
+        )))
     } else {
         let cmd = message.command.clone();
         if let Some(extracted) = extract(message) {
@@ -478,9 +587,12 @@ pub(crate) mod messages {
     use chrono::Utc;
 
     use crate::connection::Authentication;
-    use crate::message::{Message, Payload, proto::{self, base_command::Type as CommandType, command_subscribe::SubType}};
-    use crate::producer::{self, ProducerOptions};
     use crate::consumer::ConsumerOptions;
+    use crate::message::{
+        proto::{self, base_command::Type as CommandType, command_subscribe::SubType},
+        Message, Payload,
+    };
+    use crate::producer::{self, ProducerOptions};
 
     pub fn connect(auth: Option<Authentication>, proxy_to_broker_url: Option<String>) -> Message {
         let (auth_method_name, auth_data) = match auth {
@@ -527,7 +639,13 @@ pub(crate) mod messages {
         }
     }
 
-    pub fn create_producer(topic: String, producer_name: Option<String>, producer_id: u64, request_id: u64, options: ProducerOptions) -> Message {
+    pub fn create_producer(
+        topic: String,
+        producer_name: Option<String>,
+        producer_id: u64,
+        request_id: u64,
+        options: ProducerOptions,
+    ) -> Message {
         Message {
             command: proto::BaseCommand {
                 type_: CommandType::Producer as i32,
@@ -537,7 +655,14 @@ pub(crate) mod messages {
                     request_id,
                     producer_name,
                     encrypted: options.encrypted,
-                    metadata: options.metadata.iter().map(|(k,v)| proto::KeyValue { key: k.clone(), value: v.clone() }).collect(),
+                    metadata: options
+                        .metadata
+                        .iter()
+                        .map(|(k, v)| proto::KeyValue {
+                            key: k.clone(),
+                            value: v.clone(),
+                        })
+                        .collect(),
                     schema: options.schema,
                     ..Default::default()
                 }),
@@ -547,7 +672,11 @@ pub(crate) mod messages {
         }
     }
 
-    pub fn get_topics_of_namespace(request_id: u64, namespace: String, mode: proto::get_topics::Mode) -> Message {
+    pub fn get_topics_of_namespace(
+        request_id: u64,
+        namespace: String,
+        mode: proto::get_topics::Mode,
+    ) -> Message {
         Message {
             command: proto::BaseCommand {
                 type_: CommandType::GetTopicsOfNamespace as i32,
@@ -569,9 +698,11 @@ pub(crate) mod messages {
         num_messages: Option<i32>,
         message: producer::Message,
     ) -> Message {
-        let properties = message.properties.into_iter().map(|(key, value)| {
-            proto::KeyValue { key, value }
-        }).collect();
+        let properties = message
+            .properties
+            .into_iter()
+            .map(|(key, value)| proto::KeyValue { key, value })
+            .collect();
 
         Message {
             command: proto::BaseCommand {
@@ -672,7 +803,14 @@ pub(crate) mod messages {
                     consumer_name,
                     priority_level: options.priority_level,
                     durable: options.durable,
-                    metadata: options.metadata.iter().map(|(k, v)| proto::KeyValue { key: k.clone(), value: v.clone() }).collect(),
+                    metadata: options
+                        .metadata
+                        .iter()
+                        .map(|(k, v)| proto::KeyValue {
+                            key: k.clone(),
+                            value: v.clone(),
+                        })
+                        .collect(),
                     read_compacted: options.read_compacted,
                     initial_position: options.initial_position,
                     schema: options.schema,
@@ -699,16 +837,20 @@ pub(crate) mod messages {
         }
     }
 
-    pub fn ack(consumer_id: u64, message_id: Vec<proto::MessageIdData>, cumulative: bool) -> Message {
+    pub fn ack(
+        consumer_id: u64,
+        message_id: Vec<proto::MessageIdData>,
+        cumulative: bool,
+    ) -> Message {
         Message {
             command: proto::BaseCommand {
                 type_: CommandType::Ack as i32,
                 ack: Some(proto::CommandAck {
                     consumer_id,
                     ack_type: if cumulative {
-                      proto::command_ack::AckType::Cumulative as i32
+                        proto::command_ack::AckType::Cumulative as i32
                     } else {
-                      proto::command_ack::AckType::Individual as i32
+                        proto::command_ack::AckType::Individual as i32
                     },
                     message_id,
                     validation_error: None,

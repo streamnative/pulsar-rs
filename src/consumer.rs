@@ -5,29 +5,31 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use futures::{Async, Stream, sync::mpsc};
-use futures::Future;
 use futures::sync::mpsc::{unbounded, UnboundedSender};
+use futures::Future;
+use futures::{sync::mpsc, Async, Stream};
 use rand;
 use regex::Regex;
 use tokio::runtime::TaskExecutor;
 use tokio::timer::Interval;
 
-use crate::{DeserializeMessage, Pulsar};
 use crate::connection::{Authentication, Connection};
 use crate::error::{ConnectionError, ConsumerError, Error};
-use crate::message::{Message as RawMessage, Payload, proto::{self, command_subscribe::SubType, Schema, MessageIdData}};
+use crate::message::{
+    proto::{self, command_subscribe::SubType, MessageIdData, Schema},
+    Message as RawMessage, Payload,
+};
+use crate::{DeserializeMessage, Pulsar};
 
 #[derive(Clone, Default)]
 pub struct ConsumerOptions {
-  pub priority_level: Option<i32>,
-  pub durable: Option<bool>,
-  pub start_message_id: Option<MessageIdData>,
-  pub metadata: BTreeMap<String, String>,
-  pub read_compacted: Option<bool>,
-  pub schema: Option<Schema>,
-  pub initial_position: Option<i32>,
-
+    pub priority_level: Option<i32>,
+    pub durable: Option<bool>,
+    pub start_message_id: Option<MessageIdData>,
+    pub metadata: BTreeMap<String, String>,
+    pub read_compacted: Option<bool>,
+    pub schema: Option<Schema>,
+    pub initial_position: Option<i32>,
 }
 
 pub struct Consumer<T: DeserializeMessage> {
@@ -55,7 +57,7 @@ impl<T: DeserializeMessage> Consumer<T> {
         executor: TaskExecutor,
         batch_size: Option<u32>,
         options: ConsumerOptions,
-    ) -> impl Future<Item=Consumer<T>, Error=Error> {
+    ) -> impl Future<Item = Consumer<T>, Error = Error> {
         let consumer_id = consumer_id.unwrap_or_else(rand::random);
         let (resolver, messages) = mpsc::unbounded();
         let batch_size = batch_size.unwrap_or(1000);
@@ -64,26 +66,35 @@ impl<T: DeserializeMessage> Consumer<T> {
         Connection::new(addr, auth_data, proxy_to_broker_url, executor.clone())
             .and_then({
                 let topic = topic.clone();
-                move |conn|
-                    conn.sender().subscribe(resolver, topic, subscription, sub_type, consumer_id, consumer_name, opt)
+                move |conn| {
+                    conn.sender()
+                        .subscribe(
+                            resolver,
+                            topic,
+                            subscription,
+                            sub_type,
+                            consumer_id,
+                            consumer_name,
+                            opt,
+                        )
                         .map(move |resp| (resp, conn))
+                }
             })
             .and_then(move |(_, conn)| {
-                conn.sender().send_flow(consumer_id, batch_size)
+                conn.sender()
+                    .send_flow(consumer_id, batch_size)
                     .map(move |()| conn)
             })
             .map_err(|e| e.into())
-            .map(move |connection| {
-                Consumer {
-                    connection: Arc::new(connection),
-                    topic,
-                    id: consumer_id,
-                    messages,
-                    batch_size,
-                    remaining_messages: batch_size,
-                    data_type: PhantomData,
-                    options,
-                }
+            .map(move |connection| Consumer {
+                connection: Arc::new(connection),
+                topic,
+                id: consumer_id,
+                messages,
+                batch_size,
+                remaining_messages: batch_size,
+                data_type: PhantomData,
+                options,
             })
     }
 
@@ -96,29 +107,37 @@ impl<T: DeserializeMessage> Consumer<T> {
         consumer_name: Option<String>,
         batch_size: Option<u32>,
         options: ConsumerOptions,
-    ) -> impl Future<Item=Consumer<T>, Error=Error> {
+    ) -> impl Future<Item = Consumer<T>, Error = Error> {
         let consumer_id = consumer_id.unwrap_or_else(rand::random);
         let (resolver, messages) = mpsc::unbounded();
         let batch_size = batch_size.unwrap_or(1000);
 
-        conn.sender().subscribe(resolver, topic.clone(), subscription, sub_type, consumer_id, consumer_name, options.clone())
+        conn.sender()
+            .subscribe(
+                resolver,
+                topic.clone(),
+                subscription,
+                sub_type,
+                consumer_id,
+                consumer_name,
+                options.clone(),
+            )
             .map(move |resp| (resp, conn))
             .and_then(move |(_, conn)| {
-                conn.sender().send_flow(consumer_id, batch_size)
+                conn.sender()
+                    .send_flow(consumer_id, batch_size)
                     .map(move |()| conn)
             })
             .map_err(|e| Error::Consumer(ConsumerError::Connection(e)))
-            .map(move |connection| {
-                Consumer {
-                    connection,
-                    topic,
-                    id: consumer_id,
-                    messages,
-                    batch_size,
-                    remaining_messages: batch_size,
-                    data_type: PhantomData,
-                    options,
-                }
+            .map(move |connection| Consumer {
+                connection,
+                topic,
+                id: consumer_id,
+                messages,
+                batch_size,
+                remaining_messages: batch_size,
+                data_type: PhantomData,
+                options,
             })
     }
 
@@ -139,7 +158,11 @@ pub struct Ack {
 
 impl Ack {
     pub fn new(consumer_id: u64, msg: proto::MessageIdData, connection: Arc<Connection>) -> Ack {
-        Ack { consumer_id, message_id: vec![msg], connection }
+        Ack {
+            consumer_id,
+            message_id: vec![msg],
+            connection,
+        }
     }
 
     pub fn join(mut self, other: Ack) -> Self {
@@ -147,17 +170,24 @@ impl Ack {
         self
     }
 
-    pub fn extend<I: IntoIterator<Item=Ack>>(mut self, others: I) -> Self {
-        self.message_id.extend(others.into_iter().flat_map(|ack| ack.message_id));
+    pub fn extend<I: IntoIterator<Item = Ack>>(mut self, others: I) -> Self {
+        self.message_id
+            .extend(others.into_iter().flat_map(|ack| ack.message_id));
         self
     }
 
     pub fn ack(self) {
-        let _ = self.connection.sender().send_ack(self.consumer_id, self.message_id, false);
+        let _ = self
+            .connection
+            .sender()
+            .send_ack(self.consumer_id, self.message_id, false);
     }
 
     pub fn cumulative_ack(self) {
-        let _ = self.connection.sender().send_ack(self.consumer_id, self.message_id, true);
+        let _ = self
+            .connection
+            .sender()
+            .send_ack(self.consumer_id, self.message_id, true);
     }
 }
 
@@ -173,30 +203,37 @@ impl<T: DeserializeMessage> Stream for Consumer<T> {
         }
 
         if self.remaining_messages <= self.batch_size / 2 {
-            self.connection.sender().send_flow(self.id, self.batch_size - self.remaining_messages)?;
+            self.connection
+                .sender()
+                .send_flow(self.id, self.batch_size - self.remaining_messages)?;
             self.remaining_messages = self.batch_size;
         }
 
-        let message: Option<Option<(proto::CommandMessage, Payload)>> = try_ready!(self.messages.poll().map_err(|_| ConnectionError::Disconnected))
-            .map(|RawMessage { command, payload }|
-                command.message
-                    .and_then(move |msg| payload
-                        .map(move |payload| (msg, payload))));
+        let message: Option<Option<(proto::CommandMessage, Payload)>> = try_ready!(self
+            .messages
+            .poll()
+            .map_err(|_| ConnectionError::Disconnected))
+        .map(|RawMessage { command, payload }| {
+            command
+                .message
+                .and_then(move |msg| payload.map(move |payload| (msg, payload)))
+        });
 
         if message.is_some() {
             self.remaining_messages -= 1;
         }
 
         match message {
-            Some(Some((message, payload))) => {
-                Ok(Async::Ready(Some(Message {
-                    topic: self.topic.clone(),
-                    payload: T::deserialize_message(payload),
-                    ack: Ack::new(self.id, message.message_id, self.connection.clone()),
-                })))
-            }
-            Some(None) => Err(Error::Consumer(ConsumerError::MissingPayload(format!("Missing payload for message {:?}", message)))),
-            None => Ok(Async::Ready(None))
+            Some(Some((message, payload))) => Ok(Async::Ready(Some(Message {
+                topic: self.topic.clone(),
+                payload: T::deserialize_message(payload),
+                ack: Ack::new(self.id, message.message_id, self.connection.clone()),
+            }))),
+            Some(None) => Err(Error::Consumer(ConsumerError::MissingPayload(format!(
+                "Missing payload for message {:?}",
+                message
+            )))),
+            None => Ok(Async::Ready(None)),
         }
     }
 }
@@ -210,7 +247,6 @@ impl<T: DeserializeMessage> Drop for Consumer<T> {
 pub struct Set<T>(T);
 
 pub struct Unset;
-
 
 pub struct ConsumerBuilder<'a, Topic, Subscription, SubscriptionType> {
     pulsar: &'a Pulsar,
@@ -244,8 +280,13 @@ impl<'a> ConsumerBuilder<'a, Unset, Unset, Unset> {
     }
 }
 
-impl<'a, Subscription, SubscriptionType> ConsumerBuilder<'a, Unset, Subscription, SubscriptionType> {
-    pub fn with_topic<S: Into<String>>(self, topic: S) -> ConsumerBuilder<'a, Set<String>, Subscription, SubscriptionType> {
+impl<'a, Subscription, SubscriptionType>
+    ConsumerBuilder<'a, Unset, Subscription, SubscriptionType>
+{
+    pub fn with_topic<S: Into<String>>(
+        self,
+        topic: S,
+    ) -> ConsumerBuilder<'a, Set<String>, Subscription, SubscriptionType> {
         ConsumerBuilder {
             pulsar: self.pulsar,
             topic: Set(topic.into()),
@@ -260,7 +301,10 @@ impl<'a, Subscription, SubscriptionType> ConsumerBuilder<'a, Unset, Subscription
         }
     }
 
-    pub fn multi_topic(self, regex: Regex) -> ConsumerBuilder<'a, Set<Regex>, Subscription, SubscriptionType> {
+    pub fn multi_topic(
+        self,
+        regex: Regex,
+    ) -> ConsumerBuilder<'a, Set<Regex>, Subscription, SubscriptionType> {
         ConsumerBuilder {
             pulsar: self.pulsar,
             topic: Set(regex),
@@ -277,7 +321,10 @@ impl<'a, Subscription, SubscriptionType> ConsumerBuilder<'a, Unset, Subscription
 }
 
 impl<'a, Topic, SubscriptionType> ConsumerBuilder<'a, Topic, Unset, SubscriptionType> {
-    pub fn with_subscription<S: Into<String>>(self, subscription: S) -> ConsumerBuilder<'a, Topic, Set<String>, SubscriptionType> {
+    pub fn with_subscription<S: Into<String>>(
+        self,
+        subscription: S,
+    ) -> ConsumerBuilder<'a, Topic, Set<String>, SubscriptionType> {
         ConsumerBuilder {
             pulsar: self.pulsar,
             subscription: Set(subscription.into()),
@@ -294,7 +341,10 @@ impl<'a, Topic, SubscriptionType> ConsumerBuilder<'a, Topic, Unset, Subscription
 }
 
 impl<'a, Topic, Subscription> ConsumerBuilder<'a, Topic, Subscription, Unset> {
-    pub fn with_subscription_type(self, subscription_type: SubType) -> ConsumerBuilder<'a, Topic, Subscription, Set<SubType>> {
+    pub fn with_subscription_type(
+        self,
+        subscription_type: SubType,
+    ) -> ConsumerBuilder<'a, Topic, Subscription, Set<SubType>> {
         ConsumerBuilder {
             pulsar: self.pulsar,
             subscription_type: Set(subscription_type),
@@ -310,8 +360,13 @@ impl<'a, Topic, Subscription> ConsumerBuilder<'a, Topic, Subscription, Unset> {
     }
 }
 
-impl<'a, Subscription, SubscriptionType> ConsumerBuilder<'a, Set<Regex>, Subscription, SubscriptionType> {
-    pub fn with_namespace<S: Into<String>>(self, namespace: S) -> ConsumerBuilder<'a, Set<Regex>, Subscription, SubscriptionType> {
+impl<'a, Subscription, SubscriptionType>
+    ConsumerBuilder<'a, Set<Regex>, Subscription, SubscriptionType>
+{
+    pub fn with_namespace<S: Into<String>>(
+        self,
+        namespace: S,
+    ) -> ConsumerBuilder<'a, Set<Regex>, Subscription, SubscriptionType> {
         ConsumerBuilder {
             pulsar: self.pulsar,
             topic: self.topic,
@@ -326,7 +381,10 @@ impl<'a, Subscription, SubscriptionType> ConsumerBuilder<'a, Set<Regex>, Subscri
         }
     }
 
-    pub fn with_topic_refresh(self, refresh_interval: Duration) -> ConsumerBuilder<'a, Set<Regex>, Subscription, SubscriptionType> {
+    pub fn with_topic_refresh(
+        self,
+        refresh_interval: Duration,
+    ) -> ConsumerBuilder<'a, Set<Regex>, Subscription, SubscriptionType> {
         ConsumerBuilder {
             pulsar: self.pulsar,
             topic: self.topic,
@@ -342,30 +400,44 @@ impl<'a, Subscription, SubscriptionType> ConsumerBuilder<'a, Set<Regex>, Subscri
     }
 }
 
-impl<'a, Topic, Subscription, SubscriptionType> ConsumerBuilder<'a, Topic, Subscription, SubscriptionType> {
-    pub fn with_consumer_id(mut self, consumer_id: u64) -> ConsumerBuilder<'a, Topic, Subscription, SubscriptionType> {
+impl<'a, Topic, Subscription, SubscriptionType>
+    ConsumerBuilder<'a, Topic, Subscription, SubscriptionType>
+{
+    pub fn with_consumer_id(
+        mut self,
+        consumer_id: u64,
+    ) -> ConsumerBuilder<'a, Topic, Subscription, SubscriptionType> {
         self.consumer_id = Some(consumer_id);
         self
     }
 
-    pub fn with_consumer_name<S: Into<String>>(mut self, consumer_name: S) -> ConsumerBuilder<'a, Topic, Subscription, SubscriptionType> {
+    pub fn with_consumer_name<S: Into<String>>(
+        mut self,
+        consumer_name: S,
+    ) -> ConsumerBuilder<'a, Topic, Subscription, SubscriptionType> {
         self.consumer_name = Some(consumer_name.into());
         self
     }
 
-    pub fn with_batch_size(mut self, batch_size: u32) -> ConsumerBuilder<'a, Topic, Subscription, SubscriptionType> {
+    pub fn with_batch_size(
+        mut self,
+        batch_size: u32,
+    ) -> ConsumerBuilder<'a, Topic, Subscription, SubscriptionType> {
         self.batch_size = Some(batch_size);
         self
     }
 
-    pub fn with_options(mut self, options: ConsumerOptions) -> ConsumerBuilder<'a, Topic, Subscription, SubscriptionType> {
+    pub fn with_options(
+        mut self,
+        options: ConsumerOptions,
+    ) -> ConsumerBuilder<'a, Topic, Subscription, SubscriptionType> {
         self.consumer_options = Some(options);
         self
     }
 }
 
 impl<'a> ConsumerBuilder<'a, Set<String>, Set<String>, Set<SubType>> {
-    pub fn build<T: DeserializeMessage>(self) -> impl Future<Item=Consumer<T>, Error=Error> {
+    pub fn build<T: DeserializeMessage>(self) -> impl Future<Item = Consumer<T>, Error = Error> {
         let ConsumerBuilder {
             pulsar,
             topic: Set(topic),
@@ -378,8 +450,15 @@ impl<'a> ConsumerBuilder<'a, Set<String>, Set<String>, Set<SubType>> {
             ..
         } = self;
 
-        pulsar.create_consumer(topic, subscription, sub_type, batch_size, consumer_name, consumer_id,
-          consumer_options.unwrap_or_else(ConsumerOptions::default))
+        pulsar.create_consumer(
+            topic,
+            subscription,
+            sub_type,
+            batch_size,
+            consumer_name,
+            consumer_id,
+            consumer_options.unwrap_or_else(ConsumerOptions::default),
+        )
     }
 }
 
@@ -409,7 +488,14 @@ impl<'a> ConsumerBuilder<'a, Set<Regex>, Set<String>, Set<SubType>> {
         let namespace = namespace.unwrap_or_else(|| "public/default".to_owned());
         let topic_refresh = topic_refresh.unwrap_or_else(|| Duration::from_secs(30));
 
-        pulsar.create_multi_topic_consumer(topic, subscription, namespace, sub_type, topic_refresh, ConsumerOptions::default())
+        pulsar.create_multi_topic_consumer(
+            topic,
+            subscription,
+            namespace,
+            sub_type,
+            topic_refresh,
+            ConsumerOptions::default(),
+        )
     }
 }
 
@@ -427,8 +513,8 @@ pub struct MultiTopicConsumer<T: DeserializeMessage> {
     pulsar: Pulsar,
     consumers: BTreeMap<String, Consumer<T>>,
     topics: VecDeque<String>,
-    new_consumers: Option<Box<dyn Future<Item=Vec<Consumer<T>>, Error=Error> + Send>>,
-    refresh: Box<dyn Stream<Item=(), Error=()> + Send>,
+    new_consumers: Option<Box<dyn Future<Item = Vec<Consumer<T>>, Error = Error> + Send>>,
+    refresh: Box<dyn Stream<Item = (), Error = ()> + Send>,
     subscription: String,
     sub_type: SubType,
     options: ConsumerOptions,
@@ -447,8 +533,9 @@ impl<T: DeserializeMessage> MultiTopicConsumer<T> {
         topic_refresh: Duration,
         options: ConsumerOptions,
     ) -> Self
-        where S1: Into<String>,
-              S2: Into<String>,
+    where
+        S1: Into<String>,
+        S2: Into<String>,
     {
         MultiTopicConsumer {
             namespace: namespace.into(),
@@ -457,9 +544,11 @@ impl<T: DeserializeMessage> MultiTopicConsumer<T> {
             consumers: BTreeMap::new(),
             topics: VecDeque::new(),
             new_consumers: None,
-            refresh: Box::new(Interval::new(Instant::now(), topic_refresh)
-                .map(drop)
-                .map_err(|e| panic!("error creating referesh timer: {}", e))),
+            refresh: Box::new(
+                Interval::new(Instant::now(), topic_refresh)
+                    .map(drop)
+                    .map_err(|e| panic!("error creating referesh timer: {}", e)),
+            ),
             subscription: subscription.into(),
             sub_type,
             last_message_received: None,
@@ -469,7 +558,7 @@ impl<T: DeserializeMessage> MultiTopicConsumer<T> {
         }
     }
 
-    pub fn start_state_stream(&mut self) -> impl Stream<Item=ConsumerState, Error=()> {
+    pub fn start_state_stream(&mut self) -> impl Stream<Item = ConsumerState, Error = ()> {
         let (tx, rx) = unbounded();
         self.state_streams.push(tx);
         rx
@@ -482,9 +571,8 @@ impl<T: DeserializeMessage> MultiTopicConsumer<T> {
                 last_message_received: self.last_message_received,
                 messages_received: self.messages_received,
             };
-            self.state_streams.retain(|s| {
-                s.unbounded_send(state.clone()).is_ok()
-            });
+            self.state_streams
+                .retain(|s| s.unbounded_send(state.clone()).is_ok());
         }
     }
 
@@ -494,7 +582,7 @@ impl<T: DeserializeMessage> MultiTopicConsumer<T> {
         self.send_state();
     }
 
-    fn add_consumers<I: IntoIterator<Item=Consumer<T>>>(&mut self, consumers: I) {
+    fn add_consumers<I: IntoIterator<Item = Consumer<T>>>(&mut self, consumers: I) {
         for consumer in consumers {
             let topic = consumer.topic().to_owned();
             self.consumers.insert(topic.clone(), consumer);
@@ -521,7 +609,11 @@ pub struct Message<T> {
 
 impl<T: DeserializeMessage> Debug for MultiTopicConsumer<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "MultiTopicConsumer({:?}, {:?})", &self.namespace, &self.topic_regex)
+        write!(
+            f,
+            "MultiTopicConsumer({:?}, {:?})",
+            &self.namespace, &self.topic_regex
+        )
     }
 }
 
@@ -554,19 +646,35 @@ impl<T: 'static + DeserializeMessage> Stream for MultiTopicConsumer<T> {
             let existing_topics: BTreeSet<String> = self.consumers.keys().cloned().collect();
             let options = self.options.clone();
 
-            let new_consumers = Box::new(self.pulsar.get_topics_of_namespace(self.namespace.clone(), proto::get_topics::Mode::All)
-                .and_then(move |topics: Vec<String>| {
-                    trace!("fetched topics: {:?}", &topics);
-                    futures::future::collect(topics.into_iter()
-                        .filter(move |topic| !existing_topics.contains(topic) && regex.is_match(topic.as_str()))
-                        .map(move |topic| {
-                            trace!("creating consumer for topic {}", topic);
-                            let pulsar = pulsar.clone();
-                            let subscription = subscription.clone();
-                            pulsar.create_consumer(topic, subscription, sub_type, None, None, None, options.clone())
-                        })
-                    )
-                }));
+            let new_consumers = Box::new(
+                self.pulsar
+                    .get_topics_of_namespace(self.namespace.clone(), proto::get_topics::Mode::All)
+                    .and_then(move |topics: Vec<String>| {
+                        trace!("fetched topics: {:?}", &topics);
+                        futures::future::collect(
+                            topics
+                                .into_iter()
+                                .filter(move |topic| {
+                                    !existing_topics.contains(topic)
+                                        && regex.is_match(topic.as_str())
+                                })
+                                .map(move |topic| {
+                                    trace!("creating consumer for topic {}", topic);
+                                    let pulsar = pulsar.clone();
+                                    let subscription = subscription.clone();
+                                    pulsar.create_consumer(
+                                        topic,
+                                        subscription,
+                                        sub_type,
+                                        None,
+                                        None,
+                                        None,
+                                        options.clone(),
+                                    )
+                                }),
+                        )
+                    }),
+            );
             self.new_consumers = Some(new_consumers);
             return self.poll();
         }
@@ -587,7 +695,10 @@ impl<T: 'static + DeserializeMessage> Stream for MultiTopicConsumer<T> {
                         topics_to_remove.push(topic.clone());
                     }
                     Err(e) => {
-                        error!("Unexpected error consuming from pulsar topic {}: {}", &topic, e);
+                        error!(
+                            "Unexpected error consuming from pulsar topic {}: {}",
+                            &topic, e
+                        );
                         topics_to_remove.push(topic.clone());
                     }
                 }
@@ -617,7 +728,7 @@ mod tests {
     use tokio::prelude::*;
     use tokio::runtime::Runtime;
 
-    use crate::{Pulsar, SerializeMessage, producer};
+    use crate::{producer, Pulsar, SerializeMessage};
 
     use super::*;
 
@@ -629,9 +740,11 @@ mod tests {
 
     impl SerializeMessage for TestData {
         fn serialize_message(input: &Self) -> Result<producer::Message, Error> {
-            let payload = serde_json::to_vec(input)
-                .map_err(|e| Error::Custom(e.to_string()))?;
-            Ok(producer::Message { payload, ..Default::default() })
+            let payload = serde_json::to_vec(input).map_err(|e| Error::Custom(e.to_string()))?;
+            Ok(producer::Message {
+                payload,
+                ..Default::default()
+            })
         }
     }
 
@@ -653,23 +766,36 @@ mod tests {
         let topic1 = "mt_test_a";
         let topic2 = "mt_test_b";
 
-        let data1 = TestData { topic: "a".to_owned(), msg: 1 };
-        let data2 = TestData { topic: "a".to_owned(), msg: 2 };
-        let data3 = TestData { topic: "b".to_owned(), msg: 1 };
-        let data4 = TestData { topic: "b".to_owned(), msg: 2 };
+        let data1 = TestData {
+            topic: "a".to_owned(),
+            msg: 1,
+        };
+        let data2 = TestData {
+            topic: "a".to_owned(),
+            msg: 2,
+        };
+        let data3 = TestData {
+            topic: "b".to_owned(),
+            msg: 1,
+        };
+        let data4 = TestData {
+            topic: "b".to_owned(),
+            msg: 2,
+        };
 
         let client: Pulsar = Pulsar::new(addr, None, rt.executor()).wait().unwrap();
         let producer = client.producer(None);
 
         let send_start = Utc::now();
-        producer.send( topic1, &data1).wait().unwrap();
-        producer.send( topic1, &data2).wait().unwrap();
-        producer.send( topic2, &data3).wait().unwrap();
-        producer.send( topic2, &data4).wait().unwrap();
+        producer.send(topic1, &data1).wait().unwrap();
+        producer.send(topic1, &data2).wait().unwrap();
+        producer.send(topic2, &data3).wait().unwrap();
+        producer.send(topic2, &data4).wait().unwrap();
 
         let data = vec![data1, data2, data3, data4];
 
-        let mut consumer: MultiTopicConsumer<TestData> = client.consumer()
+        let mut consumer: MultiTopicConsumer<TestData> = client
+            .consumer()
             .multi_topic(Regex::new("mt_test_[ab]").unwrap())
             .with_namespace(namespace)
             .with_subscription("test_sub")
@@ -684,7 +810,8 @@ mod tests {
 
         rt.executor().spawn({
             let successes = successes.clone();
-            consumer.take(4)
+            consumer
+                .take(4)
                 .for_each(move |Message { payload, ack, .. }| {
                     ack.ack();
                     let msg = payload.unwrap();
@@ -715,9 +842,7 @@ mod tests {
             thread::sleep(Duration::from_millis(100));
         }
 
-        let consumer_state: Vec<ConsumerState> = consumer_state.collect()
-            .wait()
-            .unwrap();
+        let consumer_state: Vec<ConsumerState> = consumer_state.collect().wait().unwrap();
         let latest_state = consumer_state.last().unwrap();
         assert!(latest_state.messages_received >= 4);
         assert!(latest_state.connected_topics.len() >= 2);

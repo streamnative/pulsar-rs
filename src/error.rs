@@ -1,13 +1,16 @@
-use std::{io, fmt};
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
+use std::{fmt, io};
 
 #[derive(Debug)]
 pub enum Error {
-  Connection(ConnectionError),
-  Consumer(ConsumerError),
-  Producer(ProducerError),
-  ServiceDiscovery(ServiceDiscoveryError),
-  Custom(String),
+    Connection(ConnectionError),
+    Consumer(ConsumerError),
+    Producer(ProducerError),
+    ServiceDiscovery(ServiceDiscoveryError),
+    Custom(String),
 }
 
 impl From<ConnectionError> for Error {
@@ -35,15 +38,15 @@ impl From<ServiceDiscoveryError> for Error {
 }
 
 impl fmt::Display for Error {
-  fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-    match self {
-      Error::Connection(e) => write!(f, "Connection error: {}", e),
-      Error::Consumer(e) => write!(f, "consumer error: {}", e),
-      Error::Producer(e) => write!(f, "producer error: {}", e),
-      Error::ServiceDiscovery(e) => write!(f, "service discovery error: {}", e),
-      Error::Custom(e) => write!(f, "error: {}", e)
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Error::Connection(e) => write!(f, "Connection error: {}", e),
+            Error::Consumer(e) => write!(f, "consumer error: {}", e),
+            Error::Producer(e) => write!(f, "producer error: {}", e),
+            Error::ServiceDiscovery(e) => write!(f, "service discovery error: {}", e),
+            Error::Custom(e) => write!(f, "error: {}", e),
+        }
     }
-  }
 }
 
 impl std::error::Error for Error {
@@ -79,20 +82,22 @@ impl From<io::Error> for ConnectionError {
 }
 
 impl fmt::Display for ConnectionError {
-  fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-    match self {
-      ConnectionError::Io(e) => write!(f, "{}", e),
-      ConnectionError::Disconnected => write!(f, "Disconnected"),
-      ConnectionError::PulsarError(e) => write!(f, "{}", e),
-      ConnectionError::Unexpected(e) => write!(f, "{}", e),
-      ConnectionError::Decoding(e) => write!(f, "Error decoding message: {}", e),
-      ConnectionError::Encoding(e) => write!(f, "Error encoding message: {}", e),
-      ConnectionError::SocketAddr(e) => write!(f, "Error obtaning socket address: {}", e),
-      ConnectionError::UnexpectedResponse(e) => write!(f, "Unexpected response from pulsar: {}", e),
-      ConnectionError::Canceled => write!(f, "canceled request"),
-      ConnectionError::Shutdown => write!(f, "The connection was shut down"),
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            ConnectionError::Io(e) => write!(f, "{}", e),
+            ConnectionError::Disconnected => write!(f, "Disconnected"),
+            ConnectionError::PulsarError(e) => write!(f, "{}", e),
+            ConnectionError::Unexpected(e) => write!(f, "{}", e),
+            ConnectionError::Decoding(e) => write!(f, "Error decoding message: {}", e),
+            ConnectionError::Encoding(e) => write!(f, "Error encoding message: {}", e),
+            ConnectionError::SocketAddr(e) => write!(f, "Error obtaning socket address: {}", e),
+            ConnectionError::UnexpectedResponse(e) => {
+                write!(f, "Unexpected response from pulsar: {}", e)
+            }
+            ConnectionError::Canceled => write!(f, "canceled request"),
+            ConnectionError::Shutdown => write!(f, "The connection was shut down"),
+        }
     }
-  }
 }
 
 impl std::error::Error for ConnectionError {
@@ -117,12 +122,12 @@ impl From<ConnectionError> for ConsumerError {
 }
 
 impl fmt::Display for ConsumerError {
-  fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-    match self {
-      ConsumerError::Connection(e) => write!(f, "Connection error: {}", e),
-      ConsumerError::MissingPayload(s) => write!(f, "Missing payload: {}", s),
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            ConsumerError::Connection(e) => write!(f, "Connection error: {}", e),
+            ConsumerError::MissingPayload(s) => write!(f, "Missing payload: {}", s),
+        }
     }
-  }
 }
 
 impl std::error::Error for ConsumerError {
@@ -147,12 +152,12 @@ impl From<ConnectionError> for ProducerError {
 }
 
 impl fmt::Display for ProducerError {
-  fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-    match self {
-      ProducerError::Connection(e) => write!(f, "Connection error: {}", e),
-      ProducerError::Custom(s) => write!(f, "Custom error: {}", s),
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            ProducerError::Connection(e) => write!(f, "Connection error: {}", e),
+            ProducerError::Custom(s) => write!(f, "Custom error: {}", s),
+        }
     }
-  }
 }
 
 impl std::error::Error for ProducerError {
@@ -182,17 +187,17 @@ impl From<ConnectionError> for ServiceDiscoveryError {
 }
 
 impl fmt::Display for ServiceDiscoveryError {
-  fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-    match self {
-      ServiceDiscoveryError::Connection(e) => write!(f, "Connection error: {}", e),
-      ServiceDiscoveryError::Query(s) => write!(f, "Query error: {}", s),
-      ServiceDiscoveryError::NotFound => write!(f, "cannot find topic"),
-      ServiceDiscoveryError::DnsLookupError => write!(f, "cannot lookup broker address"),
-      ServiceDiscoveryError::Canceled => write!(f, "canceled request"),
-      ServiceDiscoveryError::Shutdown => write!(f, "service discovery engine not responding"),
-      ServiceDiscoveryError::Dummy => write!(f, "placeholder error"),
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            ServiceDiscoveryError::Connection(e) => write!(f, "Connection error: {}", e),
+            ServiceDiscoveryError::Query(s) => write!(f, "Query error: {}", s),
+            ServiceDiscoveryError::NotFound => write!(f, "cannot find topic"),
+            ServiceDiscoveryError::DnsLookupError => write!(f, "cannot lookup broker address"),
+            ServiceDiscoveryError::Canceled => write!(f, "canceled request"),
+            ServiceDiscoveryError::Shutdown => write!(f, "service discovery engine not responding"),
+            ServiceDiscoveryError::Dummy => write!(f, "placeholder error"),
+        }
     }
-  }
 }
 
 impl std::error::Error for ServiceDiscoveryError {
@@ -203,7 +208,6 @@ impl std::error::Error for ServiceDiscoveryError {
         }
     }
 }
-
 
 #[derive(Clone)]
 pub struct SharedError {

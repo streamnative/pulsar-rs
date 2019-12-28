@@ -1,12 +1,11 @@
 use crate::connection::RequestKey;
 use crate::error::ConnectionError;
-use bytes::{Buf, BufMut, IntoBuf, BytesMut};
+use bytes::{Buf, BufMut, BytesMut, IntoBuf};
 use crc::crc32;
 use nom::number::streaming::{be_u16, be_u32};
 use prost::{self, Message as ImplProtobuf};
 use std::io::Cursor;
-use tokio_codec::{Encoder, Decoder};
-
+use tokio_codec::{Decoder, Encoder};
 
 pub use self::proto::BaseCommand;
 pub use self::proto::MessageMetadata as Metadata;
@@ -14,15 +13,21 @@ pub use self::proto::MessageMetadata as Metadata;
 #[derive(Debug)]
 pub struct Message {
     pub command: BaseCommand,
-    pub payload: Option<Payload>
+    pub payload: Option<Payload>,
 }
 
 impl Message {
     pub fn request_key(&self) -> Option<RequestKey> {
         let command = &self.command;
-        command.subscribe.as_ref().map(|m| m.request_id)
+        command
+            .subscribe
+            .as_ref()
+            .map(|m| m.request_id)
             .or(command.partition_metadata.as_ref().map(|m| m.request_id))
-            .or(command.partition_metadata_response.as_ref().map(|m| m.request_id))
+            .or(command
+                .partition_metadata_response
+                .as_ref()
+                .map(|m| m.request_id))
             .or(command.lookup_topic.as_ref().map(|m| m.request_id))
             .or(command.lookup_topic_response.as_ref().map(|m| m.request_id))
             .or(command.producer.as_ref().map(|m| m.request_id))
@@ -35,22 +40,40 @@ impl Message {
             .or(command.producer_success.as_ref().map(|m| m.request_id))
             .or(command.error.as_ref().map(|m| m.request_id))
             .or(command.consumer_stats.as_ref().map(|m| m.request_id))
-            .or(command.consumer_stats_response.as_ref().map(|m| m.request_id))
+            .or(command
+                .consumer_stats_response
+                .as_ref()
+                .map(|m| m.request_id))
             .or(command.get_last_message_id.as_ref().map(|m| m.request_id))
-            .or(command.get_last_message_id_response.as_ref().map(|m| m.request_id))
-            .or(command.get_topics_of_namespace.as_ref().map(|m| m.request_id))
-            .or(command.get_topics_of_namespace_response.as_ref().map(|m| m.request_id))
+            .or(command
+                .get_last_message_id_response
+                .as_ref()
+                .map(|m| m.request_id))
+            .or(command
+                .get_topics_of_namespace
+                .as_ref()
+                .map(|m| m.request_id))
+            .or(command
+                .get_topics_of_namespace_response
+                .as_ref()
+                .map(|m| m.request_id))
             .or(command.get_schema.as_ref().map(|m| m.request_id))
             .or(command.get_schema_response.as_ref().map(|m| m.request_id))
             .map(|request_id| RequestKey::RequestId(request_id))
-            .or(command.send_receipt.as_ref().map(|r| RequestKey::ProducerSend {
-                producer_id: r.producer_id,
-                sequence_id: r.sequence_id
-            }))
-            .or(command.send_error.as_ref().map(|r| RequestKey::ProducerSend {
-                producer_id: r.producer_id,
-                sequence_id: r.sequence_id,
-            }))
+            .or(command
+                .send_receipt
+                .as_ref()
+                .map(|r| RequestKey::ProducerSend {
+                    producer_id: r.producer_id,
+                    sequence_id: r.sequence_id,
+                }))
+            .or(command
+                .send_error
+                .as_ref()
+                .map(|r| RequestKey::ProducerSend {
+                    producer_id: r.producer_id,
+                    sequence_id: r.sequence_id,
+                }))
     }
 }
 
@@ -61,9 +84,12 @@ impl Encoder for Codec {
     type Error = ConnectionError;
 
     fn encode(&mut self, item: Message, dst: &mut BytesMut) -> Result<(), ConnectionError> {
-
         let command_size = item.command.encoded_len();
-        let metadata_size = item.payload.as_ref().map(|p| p.metadata.encoded_len()).unwrap_or(0);
+        let metadata_size = item
+            .payload
+            .as_ref()
+            .map(|p| p.metadata.encoded_len())
+            .unwrap_or(0);
         let payload_size = item.payload.as_ref().map(|p| p.data.len()).unwrap_or(0);
         let header_size = if item.payload.is_some() { 18 } else { 8 };
         // Total size does not include the size of the 'totalSize' field, so we subtract 4
@@ -96,7 +122,7 @@ impl Encoder for Codec {
         }
         dst.put_slice(&buf);
         trace!("Encoder sending {} bytes", buf.len());
-//        println!("Wrote message {:?}", item);
+        //        println!("Wrote message {:?}", item);
         Ok(())
     }
 }
@@ -114,30 +140,41 @@ impl Decoder for Codec {
             let src = buf.into_inner();
             if src.len() >= message_size {
                 let msg = {
-                    let (buf, command_frame) = command_frame(&src[..message_size])
-                        .map_err(|err| ConnectionError::Decoding(format!("Error decoding command frame: {:?}", err)))?;
+                    let (buf, command_frame) =
+                        command_frame(&src[..message_size]).map_err(|err| {
+                            ConnectionError::Decoding(format!(
+                                "Error decoding command frame: {:?}",
+                                err
+                            ))
+                        })?;
                     let command = BaseCommand::decode(command_frame.command)?;
 
-                    let payload =
-                        if buf.len() > 0 {
-                            let (buf, payload_frame) = payload_frame(buf)
-                                .map_err(|err| ConnectionError::Decoding(format!("Error decoding payload frame: {:?}", err)))?;
+                    let payload = if buf.len() > 0 {
+                        let (buf, payload_frame) = payload_frame(buf).map_err(|err| {
+                            ConnectionError::Decoding(format!(
+                                "Error decoding payload frame: {:?}",
+                                err
+                            ))
+                        })?;
 
-                            // TODO: Check crc32 of payload data
+                        // TODO: Check crc32 of payload data
 
-                            let metadata = Metadata::decode(payload_frame.metadata)?;
-                            Some(Payload { metadata, data: buf.to_vec() })
-                        } else {
-                            None
-                        };
+                        let metadata = Metadata::decode(payload_frame.metadata)?;
+                        Some(Payload {
+                            metadata,
+                            data: buf.to_vec(),
+                        })
+                    } else {
+                        None
+                    };
 
                     Message { command, payload }
                 };
 
                 //TODO advance as we read, rather than this weird post thing
                 src.advance(message_size);
-//                println!("Read message {:?}", &msg);
-                return Ok(Some(msg))
+                //                println!("Read message {:?}", &msg);
+                return Ok(Some(msg));
             }
         }
         Ok(None)
@@ -151,11 +188,14 @@ pub struct Payload {
 }
 
 struct CommandFrame<'a> {
-    #[allow(dead_code)] total_size: u32,
-    #[allow(dead_code)] command_size: u32,
+    #[allow(dead_code)]
+    total_size: u32,
+    #[allow(dead_code)]
+    command_size: u32,
     command: &'a [u8],
 }
 
+#[rustfmt::skip::macros(named)]
 named!(command_frame<CommandFrame>,
     do_parse!(
         total_size: be_u32 >>
@@ -171,12 +211,16 @@ named!(command_frame<CommandFrame>,
 );
 
 struct PayloadFrame<'a> {
-    #[allow(dead_code)] magic_number: u16,
-    #[allow(dead_code)] checksum: u32,
-    #[allow(dead_code)] metadata_size: u32,
+    #[allow(dead_code)]
+    magic_number: u16,
+    #[allow(dead_code)]
+    checksum: u32,
+    #[allow(dead_code)]
+    metadata_size: u32,
     metadata: &'a [u8],
 }
 
+#[rustfmt::skip::macros(named)]
 named!(payload_frame<PayloadFrame>,
     do_parse!(
         magic_number: be_u16 >>
@@ -193,6 +237,7 @@ named!(payload_frame<PayloadFrame>,
     )
 );
 
+#[rustfmt::skip]
 pub mod proto {
     #[derive(Clone, PartialEq, Message)]
     pub struct Schema {
@@ -1013,14 +1058,14 @@ impl From<prost::DecodeError> for ConnectionError {
 mod tests {
     use crate::message::Codec;
     use bytes::BytesMut;
-    use tokio_codec::{Encoder, Decoder};
+    use tokio_codec::{Decoder, Encoder};
 
     #[test]
     fn parse_simple_command() {
         let input: &[u8] = &[
-            0x00, 0x00, 0x00, 0x22, 0x00, 0x00, 0x00, 0x1E, 0x08, 0x02, 0x12, 0x1A, 0x0A, 0x10, 0x32,
-            0x2E, 0x30, 0x2E, 0x31, 0x2D, 0x69, 0x6E, 0x63, 0x75, 0x62, 0x61, 0x74, 0x69, 0x6E, 0x67,
-            0x20, 0x0C, 0x2A, 0x04, 0x6E, 0x6F, 0x6E, 0x65
+            0x00, 0x00, 0x00, 0x22, 0x00, 0x00, 0x00, 0x1E, 0x08, 0x02, 0x12, 0x1A, 0x0A, 0x10,
+            0x32, 0x2E, 0x30, 0x2E, 0x31, 0x2D, 0x69, 0x6E, 0x63, 0x75, 0x62, 0x61, 0x74, 0x69,
+            0x6E, 0x67, 0x20, 0x0C, 0x2A, 0x04, 0x6E, 0x6F, 0x6E, 0x65,
         ];
 
         let message = Codec.decode(&mut input.into()).unwrap().unwrap();
@@ -1044,7 +1089,7 @@ mod tests {
             0x10, 0x08, 0x0E, 0x01, 0x42, 0x83, 0x54, 0xB5, 0x00, 0x00, 0x00, 0x19, 0x0A, 0x0E,
             0x73, 0x74, 0x61, 0x6E, 0x64, 0x61, 0x6C, 0x6F, 0x6E, 0x65, 0x2D, 0x30, 0x2D, 0x33,
             0x10, 0x08, 0x18, 0xBE, 0xC0, 0xFC, 0x84, 0xD2, 0x2C, 0x68, 0x65, 0x6C, 0x6C, 0x6F,
-            0x2D, 0x70, 0x75, 0x6C, 0x73, 0x61, 0x72, 0x2D, 0x38
+            0x2D, 0x70, 0x75, 0x6C, 0x73, 0x61, 0x72, 0x2D, 0x38,
         ];
 
         let message = Codec.decode(&mut input.into()).unwrap().unwrap();
