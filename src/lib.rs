@@ -11,30 +11,32 @@ extern crate prost_derive;
 #[macro_use]
 extern crate serde;
 
-pub use client::{SerializeMessage, DeserializeMessage, Pulsar};
+pub use client::{DeserializeMessage, Pulsar, SerializeMessage};
 pub use connection::{Authentication, Connection};
 pub use connection_manager::ConnectionManager;
-pub use consumer::{Ack, Consumer, ConsumerBuilder, ConsumerState, Message, MultiTopicConsumer, ConsumerOptions};
+pub use consumer::{
+    Ack, Consumer, ConsumerBuilder, ConsumerOptions, ConsumerState, Message, MultiTopicConsumer,
+};
 pub use error::{ConnectionError, ConsumerError, Error, ProducerError, ServiceDiscoveryError};
 pub use message::proto;
 pub use message::proto::command_subscribe::SubType;
-pub use producer::{TopicProducer, Producer, ProducerOptions};
+pub use producer::{Producer, ProducerOptions, TopicProducer};
 pub use service_discovery::ServiceDiscovery;
 
-pub mod message;
-pub mod producer;
-mod consumer;
-mod error;
+mod client;
 mod connection;
 mod connection_manager;
+mod consumer;
+mod error;
+pub mod message;
+pub mod producer;
 mod service_discovery;
-mod client;
 
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
-    use futures::{Future, future, Stream};
+    use futures::{future, Future, Stream};
     use futures_timer::ext::FutureExt;
     use tokio;
 
@@ -42,21 +44,24 @@ mod tests {
 
     use crate::client::SerializeMessage;
     use crate::consumer::Message;
-    use crate::Error as PulsarError;
     use crate::message::Payload;
+    use crate::Error as PulsarError;
 
     use super::*;
 
     #[derive(Debug, Serialize, Deserialize)]
     struct TestData {
-        pub data: String
+        pub data: String,
     }
 
     impl SerializeMessage for TestData {
         fn serialize_message(input: &Self) -> Result<producer::Message, PulsarError> {
-            let payload = serde_json::to_vec(input)
-                .map_err(|e| PulsarError::Custom(e.to_string()))?;
-            Ok(producer::Message { payload, ..Default::default() })
+            let payload =
+                serde_json::to_vec(input).map_err(|e| PulsarError::Custom(e.to_string()))?;
+            Ok(producer::Message {
+                payload,
+                ..Default::default()
+            })
         }
     }
 
@@ -111,19 +116,25 @@ mod tests {
         let addr = "127.0.0.1:6650".parse().unwrap();
         let runtime = tokio::runtime::Runtime::new().unwrap();
 
-        let pulsar: Pulsar = Pulsar::new(addr, None, runtime.executor())
-            .wait().unwrap();
+        let pulsar: Pulsar = Pulsar::new(addr, None, runtime.executor()).wait().unwrap();
 
         let producer = pulsar.producer(None);
 
-        future::join_all((0..5000)
-            .map(|_| producer.send("test", &TestData { data: "data".to_string() })))
-            .map_err(|e| Error::from(e))
-            .timeout(Duration::from_secs(5))
-            .wait()
-            .unwrap();
+        future::join_all((0..5000).map(|_| {
+            producer.send(
+                "test",
+                &TestData {
+                    data: "data".to_string(),
+                },
+            )
+        }))
+        .map_err(|e| Error::from(e))
+        .timeout(Duration::from_secs(5))
+        .wait()
+        .unwrap();
 
-        let consumer: Consumer<TestData> = pulsar.consumer()
+        let consumer: Consumer<TestData> = pulsar
+            .consumer()
             .with_topic("test")
             .with_consumer_name("test_consumer")
             .with_subscription_type(SubType::Exclusive)
@@ -141,7 +152,10 @@ mod tests {
                 if data.data.as_str() == "data" {
                     Ok(())
                 } else {
-                    Err(Error::Message(format!("Unexpected payload: {}", &data.data)))
+                    Err(Error::Message(format!(
+                        "Unexpected payload: {}",
+                        &data.data
+                    )))
                 }
             })
             .timeout(Duration::from_secs(5))

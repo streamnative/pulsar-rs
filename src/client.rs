@@ -11,11 +11,11 @@ use tokio::runtime::TaskExecutor;
 
 use crate::connection::Authentication;
 use crate::connection_manager::{BrokerAddress, ConnectionManager};
-use crate::consumer::{Consumer, MultiTopicConsumer, ConsumerBuilder, Unset, ConsumerOptions};
+use crate::consumer::{Consumer, ConsumerBuilder, ConsumerOptions, MultiTopicConsumer, Unset};
 use crate::error::Error;
-use crate::message::Payload;
 use crate::message::proto::{self, command_subscribe::SubType, CommandSendReceipt};
-use crate::producer::{self, Producer, TopicProducer, ProducerOptions};
+use crate::message::Payload;
+use crate::producer::{self, Producer, ProducerOptions, TopicProducer};
 use crate::service_discovery::ServiceDiscovery;
 
 /// Helper trait for consumer deserialization
@@ -55,21 +55,30 @@ pub trait SerializeMessage {
 impl SerializeMessage for [u8] {
     fn serialize_message(input: &Self) -> Result<producer::Message, Error> {
         //TODO figure out how to avoid copying here
-        Ok(producer::Message { payload: input.to_vec(), ..Default::default() })
+        Ok(producer::Message {
+            payload: input.to_vec(),
+            ..Default::default()
+        })
     }
 }
 
 impl SerializeMessage for String {
     fn serialize_message(input: &Self) -> Result<producer::Message, Error> {
         let payload = input.as_bytes().to_vec();
-        Ok(producer::Message { payload, ..Default::default() })
+        Ok(producer::Message {
+            payload,
+            ..Default::default()
+        })
     }
 }
 
 impl SerializeMessage for str {
     fn serialize_message(input: &Self) -> Result<producer::Message, Error> {
         let payload = input.as_bytes().to_vec();
-        Ok(producer::Message { payload, ..Default::default() })
+        Ok(producer::Message {
+            payload,
+            ..Default::default()
+        })
     }
 }
 
@@ -87,13 +96,15 @@ impl Pulsar {
         addr: SocketAddr,
         auth: Option<Authentication>,
         executor: TaskExecutor,
-    ) -> impl Future<Item=Self, Error=Error> {
+    ) -> impl Future<Item = Self, Error = Error> {
         ConnectionManager::new(addr, auth.clone(), executor.clone())
             .from_err()
             .map(|manager| {
                 let manager = Arc::new(manager);
-                let service_discovery =
-                    Arc::new(ServiceDiscovery::with_manager(manager.clone(), executor.clone()));
+                let service_discovery = Arc::new(ServiceDiscovery::with_manager(
+                    manager.clone(),
+                    executor.clone(),
+                ));
                 Pulsar {
                     manager,
                     service_discovery,
@@ -105,7 +116,7 @@ impl Pulsar {
     pub fn lookup_topic<S: Into<String>>(
         &self,
         topic: S,
-    ) -> impl Future<Item=BrokerAddress, Error=Error> {
+    ) -> impl Future<Item = BrokerAddress, Error = Error> {
         self.service_discovery.lookup_topic(topic).from_err()
     }
 
@@ -113,7 +124,7 @@ impl Pulsar {
     pub fn lookup_partitioned_topic_number<S: Into<String>>(
         &self,
         topic: S,
-    ) -> impl Future<Item=u32, Error=Error> {
+    ) -> impl Future<Item = u32, Error = Error> {
         self.service_discovery
             .lookup_partitioned_topic_number(topic)
             .from_err()
@@ -122,14 +133,19 @@ impl Pulsar {
     pub fn lookup_partitioned_topic<S: Into<String>>(
         &self,
         topic: S,
-    ) -> impl Future<Item=Vec<(String, BrokerAddress)>, Error=Error> {
+    ) -> impl Future<Item = Vec<(String, BrokerAddress)>, Error = Error> {
         self.service_discovery
             .lookup_partitioned_topic(topic)
             .from_err()
     }
 
-    pub fn get_topics_of_namespace(&self, namespace: String, mode: proto::get_topics::Mode) -> impl Future<Item=Vec<String>, Error=Error> {
-        self.manager.get_base_connection()
+    pub fn get_topics_of_namespace(
+        &self,
+        namespace: String,
+        mode: proto::get_topics::Mode,
+    ) -> impl Future<Item = Vec<String>, Error = Error> {
+        self.manager
+            .get_base_connection()
             .and_then(move |conn| conn.sender().get_topics_of_namespace(namespace, mode))
             .from_err()
             .map(|topics| topics.topics)
@@ -148,9 +164,10 @@ impl Pulsar {
         topic_refresh: Duration,
         options: ConsumerOptions,
     ) -> MultiTopicConsumer<T>
-        where T: DeserializeMessage,
-              S1: Into<String>,
-              S2: Into<String>,
+    where
+        T: DeserializeMessage,
+        S1: Into<String>,
+        S2: Into<String>,
     {
         MultiTopicConsumer::new(
             self.clone(),
@@ -171,11 +188,12 @@ impl Pulsar {
         batch_size: Option<u32>,
         consumer_name: Option<String>,
         consumer_id: Option<u64>,
-        options: ConsumerOptions
-    ) -> impl Future<Item=Consumer<T>, Error=Error>
-        where T: DeserializeMessage,
-              S1: Into<String>,
-              S2: Into<String>,
+        options: ConsumerOptions,
+    ) -> impl Future<Item = Consumer<T>, Error = Error>
+    where
+        T: DeserializeMessage,
+        S1: Into<String>,
+        S2: Into<String>,
     {
         let manager = self.manager.clone();
         let topic = topic.into();
@@ -193,9 +211,9 @@ impl Pulsar {
                     consumer_id,
                     consumer_name,
                     batch_size,
-                    options
+                    options,
                 )
-                    .from_err()
+                .from_err()
             })
     }
 
@@ -208,39 +226,38 @@ impl Pulsar {
         topic: S1,
         subscription: S2,
         sub_type: SubType,
-        options: ConsumerOptions
-    ) -> impl Future<Item=Vec<Consumer<T>>, Error=Error> {
+        options: ConsumerOptions,
+    ) -> impl Future<Item = Vec<Consumer<T>>, Error = Error> {
         let manager = self.manager.clone();
 
         self.service_discovery
             .lookup_partitioned_topic(topic.clone())
             .from_err()
             .and_then(move |v| {
-                let res = v
-                    .iter()
-                    .cloned()
-                    .map(|(topic, broker_address)| {
-                        let subscription = subscription.clone();
-                        let options = options.clone();
+                let res =
+                    v.iter()
+                        .cloned()
+                        .map(|(topic, broker_address)| {
+                            let subscription = subscription.clone();
+                            let options = options.clone();
 
-                        manager
-                            .get_connection(&broker_address)
-                            .from_err()
-                            .and_then(move |conn| {
-                                Consumer::from_connection(
-                                    conn,
-                                    topic.to_string(),
-                                    subscription.into(),
-                                    sub_type,
-                                    None,
-                                    None,
-                                    None,
-                                    options
-                                )
+                            manager.get_connection(&broker_address).from_err().and_then(
+                                move |conn| {
+                                    Consumer::from_connection(
+                                        conn,
+                                        topic.to_string(),
+                                        subscription.into(),
+                                        sub_type,
+                                        None,
+                                        None,
+                                        None,
+                                        options,
+                                    )
                                     .from_err()
-                            })
-                    })
-                    .collect::<Vec<_>>();
+                                },
+                            )
+                        })
+                        .collect::<Vec<_>>();
 
                 future::join_all(res)
             })
@@ -251,21 +268,23 @@ impl Pulsar {
         topic: S,
         name: Option<String>,
         options: ProducerOptions,
-    ) -> impl Future<Item=TopicProducer, Error=Error> {
+    ) -> impl Future<Item = TopicProducer, Error = Error> {
         let manager = self.manager.clone();
         let topic = topic.into();
         self.service_discovery
             .lookup_topic(topic.clone())
             .from_err()
             .and_then(move |broker_address| manager.get_connection(&broker_address).from_err())
-            .and_then(move |conn| TopicProducer::from_connection(conn, topic, name, options).from_err())
+            .and_then(move |conn| {
+                TopicProducer::from_connection(conn, topic, name, options).from_err()
+            })
     }
 
     pub fn create_partitioned_producers<S: Into<String> + Clone>(
         &self,
         topic: S,
         options: ProducerOptions,
-    ) -> impl Future<Item=Vec<TopicProducer>, Error=Error> {
+    ) -> impl Future<Item = Vec<TopicProducer>, Error = Error> {
         let manager = self.manager.clone();
 
         self.service_discovery
@@ -280,7 +299,10 @@ impl Pulsar {
                         manager
                             .get_connection(&broker_address)
                             .from_err()
-                            .and_then(move |conn| TopicProducer::from_connection(conn, topic, None, options.clone()).from_err())
+                            .and_then(move |conn| {
+                                TopicProducer::from_connection(conn, topic, None, options.clone())
+                                    .from_err()
+                            })
                     })
                     .collect::<Vec<_>>();
 
@@ -293,10 +315,10 @@ impl Pulsar {
         topic: S,
         message: &M,
         options: ProducerOptions,
-    ) -> impl Future<Item=CommandSendReceipt, Error=Error> {
+    ) -> impl Future<Item = CommandSendReceipt, Error = Error> {
         match M::serialize_message(message) {
             Ok(message) => Either::A(self.send_raw(message, topic, options)),
-            Err(e) => Either::B(future::failed(e.into()))
+            Err(e) => Either::B(future::failed(e.into())),
         }
     }
 
@@ -305,7 +327,7 @@ impl Pulsar {
         message: producer::Message,
         topic: S,
         options: ProducerOptions,
-    ) -> impl Future<Item=CommandSendReceipt, Error=Error> {
+    ) -> impl Future<Item = CommandSendReceipt, Error = Error> {
         self.create_producer(topic, None, options)
             .and_then(|producer| producer.send_raw(message).from_err())
     }
