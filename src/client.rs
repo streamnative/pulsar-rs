@@ -162,6 +162,7 @@ impl Pulsar {
         namespace: S2,
         sub_type: SubType,
         topic_refresh: Duration,
+        unacked_message_resend_delay: Option<Duration>,
         options: ConsumerOptions,
     ) -> MultiTopicConsumer<T>
     where
@@ -176,6 +177,7 @@ impl Pulsar {
             subscription.into(),
             sub_type,
             topic_refresh,
+            unacked_message_resend_delay,
             options,
         )
     }
@@ -188,6 +190,7 @@ impl Pulsar {
         batch_size: Option<u32>,
         consumer_name: Option<String>,
         consumer_id: Option<u64>,
+        unacked_message_redelivery_delay: Option<Duration>,
         options: ConsumerOptions,
     ) -> impl Future<Item = Consumer<T>, Error = Error>
     where
@@ -211,6 +214,7 @@ impl Pulsar {
                     consumer_id,
                     consumer_name,
                     batch_size,
+                    unacked_message_redelivery_delay,
                     options,
                 )
                 .from_err()
@@ -251,6 +255,7 @@ impl Pulsar {
                                         None,
                                         None,
                                         None,
+                                        None, //TODO make configurable
                                         options,
                                     )
                                     .from_err()

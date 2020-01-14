@@ -33,7 +33,6 @@ pub struct ConsumerOptions {
     pub read_compacted: Option<bool>,
     pub schema: Option<Schema>,
     pub initial_position: Option<i32>,
-    pub unacked_message_redelivery_delay: Option<Duration>,
 }
 
 pub struct Consumer<T: DeserializeMessage> {
@@ -61,6 +60,7 @@ impl<T: DeserializeMessage> Consumer<T> {
         proxy_to_broker_url: Option<String>,
         executor: TaskExecutor,
         batch_size: Option<u32>,
+        unacked_message_redelivery_delay: Option<Duration>,
         options: ConsumerOptions,
     ) -> impl Future<Item = Consumer<T>, Error = Error> {
         Connection::new(addr, auth_data, proxy_to_broker_url, executor.clone())
@@ -74,6 +74,7 @@ impl<T: DeserializeMessage> Consumer<T> {
                     consumer_id,
                     consumer_name,
                     batch_size,
+                    unacked_message_redelivery_delay,
                     options,
                 )
             })
@@ -87,6 +88,7 @@ impl<T: DeserializeMessage> Consumer<T> {
         consumer_id: Option<u64>,
         consumer_name: Option<String>,
         batch_size: Option<u32>,
+        unacked_message_redelivery_delay: Option<Duration>,
         options: ConsumerOptions,
     ) -> impl Future<Item = Consumer<T>, Error = Error> {
         let consumer_id = consumer_id.unwrap_or_else(rand::random);
@@ -116,7 +118,7 @@ impl<T: DeserializeMessage> Consumer<T> {
                 let tick_delay = Duration::from_secs(1);
                 let ack_handler = AckHandler::new(
                     connection.clone(),
-                    options.unacked_message_redelivery_delay,
+                    unacked_message_redelivery_delay,
                     tick_delay,
                 );
                 Consumer {
@@ -659,6 +661,7 @@ impl<'a> ConsumerBuilder<'a, Set<String>, Set<String>, Set<SubType>> {
             consumer_name,
             consumer_options,
             batch_size,
+            unacked_message_resend_delay,
             ..
         } = self;
 
@@ -669,6 +672,7 @@ impl<'a> ConsumerBuilder<'a, Set<String>, Set<String>, Set<SubType>> {
             batch_size,
             consumer_name,
             consumer_id,
+            unacked_message_resend_delay,
             consumer_options.unwrap_or_else(ConsumerOptions::default),
         )
     }
@@ -686,6 +690,7 @@ impl<'a> ConsumerBuilder<'a, Set<Regex>, Set<String>, Set<SubType>> {
             batch_size,
             topic_refresh,
             namespace,
+            unacked_message_resend_delay,
             ..
         } = self;
         if consumer_id.is_some() {
@@ -706,6 +711,7 @@ impl<'a> ConsumerBuilder<'a, Set<Regex>, Set<String>, Set<SubType>> {
             namespace,
             sub_type,
             topic_refresh,
+            unacked_message_resend_delay,
             ConsumerOptions::default(),
         )
     }
@@ -723,6 +729,7 @@ pub struct MultiTopicConsumer<T: DeserializeMessage> {
     namespace: String,
     topic_regex: Regex,
     pulsar: Pulsar,
+    unacked_message_resend_delay: Option<Duration>,
     consumers: BTreeMap<String, Consumer<T>>,
     topics: VecDeque<String>,
     new_consumers: Option<Box<dyn Future<Item = Vec<Consumer<T>>, Error = Error> + Send>>,
@@ -743,6 +750,7 @@ impl<T: DeserializeMessage> MultiTopicConsumer<T> {
         subscription: S2,
         sub_type: SubType,
         topic_refresh: Duration,
+        unacked_message_resend_delay: Option<Duration>,
         options: ConsumerOptions,
     ) -> Self
     where
@@ -753,6 +761,7 @@ impl<T: DeserializeMessage> MultiTopicConsumer<T> {
             namespace: namespace.into(),
             topic_regex,
             pulsar,
+            unacked_message_resend_delay,
             consumers: BTreeMap::new(),
             topics: VecDeque::new(),
             new_consumers: None,
@@ -857,6 +866,7 @@ impl<T: 'static + DeserializeMessage> Stream for MultiTopicConsumer<T> {
             let sub_type = self.sub_type;
             let existing_topics: BTreeSet<String> = self.consumers.keys().cloned().collect();
             let options = self.options.clone();
+            let unacked_message_resend_delay = self.unacked_message_resend_delay;
 
             let new_consumers = Box::new(
                 self.pulsar
@@ -881,6 +891,7 @@ impl<T: 'static + DeserializeMessage> Stream for MultiTopicConsumer<T> {
                                         None,
                                         None,
                                         None,
+                                        unacked_message_resend_delay,
                                         options.clone(),
                                     )
                                 }),
