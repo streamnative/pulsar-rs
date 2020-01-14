@@ -407,9 +407,13 @@ impl ConnectionSender {
     pub fn send_redeliver_unacknowleged_messages(
         &self,
         consumer_id: u64,
-        message_ids: Vec<proto::MessageIdData>
+        message_ids: Vec<proto::MessageIdData>,
     ) -> Result<(), ConnectionError> {
-        self.tx.unbounded_send(messages::redeliver_unacknowleged_messages(consumer_id, message_ids))
+        self.tx
+            .unbounded_send(messages::redeliver_unacknowleged_messages(
+                consumer_id,
+                message_ids,
+            ))
             .map_err(|_| ConnectionError::Disconnected)
     }
 
@@ -873,15 +877,17 @@ pub(crate) mod messages {
 
     pub fn redeliver_unacknowleged_messages(
         consumer_id: u64,
-        message_ids: Vec<proto::MessageIdData>
+        message_ids: Vec<proto::MessageIdData>,
     ) -> Message {
         Message {
             command: proto::BaseCommand {
                 type_: CommandType::RedeliverUnacknowledgedMessages as i32,
-                redeliver_unacknowledged_messages: Some(proto::CommandRedeliverUnacknowledgedMessages {
-                    consumer_id,
-                    message_ids
-                }),
+                redeliver_unacknowledged_messages: Some(
+                    proto::CommandRedeliverUnacknowledgedMessages {
+                        consumer_id,
+                        message_ids,
+                    },
+                ),
                 ..Default::default()
             },
             payload: None,

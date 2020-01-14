@@ -114,7 +114,11 @@ impl<T: DeserializeMessage> Consumer<T> {
                 //TODO this should be shared among all consumers when using the client
                 //TODO make tick_delay configurable
                 let tick_delay = Duration::from_secs(1);
-                let ack_handler = AckHandler::new(connection.clone(), options.unacked_message_redelivery_delay, tick_delay);
+                let ack_handler = AckHandler::new(
+                    connection.clone(),
+                    options.unacked_message_redelivery_delay,
+                    tick_delay,
+                );
                 Consumer {
                     connection,
                     topic,
@@ -159,16 +163,23 @@ impl Ack {
 
     pub fn join(mut self, mut other: Ack) -> Self {
         for (consumer_id, message_ids) in other.take_message_ids() {
-            self.message_ids.entry(consumer_id).or_insert_with(Vec::new).extend(message_ids);
+            self.message_ids
+                .entry(consumer_id)
+                .or_insert_with(Vec::new)
+                .extend(message_ids);
         }
         self
     }
 
     pub fn extend<I: IntoIterator<Item = Ack>>(mut self, others: I) -> Self {
-        others.into_iter()
+        others
+            .into_iter()
             .flat_map(|mut o| o.take_message_ids())
             .for_each(|(consumer_id, message_ids)| {
-                self.message_ids.entry(consumer_id).or_insert_with(Vec::new).extend(message_ids);
+                self.message_ids
+                    .entry(consumer_id)
+                    .or_insert_with(Vec::new)
+                    .extend(message_ids);
             });
         self
     }
@@ -217,7 +228,6 @@ impl Drop for Ack {
     fn drop(&mut self) {
         if !self.message_ids.is_empty() {
             self.send_nack();
-
         }
     }
 }
@@ -266,7 +276,11 @@ struct AckHandler {
 impl AckHandler {
     /// Create and spawn a new AckHandler future, which will run until the connection fails, or all
     /// inbound senders are dropped and any pending redelivery messages have been sent
-    pub fn new(conn: Arc<Connection>, redelivery_delay: Option<Duration>, tick_delay: Duration) -> UnboundedSender<AckMessage> {
+    pub fn new(
+        conn: Arc<Connection>,
+        redelivery_delay: Option<Duration>,
+        tick_delay: Duration,
+    ) -> UnboundedSender<AckMessage> {
         let (tx, rx) = mpsc::unbounded();
         tokio::spawn(AckHandler {
             pending_nacks: BinaryHeap::new(),
@@ -290,8 +304,7 @@ impl AckHandler {
             match inbound.poll() {
                 Ok(Async::Ready(Some(msg))) => Some(msg),
                 Ok(Async::NotReady) => None,
-                Ok(Async::Ready(None)) |
-                Err(_) => {
+                Ok(Async::Ready(None)) | Err(_) => {
                     self.inbound = None;
                     None
                 }
@@ -356,7 +369,8 @@ impl Future for AckHandler {
             }
             for (consumer_id, message_ids) in resends {
                 //TODO this should be resilient to reconnects
-                let send_result = self.conn
+                let send_result = self
+                    .conn
                     .sender()
                     .send_redeliver_unacknowleged_messages(consumer_id, message_ids);
                 if send_result.is_err() {
