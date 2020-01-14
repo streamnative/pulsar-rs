@@ -260,7 +260,7 @@ pub mod proto {
             Avro = 4,
         }
     }
-    #[derive(Clone, PartialEq, Message)]
+    #[derive(Clone, PartialEq, Eq, Message)]
     pub struct MessageIdData {
         #[prost(uint64, required, tag="1")]
         pub ledger_id: u64,
