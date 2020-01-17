@@ -115,11 +115,12 @@ impl<T: DeserializeMessage> Consumer<T> {
             .map(move |connection| {
                 //TODO this should be shared among all consumers when using the client
                 //TODO make tick_delay configurable
-                let tick_delay = Duration::from_secs(1);
+                let tick_delay = Duration::from_millis(500);
                 let ack_handler = AckHandler::new(
                     connection.clone(),
                     unacked_message_redelivery_delay,
                     tick_delay,
+                    &connection.executor(),
                 );
                 Consumer {
                     connection,
@@ -282,20 +283,21 @@ impl AckHandler {
         conn: Arc<Connection>,
         redelivery_delay: Option<Duration>,
         tick_delay: Duration,
+        executor: &TaskExecutor,
     ) -> UnboundedSender<AckMessage> {
         let (tx, rx) = mpsc::unbounded();
-        tokio::spawn(AckHandler {
+        executor.spawn(AckHandler {
             pending_nacks: BinaryHeap::new(),
             conn,
             inbound: Some(rx),
             unack_redelivery_delay: redelivery_delay,
-            tick_timer: tokio::timer::Interval::new_interval(tick_delay),
+            tick_timer: Interval::new_interval(tick_delay),
         });
         tx
     }
     fn next_ready_resend(&mut self) -> Option<MessageResend> {
         if let Some(resend) = self.pending_nacks.peek() {
-            if resend.when >= Instant::now() {
+            if resend.when <= Instant::now() {
                 return self.pending_nacks.pop();
             }
         }
@@ -361,29 +363,37 @@ impl Future for AckHandler {
                 return Err(());
             }
         }
-        if let Ok(Async::Ready(_)) = self.tick_timer.poll() {
-            let mut resends: BTreeMap<u64, Vec<MessageIdData>> = BTreeMap::new();
-            while let Some(ready) = self.next_ready_resend() {
-                resends
-                    .entry(ready.consumer_id)
-                    .or_insert_with(Vec::new)
-                    .extend(ready.message_ids);
-            }
-            for (consumer_id, message_ids) in resends {
-                //TODO this should be resilient to reconnects
-                let send_result = self
-                    .conn
-                    .sender()
-                    .send_redeliver_unacknowleged_messages(consumer_id, message_ids);
-                if send_result.is_err() {
-                    return Err(());
+        loop {
+            match self.tick_timer.poll() {
+                Ok(Async::Ready(Some(_))) => {
+                    let mut resends: BTreeMap<u64, Vec<MessageIdData>> = BTreeMap::new();
+                    while let Some(ready) = self.next_ready_resend() {
+                        resends
+                            .entry(ready.consumer_id)
+                            .or_insert_with(Vec::new)
+                            .extend(ready.message_ids);
+                    }
+                    for (consumer_id, message_ids) in resends {
+                        //TODO this should be resilient to reconnects
+                        let send_result = self
+                            .conn
+                            .sender()
+                            .send_redeliver_unacknowleged_messages(consumer_id, message_ids);
+                        if send_result.is_err() {
+                            return Err(());
+                        }
+                    }
                 }
+                Ok(Async::NotReady) => {
+                    if self.inbound.is_none() && self.pending_nacks.is_empty() {
+                        return Ok(Async::Ready(()))
+                    } else {
+                        return Ok(Async::NotReady)
+                    }
+                }
+                Ok(Async::Ready(None)) |
+                Err(_) => return Err(()),
             }
-        }
-        if self.inbound.is_none() && self.pending_nacks.is_empty() {
-            Ok(Async::Ready(()))
-        } else {
-            Ok(Async::NotReady)
         }
     }
 }
@@ -926,7 +936,7 @@ impl<T: 'static + DeserializeMessage> Stream for MultiTopicConsumer<T> {
                     }
                 }
             } else {
-                println!("BUG: Missing consumer for topic {}", &topic);
+                eprintln!("BUG: Missing consumer for topic {}", &topic);
             }
             self.topics.push_back(topic);
         }

@@ -464,6 +464,7 @@ pub struct Connection {
     sender: ConnectionSender,
     sender_shutdown: Option<oneshot::Sender<()>>,
     receiver_shutdown: Option<oneshot::Sender<()>>,
+    executor: TaskExecutor,
 }
 
 impl Connection {
@@ -538,6 +539,7 @@ impl Connection {
                     sender,
                     sender_shutdown: Some(sender_shutdown_tx),
                     receiver_shutdown: Some(receiver_shutdown_tx),
+                    executor,
                 }
             })
     }
@@ -557,6 +559,10 @@ impl Connection {
     /// Chain to send a message, e.g. conn.sender().send_ping()
     pub fn sender(&self) -> &ConnectionSender {
         &self.sender
+    }
+
+    pub fn executor(&self) -> TaskExecutor {
+        self.executor.clone()
     }
 }
 
