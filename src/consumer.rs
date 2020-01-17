@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use futures::sync::mpsc::{unbounded, UnboundedSender};
+use futures::sync::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use futures::Future;
 use futures::{sync::mpsc, Async, Stream};
 use rand;
@@ -20,6 +20,9 @@ use crate::message::{
     Message as RawMessage, Payload,
 };
 use crate::{DeserializeMessage, Pulsar};
+use nom::lib::std::cmp::Ordering;
+use nom::lib::std::collections::BinaryHeap;
+use tokio::prelude::Poll;
 
 #[derive(Clone, Default)]
 pub struct ConsumerOptions {
@@ -37,6 +40,7 @@ pub struct Consumer<T: DeserializeMessage> {
     topic: String,
     id: u64,
     messages: mpsc::UnboundedReceiver<RawMessage>,
+    ack_handler: UnboundedSender<AckMessage>,
     batch_size: u32,
     remaining_messages: u32,
     #[allow(unused)]
@@ -56,45 +60,23 @@ impl<T: DeserializeMessage> Consumer<T> {
         proxy_to_broker_url: Option<String>,
         executor: TaskExecutor,
         batch_size: Option<u32>,
+        unacked_message_redelivery_delay: Option<Duration>,
         options: ConsumerOptions,
     ) -> impl Future<Item = Consumer<T>, Error = Error> {
-        let consumer_id = consumer_id.unwrap_or_else(rand::random);
-        let (resolver, messages) = mpsc::unbounded();
-        let batch_size = batch_size.unwrap_or(1000);
-
-        let opt = options.clone();
         Connection::new(addr, auth_data, proxy_to_broker_url, executor.clone())
-            .and_then({
-                let topic = topic.clone();
-                move |conn| {
-                    conn.sender()
-                        .subscribe(
-                            resolver,
-                            topic,
-                            subscription,
-                            sub_type,
-                            consumer_id,
-                            consumer_name,
-                            opt,
-                        )
-                        .map(move |resp| (resp, conn))
-                }
-            })
-            .and_then(move |(_, conn)| {
-                conn.sender()
-                    .send_flow(consumer_id, batch_size)
-                    .map(move |()| conn)
-            })
-            .map_err(|e| e.into())
-            .map(move |connection| Consumer {
-                connection: Arc::new(connection),
-                topic,
-                id: consumer_id,
-                messages,
-                batch_size,
-                remaining_messages: batch_size,
-                data_type: PhantomData,
-                options,
+            .from_err()
+            .and_then(move |conn| {
+                Consumer::from_connection(
+                    Arc::new(conn),
+                    topic,
+                    subscription,
+                    sub_type,
+                    consumer_id,
+                    consumer_name,
+                    batch_size,
+                    unacked_message_redelivery_delay,
+                    options,
+                )
             })
     }
 
@@ -106,6 +88,7 @@ impl<T: DeserializeMessage> Consumer<T> {
         consumer_id: Option<u64>,
         consumer_name: Option<String>,
         batch_size: Option<u32>,
+        unacked_message_redelivery_delay: Option<Duration>,
         options: ConsumerOptions,
     ) -> impl Future<Item = Consumer<T>, Error = Error> {
         let consumer_id = consumer_id.unwrap_or_else(rand::random);
@@ -129,15 +112,27 @@ impl<T: DeserializeMessage> Consumer<T> {
                     .map(move |()| conn)
             })
             .map_err(|e| Error::Consumer(ConsumerError::Connection(e)))
-            .map(move |connection| Consumer {
-                connection,
-                topic,
-                id: consumer_id,
-                messages,
-                batch_size,
-                remaining_messages: batch_size,
-                data_type: PhantomData,
-                options,
+            .map(move |connection| {
+                //TODO this should be shared among all consumers when using the client
+                //TODO make tick_delay configurable
+                let tick_delay = Duration::from_millis(500);
+                let ack_handler = AckHandler::new(
+                    connection.clone(),
+                    unacked_message_redelivery_delay,
+                    tick_delay,
+                    &connection.executor(),
+                );
+                Consumer {
+                    connection,
+                    topic,
+                    id: consumer_id,
+                    messages,
+                    ack_handler,
+                    batch_size,
+                    remaining_messages: batch_size,
+                    data_type: PhantomData,
+                    options,
+                }
             })
     }
 
@@ -151,43 +146,255 @@ impl<T: DeserializeMessage> Consumer<T> {
 }
 
 pub struct Ack {
-    consumer_id: u64,
-    message_id: Vec<proto::MessageIdData>,
-    connection: Arc<Connection>,
+    message_ids: BTreeMap<u64, Vec<proto::MessageIdData>>,
+    sender: UnboundedSender<AckMessage>,
 }
 
 impl Ack {
-    pub fn new(consumer_id: u64, msg: proto::MessageIdData, connection: Arc<Connection>) -> Ack {
+    fn new(
+        consumer_id: u64,
+        msg: proto::MessageIdData,
+        sender: UnboundedSender<AckMessage>,
+    ) -> Ack {
+        let mut message_ids = BTreeMap::new();
+        message_ids.insert(consumer_id, vec![msg]);
         Ack {
-            consumer_id,
-            message_id: vec![msg],
-            connection,
+            message_ids,
+            sender,
         }
     }
 
-    pub fn join(mut self, other: Ack) -> Self {
-        self.message_id.extend(other.message_id);
+    pub fn join(mut self, mut other: Ack) -> Self {
+        for (consumer_id, message_ids) in other.take_message_ids() {
+            self.message_ids
+                .entry(consumer_id)
+                .or_insert_with(Vec::new)
+                .extend(message_ids);
+        }
         self
     }
 
     pub fn extend<I: IntoIterator<Item = Ack>>(mut self, others: I) -> Self {
-        self.message_id
-            .extend(others.into_iter().flat_map(|ack| ack.message_id));
+        others
+            .into_iter()
+            .flat_map(|mut o| o.take_message_ids())
+            .for_each(|(consumer_id, message_ids)| {
+                self.message_ids
+                    .entry(consumer_id)
+                    .or_insert_with(Vec::new)
+                    .extend(message_ids);
+            });
         self
     }
 
-    pub fn ack(self) {
-        let _ = self
-            .connection
-            .sender()
-            .send_ack(self.consumer_id, self.message_id, false);
+    pub fn ack(mut self) {
+        for (consumer_id, message_ids) in self.take_message_ids() {
+            let _ = self.sender.unbounded_send(AckMessage::Ack {
+                consumer_id,
+                message_ids,
+                cumulative: false,
+            });
+        }
     }
 
-    pub fn cumulative_ack(self) {
-        let _ = self
-            .connection
-            .sender()
-            .send_ack(self.consumer_id, self.message_id, true);
+    pub fn cumulative_ack(mut self) {
+        for (consumer_id, message_ids) in self.take_message_ids() {
+            let _ = self.sender.unbounded_send(AckMessage::Ack {
+                consumer_id,
+                message_ids,
+                cumulative: true,
+            });
+        }
+    }
+
+    pub fn nack(mut self) {
+        self.send_nack();
+    }
+
+    fn take_message_ids(&mut self) -> BTreeMap<u64, Vec<proto::MessageIdData>> {
+        let mut message_ids = BTreeMap::new();
+        std::mem::swap(&mut message_ids, &mut self.message_ids);
+        message_ids
+    }
+
+    fn send_nack(&mut self) {
+        for (consumer_id, message_ids) in self.take_message_ids() {
+            let _ = self.sender.unbounded_send(AckMessage::Nack {
+                consumer_id,
+                message_ids,
+            });
+        }
+    }
+}
+
+impl Drop for Ack {
+    fn drop(&mut self) {
+        if !self.message_ids.is_empty() {
+            self.send_nack();
+        }
+    }
+}
+
+enum AckMessage {
+    Ack {
+        consumer_id: u64,
+        message_ids: Vec<MessageIdData>,
+        cumulative: bool,
+    },
+    Nack {
+        consumer_id: u64,
+        message_ids: Vec<MessageIdData>,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct MessageResend {
+    when: Instant,
+    consumer_id: u64,
+    message_ids: Vec<MessageIdData>,
+}
+
+impl PartialOrd for MessageResend {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+// Ordering is defined for use in a BinaryHeap (a max heap), so ordering is reversed to cause
+// earlier `when`s to be at the front of the queue
+impl Ord for MessageResend {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.when.cmp(&other.when).reverse()
+    }
+}
+
+struct AckHandler {
+    pending_nacks: BinaryHeap<MessageResend>,
+    conn: Arc<Connection>,
+    inbound: Option<UnboundedReceiver<AckMessage>>,
+    unack_redelivery_delay: Option<Duration>,
+    tick_timer: tokio::timer::Interval,
+}
+
+impl AckHandler {
+    /// Create and spawn a new AckHandler future, which will run until the connection fails, or all
+    /// inbound senders are dropped and any pending redelivery messages have been sent
+    pub fn new(
+        conn: Arc<Connection>,
+        redelivery_delay: Option<Duration>,
+        tick_delay: Duration,
+        executor: &TaskExecutor,
+    ) -> UnboundedSender<AckMessage> {
+        let (tx, rx) = mpsc::unbounded();
+        executor.spawn(AckHandler {
+            pending_nacks: BinaryHeap::new(),
+            conn,
+            inbound: Some(rx),
+            unack_redelivery_delay: redelivery_delay,
+            tick_timer: Interval::new_interval(tick_delay),
+        });
+        tx
+    }
+    fn next_ready_resend(&mut self) -> Option<MessageResend> {
+        if let Some(resend) = self.pending_nacks.peek() {
+            if resend.when <= Instant::now() {
+                return self.pending_nacks.pop();
+            }
+        }
+        None
+    }
+    fn next_inbound(&mut self) -> Option<AckMessage> {
+        if let Some(inbound) = &mut self.inbound {
+            match inbound.poll() {
+                Ok(Async::Ready(Some(msg))) => Some(msg),
+                Ok(Async::NotReady) => None,
+                Ok(Async::Ready(None)) | Err(_) => {
+                    self.inbound = None;
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    }
+}
+
+impl Future for AckHandler {
+    type Item = ();
+    type Error = ();
+
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        let mut acks: BTreeMap<(u64, bool), Vec<MessageIdData>> = BTreeMap::new();
+        while let Some(msg) = self.next_inbound() {
+            match msg {
+                AckMessage::Ack {
+                    consumer_id,
+                    message_ids,
+                    cumulative,
+                } => {
+                    acks.entry((consumer_id, cumulative))
+                        .or_insert_with(Vec::new)
+                        .extend(message_ids);
+                }
+                AckMessage::Nack {
+                    consumer_id,
+                    message_ids,
+                } => {
+                    // if timeout is not set, messages will only be redelivered on reconnect,
+                    // so we don't manually send redelivery request
+                    if let Some(nack_timeout) = self.unack_redelivery_delay {
+                        self.pending_nacks.push(MessageResend {
+                            consumer_id,
+                            when: Instant::now() + nack_timeout,
+                            message_ids,
+                        });
+                    }
+                }
+            }
+        }
+        //TODO should this be batched with the tick timer?
+        for ((consumer_id, cumulative), message_ids) in acks {
+            //TODO this should be resilient to reconnects
+            let send_result = self
+                .conn
+                .sender()
+                .send_ack(consumer_id, message_ids, cumulative);
+            if send_result.is_err() {
+                return Err(());
+            }
+        }
+        loop {
+            match self.tick_timer.poll() {
+                Ok(Async::Ready(Some(_))) => {
+                    let mut resends: BTreeMap<u64, Vec<MessageIdData>> = BTreeMap::new();
+                    while let Some(ready) = self.next_ready_resend() {
+                        resends
+                            .entry(ready.consumer_id)
+                            .or_insert_with(Vec::new)
+                            .extend(ready.message_ids);
+                    }
+                    for (consumer_id, message_ids) in resends {
+                        //TODO this should be resilient to reconnects
+                        let send_result = self
+                            .conn
+                            .sender()
+                            .send_redeliver_unacknowleged_messages(consumer_id, message_ids);
+                        if send_result.is_err() {
+                            return Err(());
+                        }
+                    }
+                }
+                Ok(Async::NotReady) => {
+                    if self.inbound.is_none() && self.pending_nacks.is_empty() {
+                        return Ok(Async::Ready(()))
+                    } else {
+                        return Ok(Async::NotReady)
+                    }
+                }
+                Ok(Async::Ready(None)) |
+                Err(_) => return Err(()),
+            }
+        }
     }
 }
 
@@ -227,7 +434,7 @@ impl<T: DeserializeMessage> Stream for Consumer<T> {
             Some(Some((message, payload))) => Ok(Async::Ready(Some(Message {
                 topic: self.topic.clone(),
                 payload: T::deserialize_message(payload),
-                ack: Ack::new(self.id, message.message_id, self.connection.clone()),
+                ack: Ack::new(self.id, message.message_id, self.ack_handler.clone()),
             }))),
             Some(None) => Err(Error::Consumer(ConsumerError::MissingPayload(format!(
                 "Missing payload for message {:?}",
@@ -256,6 +463,7 @@ pub struct ConsumerBuilder<'a, Topic, Subscription, SubscriptionType> {
     consumer_id: Option<u64>,
     consumer_name: Option<String>,
     batch_size: Option<u32>,
+    unacked_message_resend_delay: Option<Duration>,
     consumer_options: Option<ConsumerOptions>,
 
     // Currently only used for multi-topic
@@ -273,6 +481,8 @@ impl<'a> ConsumerBuilder<'a, Unset, Unset, Unset> {
             consumer_id: None,
             consumer_name: None,
             batch_size: None,
+            //TODO what should this default to? None seems incorrect..
+            unacked_message_resend_delay: None,
             consumer_options: None,
             namespace: None,
             topic_refresh: None,
@@ -298,6 +508,7 @@ impl<'a, Subscription, SubscriptionType>
             batch_size: self.batch_size,
             namespace: self.namespace,
             topic_refresh: self.topic_refresh,
+            unacked_message_resend_delay: self.unacked_message_resend_delay,
         }
     }
 
@@ -316,6 +527,7 @@ impl<'a, Subscription, SubscriptionType>
             batch_size: self.batch_size,
             namespace: self.namespace,
             topic_refresh: self.topic_refresh,
+            unacked_message_resend_delay: self.unacked_message_resend_delay,
         }
     }
 }
@@ -336,6 +548,7 @@ impl<'a, Topic, SubscriptionType> ConsumerBuilder<'a, Topic, Unset, Subscription
             batch_size: self.batch_size,
             namespace: self.namespace,
             topic_refresh: self.topic_refresh,
+            unacked_message_resend_delay: self.unacked_message_resend_delay,
         }
     }
 }
@@ -356,6 +569,7 @@ impl<'a, Topic, Subscription> ConsumerBuilder<'a, Topic, Subscription, Unset> {
             batch_size: self.batch_size,
             namespace: self.namespace,
             topic_refresh: self.topic_refresh,
+            unacked_message_resend_delay: self.unacked_message_resend_delay,
         }
     }
 }
@@ -378,6 +592,7 @@ impl<'a, Subscription, SubscriptionType>
             batch_size: self.batch_size,
             namespace: Some(namespace.into()),
             topic_refresh: self.topic_refresh,
+            unacked_message_resend_delay: self.unacked_message_resend_delay,
         }
     }
 
@@ -396,6 +611,7 @@ impl<'a, Subscription, SubscriptionType>
             batch_size: self.batch_size,
             namespace: self.namespace,
             topic_refresh: Some(refresh_interval),
+            unacked_message_resend_delay: self.unacked_message_resend_delay,
         }
     }
 }
@@ -434,6 +650,14 @@ impl<'a, Topic, Subscription, SubscriptionType>
         self.consumer_options = Some(options);
         self
     }
+
+    /// The time after which a message is dropped without being acknowledged or nacked
+    /// that the message is resent. If `None`, messages will only be resent when a
+    /// consumer disconnects with pending unacknowledged messages.
+    pub fn with_unacked_message_resend_delay(mut self, delay: Option<Duration>) -> Self {
+        self.unacked_message_resend_delay = delay;
+        self
+    }
 }
 
 impl<'a> ConsumerBuilder<'a, Set<String>, Set<String>, Set<SubType>> {
@@ -447,6 +671,7 @@ impl<'a> ConsumerBuilder<'a, Set<String>, Set<String>, Set<SubType>> {
             consumer_name,
             consumer_options,
             batch_size,
+            unacked_message_resend_delay,
             ..
         } = self;
 
@@ -457,6 +682,7 @@ impl<'a> ConsumerBuilder<'a, Set<String>, Set<String>, Set<SubType>> {
             batch_size,
             consumer_name,
             consumer_id,
+            unacked_message_resend_delay,
             consumer_options.unwrap_or_else(ConsumerOptions::default),
         )
     }
@@ -474,6 +700,7 @@ impl<'a> ConsumerBuilder<'a, Set<Regex>, Set<String>, Set<SubType>> {
             batch_size,
             topic_refresh,
             namespace,
+            unacked_message_resend_delay,
             ..
         } = self;
         if consumer_id.is_some() {
@@ -494,6 +721,7 @@ impl<'a> ConsumerBuilder<'a, Set<Regex>, Set<String>, Set<SubType>> {
             namespace,
             sub_type,
             topic_refresh,
+            unacked_message_resend_delay,
             ConsumerOptions::default(),
         )
     }
@@ -511,6 +739,7 @@ pub struct MultiTopicConsumer<T: DeserializeMessage> {
     namespace: String,
     topic_regex: Regex,
     pulsar: Pulsar,
+    unacked_message_resend_delay: Option<Duration>,
     consumers: BTreeMap<String, Consumer<T>>,
     topics: VecDeque<String>,
     new_consumers: Option<Box<dyn Future<Item = Vec<Consumer<T>>, Error = Error> + Send>>,
@@ -531,6 +760,7 @@ impl<T: DeserializeMessage> MultiTopicConsumer<T> {
         subscription: S2,
         sub_type: SubType,
         topic_refresh: Duration,
+        unacked_message_resend_delay: Option<Duration>,
         options: ConsumerOptions,
     ) -> Self
     where
@@ -541,6 +771,7 @@ impl<T: DeserializeMessage> MultiTopicConsumer<T> {
             namespace: namespace.into(),
             topic_regex,
             pulsar,
+            unacked_message_resend_delay,
             consumers: BTreeMap::new(),
             topics: VecDeque::new(),
             new_consumers: None,
@@ -645,6 +876,7 @@ impl<T: 'static + DeserializeMessage> Stream for MultiTopicConsumer<T> {
             let sub_type = self.sub_type;
             let existing_topics: BTreeSet<String> = self.consumers.keys().cloned().collect();
             let options = self.options.clone();
+            let unacked_message_resend_delay = self.unacked_message_resend_delay;
 
             let new_consumers = Box::new(
                 self.pulsar
@@ -669,6 +901,7 @@ impl<T: 'static + DeserializeMessage> Stream for MultiTopicConsumer<T> {
                                         None,
                                         None,
                                         None,
+                                        unacked_message_resend_delay,
                                         options.clone(),
                                     )
                                 }),
@@ -703,7 +936,7 @@ impl<T: 'static + DeserializeMessage> Stream for MultiTopicConsumer<T> {
                     }
                 }
             } else {
-                println!("BUG: Missing consumer for topic {}", &topic);
+                eprintln!("BUG: Missing consumer for topic {}", &topic);
             }
             self.topics.push_back(topic);
         }

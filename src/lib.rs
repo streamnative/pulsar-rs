@@ -34,7 +34,7 @@ mod service_discovery;
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use futures::{future, Future, Stream};
     use futures_timer::ext::FutureExt;
@@ -48,6 +48,10 @@ mod tests {
     use crate::Error as PulsarError;
 
     use super::*;
+    use std::collections::BTreeMap;
+    use nom::lib::std::collections::BTreeSet;
+    use rand::Rng;
+    use rand::distributions::Alphanumeric;
 
     #[derive(Debug, Serialize, Deserialize)]
     struct TestData {
@@ -161,5 +165,131 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .wait()
             .unwrap();
+    }
+
+    #[test]
+    #[ignore]
+    fn redelivery() {
+        let addr = "127.0.0.1:6650".parse().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+
+        let pulsar: Pulsar = Pulsar::new(addr, None, runtime.executor()).wait().unwrap();
+
+        let producer = pulsar.producer(None);
+
+        let topic: String = std::iter::repeat(())
+            .map(|()| rand::thread_rng().sample(Alphanumeric))
+            .take(7)
+            .collect();
+
+        let resend_delay = Duration::from_secs(4);
+
+        let consumer: Consumer<TestData> = pulsar
+            .consumer()
+            .with_topic(&topic)
+            .with_consumer_name("test_consumer")
+            .with_subscription_type(SubType::Exclusive)
+            .with_subscription("test_subscription")
+            .with_unacked_message_resend_delay(Some(resend_delay))
+            .build()
+            .wait()
+            .unwrap();
+
+        let message_count = 10;
+
+        future::join_all((0..message_count)
+            .map(|i| {
+                producer.send(
+                    topic.clone(),
+                    &TestData {
+                        data: i.to_string(),
+                    },
+                )
+            }))
+            .map_err(|e| Error::from(e))
+            .timeout(Duration::from_secs(5))
+            .wait()
+            .unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        let mut seen = BTreeSet::new();
+        let start = Instant::now();
+        runtime.executor().spawn(
+            consumer
+                .take(message_count * 2)
+                .map_err(|e| Error::from(e))
+                .for_each(move |Message { payload, ack, .. }| {
+                    let data = payload?;
+                    tx.send(data.data.clone()).unwrap();
+                    if !seen.contains(&data.data) {
+                        seen.insert(data.data);
+                    } else {
+                        //ack the second time around
+                        ack.ack();
+                    }
+                    Ok(())
+                    // no ack
+                })
+                .timeout(Duration::from_secs(15))
+                .map_err(|e| panic!("{}", e))
+        );
+
+        let mut counts = BTreeMap::new();
+
+        let timeout = Instant::now() + Duration::from_secs(2);
+        let mut read_count = 0;
+
+        while read_count < message_count {
+            if let Ok(data) = rx.try_recv() {
+                read_count += 1;
+                *counts.entry(data).or_insert(0) += 1;
+            } else {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if Instant::now() > timeout {
+                panic!("timed out waiting for messages to be read");
+            }
+        };
+        //check all messages we received are correct
+        (0..message_count).for_each(|i| {
+            let count = counts.get(&i.to_string());
+            if counts.get(&i.to_string()) != Some(&1) {
+                println!("Expected {} count to be {}, found {}", i, 1, count.cloned().unwrap_or(0));
+                panic!("{:?}", counts);
+            }
+        });
+        let mut redelivery_start = None;
+        let timeout = Instant::now() + resend_delay + Duration::from_secs(4);
+        while read_count < 2 * message_count {
+            if let Ok(data) = rx.try_recv() {
+                if redelivery_start.is_none() {
+                    redelivery_start = Some(Instant::now());
+                }
+                read_count += 1;
+                *counts.entry(data).or_insert(0) += 1;
+            } else {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if Instant::now() > timeout {
+                println!("{:?}", counts);
+                panic!("timed out waiting for messages to be read");
+            }
+        };
+        let redelivery_start = redelivery_start.unwrap();
+        let expected_redelivery_start = start + resend_delay;
+        println!(
+            "start: 0ms, delay: {}ms, redelivery_start: {}ms, expected_redelivery: {}ms",
+            resend_delay.as_millis(), (redelivery_start - start).as_millis(), (expected_redelivery_start - start).as_millis()
+        );
+        assert!(redelivery_start > expected_redelivery_start - Duration::from_secs(1));
+        assert!(redelivery_start < expected_redelivery_start + Duration::from_secs(1));
+        (0..message_count).for_each(|i| {
+            let count = counts.get(&i.to_string());
+            if count != Some(&2) {
+                println!("Expected {} count to be {}, found {}", i, 2, count.cloned().unwrap_or(0));
+                panic!("{:?}", counts);
+            }
+        });
     }
 }

@@ -396,11 +396,24 @@ impl ConnectionSender {
     pub fn send_ack(
         &self,
         consumer_id: u64,
-        messages: Vec<proto::MessageIdData>,
+        message_ids: Vec<proto::MessageIdData>,
         cumulative: bool,
     ) -> Result<(), ConnectionError> {
         self.tx
-            .unbounded_send(messages::ack(consumer_id, messages, cumulative))
+            .unbounded_send(messages::ack(consumer_id, message_ids, cumulative))
+            .map_err(|_| ConnectionError::Disconnected)
+    }
+
+    pub fn send_redeliver_unacknowleged_messages(
+        &self,
+        consumer_id: u64,
+        message_ids: Vec<proto::MessageIdData>,
+    ) -> Result<(), ConnectionError> {
+        self.tx
+            .unbounded_send(messages::redeliver_unacknowleged_messages(
+                consumer_id,
+                message_ids,
+            ))
             .map_err(|_| ConnectionError::Disconnected)
     }
 
@@ -451,6 +464,7 @@ pub struct Connection {
     sender: ConnectionSender,
     sender_shutdown: Option<oneshot::Sender<()>>,
     receiver_shutdown: Option<oneshot::Sender<()>>,
+    executor: TaskExecutor,
 }
 
 impl Connection {
@@ -525,6 +539,7 @@ impl Connection {
                     sender,
                     sender_shutdown: Some(sender_shutdown_tx),
                     receiver_shutdown: Some(receiver_shutdown_tx),
+                    executor,
                 }
             })
     }
@@ -544,6 +559,10 @@ impl Connection {
     /// Chain to send a message, e.g. conn.sender().send_ping()
     pub fn sender(&self) -> &ConnectionSender {
         &self.sender
+    }
+
+    pub fn executor(&self) -> TaskExecutor {
+        self.executor.clone()
     }
 }
 
@@ -856,6 +875,25 @@ pub(crate) mod messages {
                     validation_error: None,
                     properties: Vec::new(),
                 }),
+                ..Default::default()
+            },
+            payload: None,
+        }
+    }
+
+    pub fn redeliver_unacknowleged_messages(
+        consumer_id: u64,
+        message_ids: Vec<proto::MessageIdData>,
+    ) -> Message {
+        Message {
+            command: proto::BaseCommand {
+                type_: CommandType::RedeliverUnacknowledgedMessages as i32,
+                redeliver_unacknowledged_messages: Some(
+                    proto::CommandRedeliverUnacknowledgedMessages {
+                        consumer_id,
+                        message_ids,
+                    },
+                ),
                 ..Default::default()
             },
             payload: None,
