@@ -10,9 +10,9 @@ use futures::Future;
 use futures::{sync::mpsc, Async, Stream};
 use rand;
 use regex::Regex;
-use tokio::runtime::TaskExecutor;
 use tokio::timer::Interval;
 
+use crate::executor::TaskExecutor;
 use crate::connection::{Authentication, Connection};
 use crate::error::{ConnectionError, ConsumerError, Error};
 use crate::message::{

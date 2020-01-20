@@ -2,6 +2,7 @@ use crate::connection::{Authentication, ConnectionSender};
 use crate::connection_manager::{BrokerAddress, ConnectionManager};
 use crate::error::ServiceDiscoveryError;
 use crate::message::proto::{command_lookup_topic_response, CommandLookupTopicResponse};
+use crate::executor::{PulsarExecutor, TaskExecutor};
 use futures::{
     future::{self, join_all, Either},
     sync::{mpsc, oneshot},
@@ -9,7 +10,6 @@ use futures::{
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::runtime::TaskExecutor;
 use trust_dns_resolver::config::*;
 use trust_dns_resolver::AsyncResolver;
 use url::Url;
@@ -28,7 +28,7 @@ impl ServiceDiscovery {
     pub fn new(
         addr: SocketAddr,
         auth: Option<Authentication>,
-        executor: TaskExecutor,
+        executor: impl PulsarExecutor,
     ) -> impl Future<Item = Self, Error = ServiceDiscoveryError> {
         ConnectionManager::new(addr, auth.clone(), executor.clone())
             .map_err(|e| e.into())
@@ -37,7 +37,7 @@ impl ServiceDiscovery {
 
     pub fn with_manager(
         manager: Arc<ConnectionManager>,
-        executor: TaskExecutor,
+        executor: impl PulsarExecutor,
     ) -> ServiceDiscovery {
         let tx = engine(manager, executor);
         ServiceDiscovery { tx }

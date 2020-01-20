@@ -28,6 +28,7 @@ mod connection;
 mod connection_manager;
 mod consumer;
 mod error;
+mod executor;
 pub mod message;
 pub mod producer;
 mod service_discovery;
@@ -48,10 +49,10 @@ mod tests {
     use crate::Error as PulsarError;
 
     use super::*;
-    use std::collections::BTreeMap;
     use nom::lib::std::collections::BTreeSet;
-    use rand::Rng;
     use rand::distributions::Alphanumeric;
+    use rand::Rng;
+    use std::collections::BTreeMap;
 
     #[derive(Debug, Serialize, Deserialize)]
     struct TestData {
@@ -197,19 +198,18 @@ mod tests {
 
         let message_count = 10;
 
-        future::join_all((0..message_count)
-            .map(|i| {
-                producer.send(
-                    topic.clone(),
-                    &TestData {
-                        data: i.to_string(),
-                    },
-                )
-            }))
-            .map_err(|e| Error::from(e))
-            .timeout(Duration::from_secs(5))
-            .wait()
-            .unwrap();
+        future::join_all((0..message_count).map(|i| {
+            producer.send(
+                topic.clone(),
+                &TestData {
+                    data: i.to_string(),
+                },
+            )
+        }))
+        .map_err(|e| Error::from(e))
+        .timeout(Duration::from_secs(5))
+        .wait()
+        .unwrap();
 
         let (tx, rx) = std::sync::mpsc::channel();
 
@@ -232,7 +232,7 @@ mod tests {
                     // no ack
                 })
                 .timeout(Duration::from_secs(15))
-                .map_err(|e| panic!("{}", e))
+                .map_err(|e| panic!("{}", e)),
         );
 
         let mut counts = BTreeMap::new();
@@ -250,12 +250,17 @@ mod tests {
             if Instant::now() > timeout {
                 panic!("timed out waiting for messages to be read");
             }
-        };
+        }
         //check all messages we received are correct
         (0..message_count).for_each(|i| {
             let count = counts.get(&i.to_string());
             if counts.get(&i.to_string()) != Some(&1) {
-                println!("Expected {} count to be {}, found {}", i, 1, count.cloned().unwrap_or(0));
+                println!(
+                    "Expected {} count to be {}, found {}",
+                    i,
+                    1,
+                    count.cloned().unwrap_or(0)
+                );
                 panic!("{:?}", counts);
             }
         });
@@ -275,19 +280,26 @@ mod tests {
                 println!("{:?}", counts);
                 panic!("timed out waiting for messages to be read");
             }
-        };
+        }
         let redelivery_start = redelivery_start.unwrap();
         let expected_redelivery_start = start + resend_delay;
         println!(
             "start: 0ms, delay: {}ms, redelivery_start: {}ms, expected_redelivery: {}ms",
-            resend_delay.as_millis(), (redelivery_start - start).as_millis(), (expected_redelivery_start - start).as_millis()
+            resend_delay.as_millis(),
+            (redelivery_start - start).as_millis(),
+            (expected_redelivery_start - start).as_millis()
         );
         assert!(redelivery_start > expected_redelivery_start - Duration::from_secs(1));
         assert!(redelivery_start < expected_redelivery_start + Duration::from_secs(1));
         (0..message_count).for_each(|i| {
             let count = counts.get(&i.to_string());
             if count != Some(&2) {
-                println!("Expected {} count to be {}, found {}", i, 2, count.cloned().unwrap_or(0));
+                println!(
+                    "Expected {} count to be {}, found {}",
+                    i,
+                    2,
+                    count.cloned().unwrap_or(0)
+                );
                 panic!("{:?}", counts);
             }
         });
