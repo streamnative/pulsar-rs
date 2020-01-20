@@ -14,11 +14,11 @@ use futures::{
     Async, AsyncSink, Future, IntoFuture, Sink, Stream,
 };
 use tokio::net::TcpStream;
-use tokio::runtime::TaskExecutor;
 use tokio_codec;
 
 use crate::consumer::ConsumerOptions;
 use crate::error::{ConnectionError, SharedError};
+use crate::executor::{PulsarExecutor, TaskExecutor};
 use crate::message::{
     proto::{self, command_subscribe::SubType},
     Codec, Message,

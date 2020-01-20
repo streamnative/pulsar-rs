@@ -7,8 +7,8 @@ use futures::{
     future::{self, Either},
     Future,
 };
-use tokio::runtime::TaskExecutor;
 
+use crate::executor::TaskExecutor;
 use crate::connection::Authentication;
 use crate::connection_manager::{BrokerAddress, ConnectionManager};
 use crate::consumer::{Consumer, ConsumerBuilder, ConsumerOptions, MultiTopicConsumer, Unset};

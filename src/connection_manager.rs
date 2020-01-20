@@ -1,5 +1,6 @@
 use crate::connection::{Authentication, Connection};
 use crate::error::ConnectionError;
+use crate::executor::TaskExecutor;
 use futures::{
     future::{self, Either},
     sync::{mpsc, oneshot},
@@ -8,7 +9,6 @@ use futures::{
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::runtime::TaskExecutor;
 
 /// holds connection information for a broker
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]

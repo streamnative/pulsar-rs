@@ -10,8 +10,8 @@ use futures::{
 };
 use rand;
 use tokio::prelude::*;
-use tokio::runtime::TaskExecutor;
 
+use crate::executor::TaskExecutor;
 use crate::client::SerializeMessage;
 use crate::connection::{Authentication, Connection, SerialId};
 use crate::error::ProducerError;
