@@ -347,9 +347,8 @@ mod tests {
             let count = counts.get(&i.to_string());
             if counts.get(&i.to_string()) != Some(&1) {
                 println!(
-                    "Expected {} count to be {}, found {}",
+                    "Expected {} count to be 1, found {}",
                     i,
-                    1,
                     count.cloned().unwrap_or(0)
                 );
                 panic!("{:?}", counts);
@@ -386,9 +385,8 @@ mod tests {
             let count = counts.get(&i.to_string());
             if count != Some(&2) {
                 println!(
-                    "Expected {} count to be {}, found {}",
+                    "Expected {} count to be 2, found {}",
                     i,
-                    2,
                     count.cloned().unwrap_or(0)
                 );
                 panic!("{:?}", counts);

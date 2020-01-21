@@ -8,11 +8,11 @@ use futures::{
     Future,
 };
 
-use crate::executor::TaskExecutor;
 use crate::connection::Authentication;
 use crate::connection_manager::{BrokerAddress, ConnectionManager};
 use crate::consumer::{Consumer, ConsumerBuilder, ConsumerOptions, MultiTopicConsumer, Unset};
 use crate::error::Error;
+use crate::executor::PulsarExecutor;
 use crate::message::proto::{self, command_subscribe::SubType, CommandSendReceipt};
 use crate::message::Payload;
 use crate::producer::{self, Producer, ProducerOptions, TopicProducer};
@@ -85,19 +85,22 @@ impl SerializeMessage for str {
 //TODO add more DeserializeMessage impls
 
 #[derive(Clone)]
-pub struct Pulsar {
-    manager: Arc<ConnectionManager>,
+pub struct Pulsar<P> {
+    manager: Arc<ConnectionManager<P>>,
     service_discovery: Arc<ServiceDiscovery>,
-    executor: TaskExecutor,
+    executor: P,
 }
 
-impl Pulsar {
+impl<P> Pulsar<P>
+where
+    P: PulsarExecutor,
+{
     pub fn new(
         addr: SocketAddr,
         auth: Option<Authentication>,
-        executor: TaskExecutor,
+        executor: P,
     ) -> impl Future<Item = Self, Error = Error> {
-        ConnectionManager::new(addr, auth.clone(), executor.clone())
+        ConnectionManager::new(addr, auth, executor.clone())
             .from_err()
             .map(|manager| {
                 let manager = Arc::new(manager);
@@ -151,7 +154,7 @@ impl Pulsar {
             .map(|topics| topics.topics)
     }
 
-    pub fn consumer(&self) -> ConsumerBuilder<Unset, Unset, Unset> {
+    pub fn consumer(&self) -> ConsumerBuilder<Unset, Unset, Unset, P> {
         ConsumerBuilder::new(self)
     }
 
@@ -164,7 +167,7 @@ impl Pulsar {
         topic_refresh: Duration,
         unacked_message_resend_delay: Option<Duration>,
         options: ConsumerOptions,
-    ) -> MultiTopicConsumer<T>
+    ) -> MultiTopicConsumer<T, P>
     where
         T: DeserializeMessage,
         S1: Into<String>,
@@ -192,7 +195,7 @@ impl Pulsar {
         consumer_id: Option<u64>,
         unacked_message_redelivery_delay: Option<Duration>,
         options: ConsumerOptions,
-    ) -> impl Future<Item = Consumer<T>, Error = Error>
+    ) -> impl Future<Item = Consumer<T, P>, Error = Error>
     where
         T: DeserializeMessage,
         S1: Into<String>,
@@ -231,11 +234,11 @@ impl Pulsar {
         subscription: S2,
         sub_type: SubType,
         options: ConsumerOptions,
-    ) -> impl Future<Item = Vec<Consumer<T>>, Error = Error> {
+    ) -> impl Future<Item = Vec<Consumer<T, P>>, Error = Error> {
         let manager = self.manager.clone();
 
         self.service_discovery
-            .lookup_partitioned_topic(topic.clone())
+            .lookup_partitioned_topic(topic)
             .from_err()
             .and_then(move |v| {
                 let res =
@@ -273,7 +276,7 @@ impl Pulsar {
         topic: S,
         name: Option<String>,
         options: ProducerOptions,
-    ) -> impl Future<Item = TopicProducer, Error = Error> {
+    ) -> impl Future<Item = TopicProducer<P>, Error = Error> {
         let manager = self.manager.clone();
         let topic = topic.into();
         self.service_discovery
@@ -285,15 +288,15 @@ impl Pulsar {
             })
     }
 
-    pub fn create_partitioned_producers<S: Into<String> + Clone>(
+    pub fn create_partitioned_producers<S: Into<String>>(
         &self,
         topic: S,
         options: ProducerOptions,
-    ) -> impl Future<Item = Vec<TopicProducer>, Error = Error> {
+    ) -> impl Future<Item = Vec<TopicProducer<P>>, Error = Error> {
         let manager = self.manager.clone();
 
         self.service_discovery
-            .lookup_partitioned_topic(topic.clone())
+            .lookup_partitioned_topic(topic)
             .from_err()
             .and_then(move |v| {
                 let res = v
@@ -323,7 +326,7 @@ impl Pulsar {
     ) -> impl Future<Item = CommandSendReceipt, Error = Error> {
         match M::serialize_message(message) {
             Ok(message) => Either::A(self.send_raw(message, topic, options)),
-            Err(e) => Either::B(future::failed(e.into())),
+            Err(e) => Either::B(future::failed(e)),
         }
     }
 
@@ -341,7 +344,7 @@ impl Pulsar {
         Producer::new(self.clone(), options.unwrap_or_default())
     }
 
-    pub(crate) fn executor(&self) -> &TaskExecutor {
+    pub(crate) fn executor(&self) -> &P {
         &self.executor
     }
 }

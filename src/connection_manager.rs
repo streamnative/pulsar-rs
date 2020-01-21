@@ -1,6 +1,6 @@
 use crate::connection::{Authentication, Connection};
 use crate::error::ConnectionError;
-use crate::executor::TaskExecutor;
+use crate::executor::PulsarExecutor;
 use futures::{
     future::{self, Either},
     sync::{mpsc, oneshot},
@@ -27,28 +27,31 @@ pub struct BrokerAddress {
 /// interacting with a cluster. It will automatically follow redirects
 /// or use a proxy, and aggregate broker connections
 #[derive(Clone)]
-pub struct ConnectionManager {
-    tx: mpsc::UnboundedSender<Query>,
+pub struct ConnectionManager<P> {
+    tx: mpsc::UnboundedSender<Query<P>>,
     pub address: SocketAddr,
 }
 
-impl ConnectionManager {
+impl<P> ConnectionManager<P>
+where
+    P: PulsarExecutor,
+{
     pub fn new(
         addr: SocketAddr,
         auth: Option<Authentication>,
-        executor: TaskExecutor,
+        executor: P,
     ) -> impl Future<Item = Self, Error = ConnectionError> {
         Connection::new(addr.to_string(), auth.clone(), None, executor.clone())
-            .map_err(|e| e.into())
+            .map_err(|e| e)
             .and_then(move |conn| ConnectionManager::from_connection(conn, auth, addr, executor))
     }
 
     pub fn from_connection(
-        connection: Connection,
+        connection: Connection<P>,
         auth: Option<Authentication>,
         address: SocketAddr,
-        executor: TaskExecutor,
-    ) -> Result<ConnectionManager, ConnectionError> {
+        executor: P,
+    ) -> Result<ConnectionManager<P>, ConnectionError> {
         let tx = engine(Arc::new(connection), auth, executor);
         Ok(ConnectionManager { tx, address })
     }
@@ -58,7 +61,7 @@ impl ConnectionManager {
     /// creates a connection if not available
     pub fn get_base_connection(
         &self,
-    ) -> impl Future<Item = Arc<Connection>, Error = ConnectionError> {
+    ) -> impl Future<Item = Arc<Connection<P>>, Error = ConnectionError> {
         if self.tx.is_closed() {
             return Either::A(future::err(ConnectionError::Shutdown));
         }
@@ -77,7 +80,7 @@ impl ConnectionManager {
     pub fn get_connection(
         &self,
         broker: &BrokerAddress,
-    ) -> impl Future<Item = Arc<Connection>, Error = ConnectionError> {
+    ) -> impl Future<Item = Arc<Connection<P>>, Error = ConnectionError> {
         if self.tx.is_closed() {
             return Either::A(future::err(ConnectionError::Shutdown));
         }
@@ -97,7 +100,7 @@ impl ConnectionManager {
     pub fn get_connection_from_url(
         &self,
         broker: Option<String>,
-    ) -> impl Future<Item = Option<(bool, Arc<Connection>)>, Error = ConnectionError> {
+    ) -> impl Future<Item = Option<(bool, Arc<Connection<P>>)>, Error = ConnectionError> {
         if self.tx.is_closed() {
             return Either::A(future::err(ConnectionError::Shutdown));
         }
@@ -112,23 +115,23 @@ impl ConnectionManager {
 }
 
 /// enum holding the service discovery query sent to the engine function
-enum Query {
-    Base(oneshot::Sender<Result<Arc<Connection>, ConnectionError>>),
+enum Query<P> {
+    Base(oneshot::Sender<Result<Arc<Connection<P>>, ConnectionError>>),
     /// broker URL
     Get(
         Option<String>,
-        oneshot::Sender<Result<Option<(bool, Arc<Connection>)>, ConnectionError>>,
+        oneshot::Sender<Result<Option<(bool, Arc<Connection<P>>)>, ConnectionError>>,
     ),
     Connect(
         BrokerAddress,
         /// channel to send back the response
-        oneshot::Sender<Result<Arc<Connection>, ConnectionError>>,
+        oneshot::Sender<Result<Arc<Connection<P>>, ConnectionError>>,
     ),
     Connected(
         BrokerAddress,
-        Connection,
+        Connection<P>,
         /// channel to send back the response
-        oneshot::Sender<Result<Arc<Connection>, ConnectionError>>,
+        oneshot::Sender<Result<Arc<Connection<P>>, ConnectionError>>,
     ),
 }
 
@@ -136,18 +139,18 @@ enum Query {
 ///
 /// this function loops over the query channel and launches lookups.
 /// It can send a message to itself for further queries if necessary.
-fn engine(
-    connection: Arc<Connection>,
+fn engine<P: PulsarExecutor>(
+    connection: Arc<Connection<P>>,
     auth: Option<Authentication>,
-    executor: TaskExecutor,
-) -> mpsc::UnboundedSender<Query> {
+    executor: P,
+) -> mpsc::UnboundedSender<Query<P>> {
     let (tx, rx) = mpsc::unbounded();
-    let mut connections: HashMap<BrokerAddress, Arc<Connection>> = HashMap::new();
+    let mut connections: HashMap<BrokerAddress, Arc<Connection<P>>> = HashMap::new();
     let executor2 = executor.clone();
     let tx2 = tx.clone();
 
     let f = move || {
-        rx.for_each(move |query: Query| {
+        rx.for_each(move |query: Query<_>| {
             let exe = executor2.clone();
             let self_tx = tx2.clone();
 
@@ -194,10 +197,7 @@ fn engine(
                 }
             }
         })
-        .map_err(|_| {
-            error!("service discovery engine stopped");
-            ()
-        })
+        .map_err(|_| error!("service discovery engine stopped"))
     };
 
     executor.spawn(f());
@@ -205,12 +205,12 @@ fn engine(
     tx
 }
 
-fn connect(
+fn connect<P: PulsarExecutor>(
     broker: BrokerAddress,
     auth: Option<Authentication>,
-    tx: oneshot::Sender<Result<Arc<Connection>, ConnectionError>>,
-    self_tx: mpsc::UnboundedSender<Query>,
-    exe: TaskExecutor,
+    tx: oneshot::Sender<Result<Arc<Connection<P>>, ConnectionError>>,
+    self_tx: mpsc::UnboundedSender<Query<P>>,
+    exe: P,
 ) -> impl Future<Item = (), Error = ()> {
     let proxy_url = if broker.proxy {
         Some(broker.broker_url.clone())

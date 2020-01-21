@@ -18,7 +18,7 @@ use tokio_codec;
 
 use crate::consumer::ConsumerOptions;
 use crate::error::{ConnectionError, SharedError};
-use crate::executor::{PulsarExecutor, TaskExecutor};
+use crate::executor::PulsarExecutor;
 use crate::message::{
     proto::{self, command_subscribe::SubType},
     Codec, Message,
@@ -129,20 +129,18 @@ impl<S: Stream<Item = Message, Error = ConnectionError>> Future for Receiver<S> 
                         {
                             let _ = consumer.unbounded_send(msg);
                         }
-                    } else {
-                        if let Some(request_key) = msg.request_key() {
-                            if let Some(resolver) = self.pending_requests.remove(&request_key) {
-                                // We don't care if the receiver has dropped their future
-                                let _ = resolver.send(msg);
-                            } else {
-                                self.received_messages.insert(request_key, msg);
-                            }
+                    } else if let Some(request_key) = msg.request_key() {
+                        if let Some(resolver) = self.pending_requests.remove(&request_key) {
+                            // We don't care if the receiver has dropped their future
+                            let _ = resolver.send(msg);
                         } else {
-                            println!(
-                                "Received message with no request_id; dropping. Message: {:?}",
-                                msg.command
-                            );
+                            self.received_messages.insert(request_key, msg);
                         }
+                    } else {
+                        println!(
+                            "Received message with no request_id; dropping. Message: {:?}",
+                            msg.command
+                        );
                     }
                 }
                 Ok(Async::Ready(None)) => {
@@ -227,9 +225,15 @@ impl<S: Sink<SinkItem = Message, SinkError = ConnectionError>> Future for Sender
 #[derive(Clone)]
 pub struct SerialId(Arc<AtomicUsize>);
 
-impl SerialId {
-    pub fn new() -> SerialId {
+impl Default for SerialId {
+    fn default() -> Self {
         SerialId(Arc::new(AtomicUsize::new(0)))
+    }
+}
+
+impl SerialId {
+    pub fn new() -> Self {
+        Self::default()
     }
     pub fn get(&self) -> u64 {
         self.0.fetch_add(1, Ordering::Relaxed) as u64
@@ -459,21 +463,24 @@ impl ConnectionSender {
     }
 }
 
-pub struct Connection {
+pub struct Connection<P> {
     addr: String,
     sender: ConnectionSender,
     sender_shutdown: Option<oneshot::Sender<()>>,
     receiver_shutdown: Option<oneshot::Sender<()>>,
-    executor: TaskExecutor,
+    executor: P,
 }
 
-impl Connection {
+impl<P> Connection<P>
+where
+    P: PulsarExecutor,
+{
     pub fn new(
         addr: String,
         auth_data: Option<Authentication>,
         proxy_to_broker_url: Option<String>,
-        executor: TaskExecutor,
-    ) -> impl Future<Item = Connection, Error = ConnectionError> {
+        executor: P,
+    ) -> impl Future<Item = Connection<P>, Error = ConnectionError> {
         SocketAddr::from_str(&addr)
             .into_future()
             .map_err(|e| ConnectionError::SocketAddr(e.to_string()))
@@ -561,12 +568,12 @@ impl Connection {
         &self.sender
     }
 
-    pub fn executor(&self) -> TaskExecutor {
+    pub fn executor(&self) -> P {
         self.executor.clone()
     }
 }
 
-impl Drop for Connection {
+impl<P> Drop for Connection<P> {
     fn drop(&mut self) {
         if let Some(shutdown) = self.sender_shutdown.take() {
             let _ = shutdown.send(());
@@ -582,11 +589,6 @@ where
     F: FnOnce(Message) -> Option<T>,
 {
     if message.command.error.is_some() {
-        Err(ConnectionError::PulsarError(format!(
-            "{:?}",
-            message.command.error.unwrap()
-        )))
-    } else if message.command.send_error.is_some() {
         Err(ConnectionError::PulsarError(format!(
             "{:?}",
             message.command.error.unwrap()

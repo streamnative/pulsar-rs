@@ -1,9 +1,18 @@
 use futures::future::{ExecuteError, Executor, Future};
 use std::sync::Arc;
 
-pub trait PulsarExecutor: Executor<BoxSendFuture> + Send + Sync + 'static {}
+pub trait PulsarExecutor: Executor<BoxSendFuture> + Send + Sync + 'static + Clone {
+    fn spawn<F>(&self, f: F)
+    where
+        F: Future<Item = (), Error = ()> + Send + 'static,
+    {
+        if self.execute(Box::new(f)).is_err() {
+            panic!("no executor available")
+        }
+    }
+}
 
-impl<T: Executor<BoxSendFuture> + Send + Sync + 'static> PulsarExecutor for T {}
+impl<T: Executor<BoxSendFuture> + Send + Sync + Clone + 'static> PulsarExecutor for T {}
 
 type BoxSendFuture = Box<dyn Future<Item = (), Error = ()> + Send + 'static>;
 
@@ -19,14 +28,6 @@ impl TaskExecutor {
     {
         Self {
             inner: Arc::new(exec),
-        }
-    }
-
-    pub(crate) fn spawn<F>(&self, f: F) 
-        where F: Future<Item = (), Error = ()> + Send + 'static
-    {
-        if let Err(_) = self.execute(f) {
-            panic!("no executor available")
         }
     }
 }
