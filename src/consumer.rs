@@ -386,13 +386,12 @@ impl Future for AckHandler {
                 }
                 Ok(Async::NotReady) => {
                     if self.inbound.is_none() && self.pending_nacks.is_empty() {
-                        return Ok(Async::Ready(()))
+                        return Ok(Async::Ready(()));
                     } else {
-                        return Ok(Async::NotReady)
+                        return Ok(Async::NotReady);
                     }
                 }
-                Ok(Async::Ready(None)) |
-                Err(_) => return Err(()),
+                Ok(Async::Ready(None)) | Err(_) => return Err(()),
             }
         }
     }
