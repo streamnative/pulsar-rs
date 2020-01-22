@@ -1,7 +1,7 @@
 use crate::connection::{Authentication, ConnectionSender};
 use crate::connection_manager::{BrokerAddress, ConnectionManager};
 use crate::error::ServiceDiscoveryError;
-use crate::executor::PulsarExecutor;
+use crate::executor::{PulsarExecutor, TaskExecutor};
 use crate::message::proto::{command_lookup_topic_response, CommandLookupTopicResponse};
 use futures::{
     future::{self, join_all, Either},
@@ -25,20 +25,19 @@ pub struct ServiceDiscovery {
 }
 
 impl ServiceDiscovery {
-    pub fn new<P: PulsarExecutor>(
+    pub fn new<E: PulsarExecutor>(
         addr: SocketAddr,
         auth: Option<Authentication>,
-        executor: P,
+        executor: E,
     ) -> impl Future<Item = Self, Error = ServiceDiscoveryError> {
+        let executor = TaskExecutor::new(executor);
         ConnectionManager::new(addr, auth, executor.clone())
             .map_err(|e| e.into())
             .map(move |conn| ServiceDiscovery::with_manager(Arc::new(conn), executor))
     }
 
-    pub fn with_manager<P: PulsarExecutor>(
-        manager: Arc<ConnectionManager<P>>,
-        executor: P,
-    ) -> Self {
+    pub fn with_manager<E: PulsarExecutor>(manager: Arc<ConnectionManager>, executor: E) -> Self {
+        let executor = TaskExecutor::new(executor);
         let tx = engine(manager, executor);
         ServiceDiscovery { tx }
     }
@@ -162,10 +161,7 @@ fn lookup_topic<S: Into<String>>(
 ///
 /// this function loops over the query channel and launches lookups.
 /// It can send a message to itself for further queries if necessary.
-fn engine<P: PulsarExecutor>(
-    manager: Arc<ConnectionManager<P>>,
-    executor: P,
-) -> mpsc::UnboundedSender<Query> {
+fn engine(manager: Arc<ConnectionManager>, executor: TaskExecutor) -> mpsc::UnboundedSender<Query> {
     let (tx, rx) = mpsc::unbounded();
     let tx2 = tx.clone();
     let (resolver, resolver_future) =
@@ -323,14 +319,14 @@ fn convert_lookup_response(
     })
 }
 
-fn lookup<P: PulsarExecutor>(
+fn lookup(
     topic: String,
     proxied_query: bool,
     sender: &ConnectionSender,
     resolver: AsyncResolver,
     base_address: SocketAddr,
     authoritative: bool,
-    manager: Arc<ConnectionManager<P>>,
+    manager: Arc<ConnectionManager>,
     tx: oneshot::Sender<Result<BrokerAddress, ServiceDiscoveryError>>,
     self_tx: mpsc::UnboundedSender<Query>,
 ) -> impl Future<Item = (), Error = ()> {

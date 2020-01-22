@@ -18,7 +18,7 @@ use tokio_codec;
 
 use crate::consumer::ConsumerOptions;
 use crate::error::{ConnectionError, SharedError};
-use crate::executor::PulsarExecutor;
+use crate::executor::{PulsarExecutor, TaskExecutor};
 use crate::message::{
     proto::{self, command_subscribe::SubType},
     Codec, Message,
@@ -463,24 +463,21 @@ impl ConnectionSender {
     }
 }
 
-pub struct Connection<P> {
+pub struct Connection {
     addr: String,
     sender: ConnectionSender,
     sender_shutdown: Option<oneshot::Sender<()>>,
     receiver_shutdown: Option<oneshot::Sender<()>>,
-    executor: P,
+    executor: TaskExecutor,
 }
 
-impl<P> Connection<P>
-where
-    P: PulsarExecutor,
-{
-    pub fn new(
+impl Connection {
+    pub fn new<E: PulsarExecutor>(
         addr: String,
         auth_data: Option<Authentication>,
         proxy_to_broker_url: Option<String>,
-        executor: P,
-    ) -> impl Future<Item = Connection<P>, Error = ConnectionError> {
+        executor: E,
+    ) -> impl Future<Item = Connection, Error = ConnectionError> {
         SocketAddr::from_str(&addr)
             .into_future()
             .map_err(|e| ConnectionError::SocketAddr(e.to_string()))
@@ -528,6 +525,7 @@ where
                 let error = SharedError::new();
                 let (receiver_shutdown_tx, receiver_shutdown_rx) = oneshot::channel();
                 let (sender_shutdown_tx, sender_shutdown_rx) = oneshot::channel();
+                let executor = TaskExecutor::new(executor);
 
                 executor.spawn(Receiver::new(
                     stream,
@@ -568,12 +566,12 @@ where
         &self.sender
     }
 
-    pub fn executor(&self) -> P {
+    pub fn executor(&self) -> impl PulsarExecutor {
         self.executor.clone()
     }
 }
 
-impl<P> Drop for Connection<P> {
+impl Drop for Connection {
     fn drop(&mut self) {
         if let Some(shutdown) = self.sender_shutdown.take() {
             let _ = shutdown.send(());
