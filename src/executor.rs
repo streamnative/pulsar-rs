@@ -8,12 +8,12 @@ impl<T: Executor<BoxSendFuture> + Send + Sync + 'static> PulsarExecutor for T {}
 type BoxSendFuture = Box<dyn Future<Item = (), Error = ()> + Send + 'static>;
 
 #[derive(Clone)]
-pub(crate) struct TaskExecutor {
+pub struct TaskExecutor {
     inner: Arc<dyn Executor<BoxSendFuture> + Send + Sync + 'static>,
 }
 
 impl TaskExecutor {
-    pub(crate) fn new<E>(exec: E) -> Self
+    pub fn new<E>(exec: E) -> Self
     where
         E: PulsarExecutor,
     {
@@ -21,7 +21,7 @@ impl TaskExecutor {
             inner: Arc::new(exec),
         }
     }
-    pub(crate) fn spawn<F>(&self, f: F)
+    pub fn spawn<F>(&self, f: F)
     where
         F: Future<Item = (), Error = ()> + Send + 'static,
     {

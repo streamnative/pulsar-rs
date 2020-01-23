@@ -566,7 +566,7 @@ impl Connection {
         &self.sender
     }
 
-    pub fn executor(&self) -> impl PulsarExecutor {
+    pub fn executor(&self) -> TaskExecutor {
         self.executor.clone()
     }
 }
