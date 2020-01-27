@@ -21,19 +21,18 @@ travis-ci = {repository = "wyyerd/pulsar-rs"}
 [dependencies]
 bytes = "0.4.0"
 crc = "1.0.0"
-futures = "0.1.23"
 nom = "5.0.0"
 prost = "0.5.0"
 prost-derive = "0.5.0"
-tokio = "0.1.11"
-tokio-codec = "0.1.1"
 rand = "0.7"
 chrono = "0.4.6"
-futures-timer = "0.1.1"
 log = "0.4.6"
 trust-dns-resolver = "0.12"
 url = "2.1"
 regex = "1.1.7"
+futures = "0.3.1"
+tokio = { version = "0.2.10", features = ["tcp"] }
+tokio-codec = "0.1.1"
 
 [dev-dependencies]
 serde = { version = "1.0.101", features = ["derive"] }
