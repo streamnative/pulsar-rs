@@ -5,9 +5,15 @@ use tokio_util::codec::{Decoder, Encoder};
 use nom::number::streaming::{be_u16, be_u32};
 use prost::{self, Message as ImplProtobuf};
 use std::io::Cursor;
+use std::convert::TryFrom;
 
-pub use self::proto::BaseCommand;
-pub use self::proto::MessageMetadata as Metadata;
+pub use self::proto::*;
+use crate::proto::proto::base_command::Type;
+use crate::proto::proto::command_ack::{AckType, ValidationError};
+use crate::proto::proto::command_lookup_topic_response::LookupType;
+use crate::proto::proto::command_subscribe::{InitialPosition, SubType};
+use crate::proto::proto::get_topics::Mode;
+use futures::io::ErrorKind;
 
 #[derive(Debug, Clone, PartialEq, Ord, PartialOrd, Eq)]
 pub enum RequestKey {
@@ -240,6 +246,189 @@ named!(payload_frame<PayloadFrame>,
         })
     )
 );
+
+impl TryFrom<i32> for AuthMethod {
+    type Error = Error;
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            value if value == AuthMethod::None as i32 => Ok(AuthMethod::None),
+            value if value == AuthMethod::YcaV1 as i32 => Ok(AuthMethod::YcaV1),
+            value if value == AuthMethod::Athens as i32 => Ok(AuthMethod::Athens),
+            unknown => Err(Error::unknown_variant(format!("Expected AuthMethod::None, found {}", unknown)))
+        }
+    }
+}
+impl TryFrom<i32> for base_command::Type {
+    type Error = Error;
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            value if value == Type::Connect as i32 => Ok(Type::Connect),
+            value if value == Type::Connected as i32 => Ok(Type::Connected),
+            value if value == Type::Subscribe as i32 => Ok(Type::Subscribe),
+            value if value == Type::Producer as i32 => Ok(Type::Producer),
+            value if value == Type::Send as i32 => Ok(Type::Send),
+            value if value == Type::SendReceipt as i32 => Ok(Type::SendReceipt),
+            value if value == Type::SendError as i32 => Ok(Type::SendError),
+            value if value == Type::Message as i32 => Ok(Type::Message),
+            value if value == Type::Ack as i32 => Ok(Type::Ack),
+            value if value == Type::Flow as i32 => Ok(Type::Flow),
+            value if value == Type::Unsubscribe as i32 => Ok(Type::Unsubscribe),
+            value if value == Type::Success as i32 => Ok(Type::Success),
+            value if value == Type::Error as i32 => Ok(Type::Error),
+            value if value == Type::CloseProducer as i32 => Ok(Type::CloseProducer),
+            value if value == Type::CloseConsumer as i32 => Ok(Type::CloseConsumer),
+            value if value == Type::ProducerSuccess as i32 => Ok(Type::ProducerSuccess),
+            value if value == Type::Ping as i32 => Ok(Type::Ping),
+            value if value == Type::Pong as i32 => Ok(Type::Pong),
+            value if value == Type::RedeliverUnacknowledgedMessages as i32 => Ok(Type::RedeliverUnacknowledgedMessages),
+            value if value == Type::PartitionedMetadata as i32 => Ok(Type::PartitionedMetadata),
+            value if value == Type::PartitionedMetadataResponse as i32 => Ok(Type::PartitionedMetadataResponse),
+            value if value == Type::Lookup as i32 => Ok(Type::Lookup),
+            value if value == Type::LookupResponse as i32 => Ok(Type::LookupResponse),
+            value if value == Type::ConsumerStats as i32 => Ok(Type::ConsumerStats),
+            value if value == Type::ConsumerStatsResponse as i32 => Ok(Type::ConsumerStatsResponse),
+            value if value == Type::ReachedEndOfTopic as i32 => Ok(Type::ReachedEndOfTopic),
+            value if value == Type::Seek as i32 => Ok(Type::Seek),
+            value if value == Type::GetLastMessageId as i32 => Ok(Type::GetLastMessageId),
+            value if value == Type::GetLastMessageIdResponse as i32 => Ok(Type::GetLastMessageIdResponse),
+            value if value == Type::ActiveConsumerChange as i32 => Ok(Type::ActiveConsumerChange),
+            value if value == Type::GetTopicsOfNamespace as i32 => Ok(Type::GetTopicsOfNamespace),
+            value if value == Type::GetTopicsOfNamespaceResponse as i32 => Ok(Type::GetTopicsOfNamespaceResponse),
+            value if value == Type::GetSchema as i32 => Ok(Type::GetSchema),
+            value if value == Type::GetSchemaResponse as i32 => Ok(Type::GetSchemaResponse),
+            unknown => Err(Error::unknown_variant(format!("Expected AuthMethod::YcaV1, found {}", unknown)))
+        }
+    }
+}
+impl TryFrom<i32> for command_ack::AckType {
+    type Error = Error;
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            value if value == AckType::Individual as i32 => Ok(AckType::Individual),
+            value if value == AckType::Cumulative as i32 => Ok(AckType::Cumulative),
+            unknown => Err(Error::unknown_variant(format!("Expected AuthMethod::Athens, found {}", unknown)))
+        }
+    }
+}
+impl TryFrom<i32> for command_ack::ValidationError {
+    type Error = Error;
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            value if value == ValidationError::UncompressedSizeCorruption as i32 => Ok(ValidationError::UncompressedSizeCorruption),
+            value if value == ValidationError::DecompressionError as i32 => Ok(ValidationError::DecompressionError),
+            value if value == ValidationError::ChecksumMismatch as i32 => Ok(ValidationError::ChecksumMismatch),
+            value if value == ValidationError::BatchDeSerializeError as i32 => Ok(ValidationError::BatchDeSerializeError),
+            value if value == ValidationError::DecryptionError as i32 => Ok(ValidationError::DecryptionError),
+            unknown => Err(Error::unknown_variant(format!("Expected Type::Connect, found {}", unknown)))
+        }
+    }
+}
+impl TryFrom<i32> for command_lookup_topic_response::LookupType {
+    type Error = Error;
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        use command_lookup_topic_response::LookupType;
+        match value {
+            value if value == LookupType::Redirect as i32 => Ok(LookupType::Redirect),
+            value if value == LookupType::Connect as i32 => Ok(LookupType::Connect),
+            value if value == LookupType::Failed as i32 => Ok(LookupType::Failed),
+            unknown => Err(Error::unknown_variant(format!("Expected Type::Connected, found {}", unknown)))
+        }
+    }
+}
+impl TryFrom<i32> for command_partitioned_topic_metadata_response::LookupType {
+    type Error = Error;
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        use command_partitioned_topic_metadata_response::LookupType;
+        match value {
+            value if value == LookupType::Success as i32 => Ok(LookupType::Success),
+            value if value == LookupType::Failed as i32 => Ok(LookupType::Failed),
+            unknown => Err(Error::unknown_variant(format!("Expected Type::Subscribe, found {}", unknown)))
+        }
+    }
+}
+impl TryFrom<i32> for command_subscribe::InitialPosition {
+    type Error = Error;
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            value if value == InitialPosition::Latest as i32 => Ok(InitialPosition::Latest),
+            value if value == InitialPosition::Earliest as i32 => Ok(InitialPosition::Earliest),
+            unknown => Err(Error::unknown_variant(format!("Expected Type::Producer, found {}", unknown)))
+        }
+    }
+}
+impl TryFrom<i32> for command_subscribe::SubType {
+    type Error = Error;
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            value if value == SubType::Exclusive as i32 => Ok(SubType::Exclusive),
+            value if value == SubType::Shared as i32 => Ok(SubType::Shared),
+            value if value == SubType::Failover as i32 => Ok(SubType::Failover),
+            unknown => Err(Error::unknown_variant(format!("Expected Type::Send, found {}", unknown)))
+        }
+    }
+}
+impl TryFrom<i32> for CompressionType {
+    type Error = Error;
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            value if value == CompressionType::None as i32 => Ok(CompressionType::None),
+            value if value == CompressionType::Lz4 as i32 => Ok(CompressionType::Lz4),
+            value if value == CompressionType::Zlib as i32 => Ok(CompressionType::Zlib),
+            unknown => Err(Error::unknown_variant(format!("Expected Type::SendReceipt, found {}", unknown)))
+        }
+    }
+}
+impl TryFrom<i32> for get_topics::Mode {
+    type Error = Error;
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            value if value == Mode::Persistent as i32 => Ok(Mode::Persistent),
+            value if value == Mode::NonPersistent as i32 => Ok(Mode::NonPersistent),
+            value if value == Mode::All as i32 => Ok(Mode::All),
+            unknown => Err(Error::unknown_variant(format!("Expected Type::SendError, found {}", unknown)))
+        }
+    }
+}
+impl TryFrom<i32> for schema::Type {
+    type Error = Error;
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            value if value == Type::None as i32 => Ok(Type::None),
+            value if value == Type::String as i32 => Ok(Type::String),
+            value if value == Type::Json as i32 => Ok(Type::Json),
+            value if value == Type::Protobuf as i32 => Ok(Type::Protobuf),
+            value if value == Type::Avro as i32 => Ok(Type::Avro),
+            unknown => Err(Error::unknown_variant(format!("Expected Type::Message, found {}", unknown)))
+        }
+    }
+}
+impl TryFrom<i32> for ServerError {
+    type Error = Error;
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            value if value == ServerError::UnknownError as i32 => Ok(ServerError::UnknownError),
+            value if value == ServerError::MetadataError as i32 => Ok(ServerError::MetadataError),
+            value if value == ServerError::PersistenceError as i32 => Ok(ServerError::PersistenceError),
+            value if value == ServerError::AuthenticationError as i32 => Ok(ServerError::AuthenticationError),
+            value if value == ServerError::AuthorizationError as i32 => Ok(ServerError::AuthorizationError),
+            value if value == ServerError::ConsumerBusy as i32 => Ok(ServerError::ConsumerBusy),
+            value if value == ServerError::ServiceNotReady as i32 => Ok(ServerError::ServiceNotReady),
+            value if value == ServerError::ProducerBlockedQuotaExceededError as i32 => Ok(ServerError::ProducerBlockedQuotaExceededError),
+            value if value == ServerError::ProducerBlockedQuotaExceededException as i32 => Ok(ServerError::ProducerBlockedQuotaExceededException),
+            value if value == ServerError::ChecksumError as i32 => Ok(ServerError::ChecksumError),
+            value if value == ServerError::UnsupportedVersionError as i32 => Ok(ServerError::UnsupportedVersionError),
+            value if value == ServerError::TopicNotFound as i32 => Ok(ServerError::TopicNotFound),
+            value if value == ServerError::SubscriptionNotFound as i32 => Ok(ServerError::SubscriptionNotFound),
+            value if value == ServerError::ConsumerNotFound as i32 => Ok(ServerError::ConsumerNotFound),
+            value if value == ServerError::TooManyRequests as i32 => Ok(ServerError::TooManyRequests),
+            value if value == ServerError::TopicTerminatedError as i32 => Ok(ServerError::TopicTerminatedError),
+            value if value == ServerError::ProducerBusy as i32 => Ok(ServerError::ProducerBusy),
+            value if value == ServerError::InvalidTopicName as i32 => Ok(ServerError::InvalidTopicName),
+            unknown => Err(Error::unknown_variant(format!("Expected Type::Ack, found {}", unknown)))
+        }
+    }
+}
+
 
 #[rustfmt::skip]
 pub mod proto {
@@ -1060,7 +1249,7 @@ impl From<prost::DecodeError> for Error {
 
 #[cfg(test)]
 mod tests {
-    use crate::message::Codec;
+    use crate::proto::Codec;
     use bytes::BytesMut;
     use tokio_util::codec::{Decoder, Encoder};
 

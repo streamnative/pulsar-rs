@@ -19,24 +19,23 @@ categories = ["api-bindings"]
 travis-ci = {repository = "wyyerd/pulsar-rs"}
 
 [dependencies]
-bytes = "0.4.0"
+bytes = "0.5.4"
 crc = "1.0.0"
-nom = "5.0.0"
-prost = "0.5.0"
-prost-derive = "0.5.0"
+prost = "0.6"
+prost-derive = "0.6"
 rand = "0.7"
 chrono = "0.4.6"
 log = "0.4.6"
-trust-dns-resolver = "0.12"
 url = "2.1"
 regex = "1.1.7"
 futures = "0.3.1"
-tokio = { version = "0.2.10", features = ["tcp"] }
-tokio-codec = "0.1.1"
+tokio = { version = "0.2.10", features = ["tcp", "dns", "time"] }
+tokio-util = { version = "0.2.0", features = ["codec"] }
+compress = "0.1.2"
 
 [dev-dependencies]
 serde = { version = "1.0.101", features = ["derive"] }
 serde_json = "1.0.40"
 
 [build-dependencies]
-prost-build = "0.5.0"
+prost-build = "0.6"

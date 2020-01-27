@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Debug;
 use std::str::FromStr;
 use std::sync::{
@@ -7,15 +7,336 @@ use std::sync::{
 };
 
 use crate::error::Error;
+use crate::util::SerialId;
 
-use tokio::prelude::*;
-use futures::{self, channel::{mpsc, oneshot}};
+use crate::proto::{self, Codec, RequestKey, MessageIdData};
+use futures::{self, channel::{mpsc, oneshot}, SinkExt, StreamExt, Future, Sink, Stream};
 use tokio::net::{TcpStream, ToSocketAddrs};
+use tokio::prelude::*;
+use tokio_util::codec::Framed;
+use futures::task::{Context, Poll};
+use std::pin::Pin;
+use std::mem;
+use crate::resolver::Resolver;
+use crate::proto::command_subscribe::SubType;
+use crate::consumer::ConsumerOptions;
+use crate::producer::{self, ProducerOptions};
+use crate::message::*;
+use crate::proto::proto::get_topics::Mode;
+use crate::message;
 
-async fn connect<A: ToSocketAddrs>(address: A) -> Result<(), Error> {
-    let stream = TcpStream::connect(address).await?;
-    unimplemented!()
+pub const CLIENT_VERSION: &'static str = "2.0.1-incubating";
+
+#[derive(Clone, Default)]
+pub struct ConnectionOptions {
+    pub auth_method: Option<proto::AuthMethod>,
+    pub auth_method_name: Option<String>,
+    pub auth_data: Option<Vec<u8>>,
+    pub proxy_to_broker_url: Option<String>,
 }
+
+#[derive(Clone, Default)]
+pub(crate) struct ConnectionBuilder {
+    authentication: Option<Authentication>,
+    proxy_to_broker_url: Option<String>,
+}
+
+impl ConnectionBuilder {
+    pub fn new() -> ConnectionBuilder {
+        ConnectionBuilder::default()
+    }
+
+    pub fn authentication(mut self, authentication: Authentication) -> Self {
+        self.authentication = Some(authentication);
+        self
+    }
+
+    pub fn proxy_to_broker_url(mut self, proxy_to_broker_url: String) -> Self {
+        self.proxy_to_broker_url = Some(proxy_to_broker_url);
+        self
+    }
+}
+
+pub(crate) struct ConnectionMessage {
+    message: Command,
+    resolver: Option<Resolver<proto::Message>>,
+}
+
+pub(crate) struct Connection {
+    inner: Framed<TcpStream, Codec>,
+    server_version: String,
+    protocol_version: Option<i32>,
+    sender: mpsc::UnboundedSender<ConnectionMessage>,
+    pending: mpsc::UnboundedReceiver<ConnectionMessage>,
+    resolvers: BTreeMap<RequestKey, Resolver<proto::Message>>,
+    request_id: SerialId,
+    ping_timer: Interval,
+}
+
+impl Connection {
+    pub async fn connect<A: ToSocketAddrs>(address: A, options: Option<ConnectionOptions>) -> Result<Connection, Error> {
+        let stream = TcpStream::connect(address).await?;
+        let mut conn = tokio_util::codec::Framed::new(stream, Codec);
+        let connect = messages::connect(options);
+        trace!("sending connect message: {:?}", connect);
+        conn.send(connect).await?;
+        let connection_success = conn.next().await
+            .ok_or(Error::disconnected("connection failed - TCP Stream closed unexpectedly"))
+            .and_then(|r| r)
+            .and_then(|mut msg| {
+                if let Some(connected) = msg.command.connected {
+                    return Ok(connected);
+                }
+                if let Some(error) = msg.command.error {
+                    return Err(error.into());
+                }
+                Err(Error::unexpected_response(format!("unexpected response to `connect` command: {:?}", msg.command)))
+            })?;
+
+        Ok(Connection {
+            inner: conn,
+            server_version: connection_success.server_version,
+            protocol_version: connection_success.protocol_version,
+        })
+    }
+
+    pub fn handle(&self) -> ConnectionHandle {
+        ConnectionHandle { sender: self.sender.clone() }
+    }
+
+    fn resolve_err(&mut self, error: Error) {
+        for (_, resolver) in mem::take(&mut self.resolvers) {
+            resolve(Err(error.clone()));
+        }
+        for message in mem::take(&mut self.pending) {
+            if let Some(resolver) = message.resolver {
+                resolver.resolve(Err(error.clone()));
+            }
+        }
+    }
+
+    /// Returns Ready(Ok) when all messages have flushed successfully, Pending when waiting on IO,
+    /// and Ready(Err) if the connection fails.
+    fn poll_send(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        let send_state = loop {
+            match self.inner.poll_ready(cx) {
+                Poll::Ready(Ok(())) => {
+                    match self.pending.pop_front() {
+                        Some(message) => {
+                            let request_key = message.message.request_key();
+                            let send = self.inner.start_send(message.message);
+                            match (request_key, message.resolver) {
+                                (Some(key), Some(resolver)) => {
+                                    match send {
+                                        Ok(()) => {
+                                            self.resolvers.insert(resolver.request_key, resolver.resolver);
+                                        },
+                                        Err(e) => {
+                                            resolver.resolver.resolve(Err(e));
+                                        },
+                                    }
+                                }
+                                (None, Some(resolver)) => {
+                                    resolver.resolve(Err(Error::unexpected("BUG! connection received resolver, but message has no key")));
+                                }
+                                _ => {}
+                            }
+                            if let Some(resolver) = message.resolver {
+
+                            }
+                        },
+                        None => break Poll::Ready(Ok(()))
+                    }
+                }
+                Poll::Pending => break Poll::Pending,
+                Poll::Ready(Err(e)) => break Poll::Ready(Err(e)),
+            }
+        };
+        if let Poll::Ready(_) = &send_state {
+            self.inner.poll_flush(cx)
+        } else {
+            send_state
+        }
+    }
+
+    /// Returns Ready(Ok) if the connection is closed, Ready(Err) if the connection
+    /// fails, and Pending so long as the connection is open
+    fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        while let Poll::Ready(next) = self.connection.poll_next(cx) {
+            match next {
+                Some(Ok(message)) => {
+                    let message: Message = message;
+                    if message.command.ping.is_some() {
+                        self.pending.push_front(ConnectionMessage {
+                            message: messages::pong(),
+                            resolver: None,
+                        });
+                        continue;
+                    }
+                    if let Some(key) = message.request_key() {
+                        if let Some(resolver) = self.resolvers.remove(&key) {
+                            resolver.resolve(Ok(message))
+                        }
+                    }
+                },
+                Some(Err(error)) => return Poll::Ready(Err(error)),
+                None => return Poll::Ready(Ok(())),
+            }
+        }
+        Poll::Pending
+    }
+
+    pub fn has_pending_messages(&self) -> bool {
+        !self.pending.is_empty() || !self.resolvers.is_empty()
+    }
+}
+
+impl Future for Connection {
+    type Output = Result<(), Error>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        while let Poll::Ready(_) = self.ping_timer.poll(cx) {
+            self.pending.push_front(ConnectionMessage {
+                message: messages::ping(),
+                resolver: None
+            });
+        }
+        loop {
+            match self.poll_send(cx) {
+                Poll::Ready(Ok(())) => continue,
+                Poll::Ready(Err(error)) => {
+                    self.resolve_err(error.clone());
+                    return Poll::Ready(Err(error))
+                },
+                Poll::Pending => break,
+            }
+        }
+        loop {
+            match self.poll_recv(cx) {
+                Poll::Ready(Ok(())) => {
+                    self.resolve_err(Error::disconnected("Unexpected end of stream"));
+                    return Poll::Ready(Ok(()));
+                },
+                Poll::Ready(Err(error)) => {
+                    self.resolve_err(error.clone());
+                    return Poll::Ready(Err(error));
+                }
+                Poll::Pending => break,
+            }
+        }
+        Poll::Pending
+    }
+}
+
+#[derive(Clone)]
+pub struct ConnectionHandle {
+    sender: mpsc::UnboundedSender<ConnectionMessage>,
+}
+
+impl ConnectionHandle {
+    async fn make_request<T: FromProto>(&self, cmd: Command) -> Result<T, Error> {
+        let (resolver, f) = Resolver::new();
+        self.send_command(cmd, Some(resolver))?;
+        T::from_proto(f.await?)
+    }
+
+    fn send_command(&self, message: Command, resolver: Option<Resolver<proto::Message>>) -> Result<(), Error> {
+        self.sender.unbounded_send(ConnectionMessage { message, resolver })
+            .map_err(|e| Error::disconnected("Connection unexpectedly dropped"))
+    }
+
+    pub async fn create_producer(&self, topic: String, producer_id: u64, options: Option<ProducerOptions>) -> Result<CreateProducerSuccess, Error> {
+        self.make_request(Command::CreateProducer(CreateProducer {
+            topic,
+            producer_id,
+            options
+        })).await
+    }
+
+    pub async fn get_topics_of_namespace(&self, namespace: String, mode: Mode) -> Result<NamespaceTopics, Error> {
+        self.make_request(Command::GetTopicsOfNamespace(GetTopicsOfNamespace {
+            namespace,
+            mode
+        })).await
+    }
+
+    pub async fn send(&self, cmd: Send) -> Result<SendReceipt, Error> {
+        self.make_request(Command::Send(cmd)).await
+    }
+
+    pub async fn lookup_topic(&self, topic: String, authoritative: Option<bool>) -> Result<LookupTopicResponse, Error> {
+        self.make_request(Command::LookupTopic(LookupTopic {
+            topic,
+            authoritative
+        })).await
+    }
+
+    pub async fn lookup_partitioned_topic(&self, topic: String) -> Result<PartitionedTopicMetadata, Error> {
+        self.make_request(Command::LookupPartitionedTopic(LookupPartitionedTopic {
+            topic
+        })).await
+    }
+
+    pub async fn close_producer(&self, producer_id: u64) -> Result<CommandSuccess, Error> {
+        self.make_request(Command::CloseProducer(CloseProducer { producer_id })).await
+    }
+
+    pub async fn subscribe(&self, cmd: Subscribe) -> Result<CommandSuccess, Error> {
+        self.make_request(Command::Subscribe(cmd)).await
+    }
+
+    pub fn flow(&self, consumer_id: u64, message_permits: u32) -> Result<(), Error> {
+        self.send_command(Command::Flow(Flow { consumer_id, message_permits }), None)
+    }
+
+    pub fn ack(&self, ack: Ack) -> Result<(), Error> {
+        self.send_command(Command::Ack(ack), None)
+    }
+
+    pub fn redeliver_unacknowleged_messages(&self, consumer_id: u64, message_ids: Vec<MessageIdData>) -> Result<(), Error> {
+        self.send_command(Command::RedeliverUnacknowlegedMessages(RedeliverUnacknowlegedMessages {
+            consumer_id,
+            message_ids,
+        }), None)
+    }
+
+    pub async fn close_consumer(&self, consumer_id: u64) -> Result<proto::CommandSuccess, Error> {
+        self.make_request(Command::CloseConsumer(CloseConsumer { consumer_id })).await
+    }
+}
+//
+//impl Sink<Message> for Connection {
+//    type Error = Error;
+//
+//    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+//        Sink::poll_close(Pin::new(&mut self.inner), cx)
+//    }
+//
+//    fn start_send(mut self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+//        Sink::start_send(Pin::new(&mut self.inner), item)
+//    }
+//
+//    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+//        Sink::poll_flush(Pin::new(&mut self.inner), cx)
+//    }
+//
+//    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+//        Sink::poll_close(Pin::new(&mut self.inner), cx)
+//    }
+//}
+//
+//impl Stream for Connection {
+//    type Item = Result<Message, Error>;
+//
+//    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+//        Stream::poll_next(Pin::new(&mut self.inner), cx)
+//    }
+//
+//    fn size_hint(&self) -> (usize, Option<usize>) {
+//        self.inner.size_hint()
+//    }
+//}
+
 
 //use tokio_codec;
 //
@@ -38,17 +359,13 @@ async fn connect<A: ToSocketAddrs>(address: A) -> Result<(), Error> {
 //    },
 //}
 //
-//#[derive(Debug, Clone, PartialEq, Ord, PartialOrd, Eq)]
-//pub enum RequestKey {
-//    RequestId(u64),
-//    ProducerSend { producer_id: u64, sequence_id: u64 },
-//}
-//
-//#[derive(Clone)]
-//pub struct Authentication {
-//    pub name: String,
-//    pub data: Vec<u8>,
-//}
+
+#[derive(Clone)]
+pub struct Authentication {
+    pub name: String,
+    pub data: Vec<u8>,
+}
+
 //
 //pub struct Receiver<S: Stream<Item = Message, Error = ConnectionError>> {
 //    inbound: S,
@@ -604,315 +921,17 @@ async fn connect<A: ToSocketAddrs>(address: A) -> Result<(), Error> {
 //    }
 //}
 //
-//pub(crate) mod messages {
-//    use chrono::Utc;
-//
-//    use crate::connection::Authentication;
-//    use crate::consumer::ConsumerOptions;
-//    use crate::message::{
-//        proto::{self, base_command::Type as CommandType, command_subscribe::SubType},
-//        Message, Payload,
-//    };
-//    use crate::producer::{self, ProducerOptions};
-//
-//    pub fn connect(auth: Option<Authentication>, proxy_to_broker_url: Option<String>) -> Message {
-//        let (auth_method_name, auth_data) = match auth {
-//            Some(auth) => (Some(auth.name), Some(auth.data)),
-//            None => (None, None),
-//        };
-//
-//        Message {
-//            command: proto::BaseCommand {
-//                type_: CommandType::Connect as i32,
-//                connect: Some(proto::CommandConnect {
-//                    auth_method_name,
-//                    auth_data,
-//                    proxy_to_broker_url,
-//                    client_version: String::from("2.0.1-incubating"),
-//                    protocol_version: Some(12),
-//                    ..Default::default()
-//                }),
-//                ..Default::default()
-//            },
-//            payload: None,
-//        }
-//    }
-//
-//    pub fn ping() -> Message {
-//        Message {
-//            command: proto::BaseCommand {
-//                type_: CommandType::Ping as i32,
-//                ping: Some(proto::CommandPing {}),
-//                ..Default::default()
-//            },
-//            payload: None,
-//        }
-//    }
-//
-//    pub fn pong() -> Message {
-//        Message {
-//            command: proto::BaseCommand {
-//                type_: CommandType::Pong as i32,
-//                pong: Some(proto::CommandPong {}),
-//                ..Default::default()
-//            },
-//            payload: None,
-//        }
-//    }
-//
-//    pub fn create_producer(
-//        topic: String,
-//        producer_name: Option<String>,
-//        producer_id: u64,
-//        request_id: u64,
-//        options: ProducerOptions,
-//    ) -> Message {
-//        Message {
-//            command: proto::BaseCommand {
-//                type_: CommandType::Producer as i32,
-//                producer: Some(proto::CommandProducer {
-//                    topic,
-//                    producer_id,
-//                    request_id,
-//                    producer_name,
-//                    encrypted: options.encrypted,
-//                    metadata: options
-//                        .metadata
-//                        .iter()
-//                        .map(|(k, v)| proto::KeyValue {
-//                            key: k.clone(),
-//                            value: v.clone(),
-//                        })
-//                        .collect(),
-//                    schema: options.schema,
-//                    ..Default::default()
-//                }),
-//                ..Default::default()
-//            },
-//            payload: None,
-//        }
-//    }
-//
-//    pub fn get_topics_of_namespace(
-//        request_id: u64,
-//        namespace: String,
-//        mode: proto::get_topics::Mode,
-//    ) -> Message {
-//        Message {
-//            command: proto::BaseCommand {
-//                type_: CommandType::GetTopicsOfNamespace as i32,
-//                get_topics_of_namespace: Some(proto::CommandGetTopicsOfNamespace {
-//                    request_id,
-//                    namespace,
-//                    mode: Some(mode as i32),
-//                }),
-//                ..Default::default()
-//            },
-//            payload: None,
-//        }
-//    }
-//
-//    pub fn send(
-//        producer_id: u64,
-//        producer_name: String,
-//        sequence_id: u64,
-//        num_messages: Option<i32>,
-//        message: producer::Message,
-//    ) -> Message {
-//        let properties = message
-//            .properties
-//            .into_iter()
-//            .map(|(key, value)| proto::KeyValue { key, value })
-//            .collect();
-//
-//        Message {
-//            command: proto::BaseCommand {
-//                type_: CommandType::Send as i32,
-//                send: Some(proto::CommandSend {
-//                    producer_id,
-//                    sequence_id,
-//                    num_messages,
-//                }),
-//                ..Default::default()
-//            },
-//            payload: Some(Payload {
-//                metadata: proto::MessageMetadata {
-//                    producer_name,
-//                    sequence_id,
-//                    properties,
-//                    publish_time: Utc::now().timestamp_millis() as u64,
-//                    replicated_from: None,
-//                    partition_key: message.partition_key,
-//                    replicate_to: message.replicate_to,
-//                    compression: message.compression,
-//                    uncompressed_size: message.uncompressed_size,
-//                    num_messages_in_batch: message.num_messages_in_batch,
-//                    event_time: message.event_time,
-//                    encryption_keys: message.encryption_keys,
-//                    encryption_algo: message.encryption_algo,
-//                    encryption_param: message.encryption_param,
-//                    schema_version: message.schema_version,
-//                },
-//                data: message.payload,
-//            }),
-//        }
-//    }
-//
-//    pub fn lookup_topic(topic: String, authoritative: bool, request_id: u64) -> Message {
-//        Message {
-//            command: proto::BaseCommand {
-//                type_: CommandType::Lookup as i32,
-//                lookup_topic: Some(proto::CommandLookupTopic {
-//                    topic,
-//                    request_id,
-//                    authoritative: Some(authoritative),
-//                    ..Default::default()
-//                }),
-//                ..Default::default()
-//            },
-//            payload: None,
-//        }
-//    }
-//
-//    pub fn lookup_partitioned_topic(topic: String, request_id: u64) -> Message {
-//        Message {
-//            command: proto::BaseCommand {
-//                type_: CommandType::PartitionedMetadata as i32,
-//                partition_metadata: Some(proto::CommandPartitionedTopicMetadata {
-//                    topic,
-//                    request_id,
-//                    ..Default::default()
-//                }),
-//                ..Default::default()
-//            },
-//            payload: None,
-//        }
-//    }
-//
-//    pub fn close_producer(producer_id: u64, request_id: u64) -> Message {
-//        Message {
-//            command: proto::BaseCommand {
-//                type_: CommandType::CloseProducer as i32,
-//                close_producer: Some(proto::CommandCloseProducer {
-//                    producer_id,
-//                    request_id,
-//                }),
-//                ..Default::default()
-//            },
-//            payload: None,
-//        }
-//    }
-//
-//    pub fn subscribe(
-//        topic: String,
-//        subscription: String,
-//        sub_type: SubType,
-//        consumer_id: u64,
-//        request_id: u64,
-//        consumer_name: Option<String>,
-//        options: ConsumerOptions,
-//    ) -> Message {
-//        Message {
-//            command: proto::BaseCommand {
-//                type_: CommandType::Subscribe as i32,
-//                subscribe: Some(proto::CommandSubscribe {
-//                    topic,
-//                    subscription,
-//                    sub_type: sub_type as i32,
-//                    consumer_id,
-//                    request_id,
-//                    consumer_name,
-//                    priority_level: options.priority_level,
-//                    durable: options.durable,
-//                    metadata: options
-//                        .metadata
-//                        .iter()
-//                        .map(|(k, v)| proto::KeyValue {
-//                            key: k.clone(),
-//                            value: v.clone(),
-//                        })
-//                        .collect(),
-//                    read_compacted: options.read_compacted,
-//                    initial_position: options.initial_position,
-//                    schema: options.schema,
-//                    start_message_id: options.start_message_id,
-//                    ..Default::default()
-//                }),
-//                ..Default::default()
-//            },
-//            payload: None,
-//        }
-//    }
-//
-//    pub fn flow(consumer_id: u64, message_permits: u32) -> Message {
-//        Message {
-//            command: proto::BaseCommand {
-//                type_: CommandType::Flow as i32,
-//                flow: Some(proto::CommandFlow {
-//                    consumer_id,
-//                    message_permits,
-//                }),
-//                ..Default::default()
-//            },
-//            payload: None,
-//        }
-//    }
-//
-//    pub fn ack(
-//        consumer_id: u64,
-//        message_id: Vec<proto::MessageIdData>,
-//        cumulative: bool,
-//    ) -> Message {
-//        Message {
-//            command: proto::BaseCommand {
-//                type_: CommandType::Ack as i32,
-//                ack: Some(proto::CommandAck {
-//                    consumer_id,
-//                    ack_type: if cumulative {
-//                        proto::command_ack::AckType::Cumulative as i32
-//                    } else {
-//                        proto::command_ack::AckType::Individual as i32
-//                    },
-//                    message_id,
-//                    validation_error: None,
-//                    properties: Vec::new(),
-//                }),
-//                ..Default::default()
-//            },
-//            payload: None,
-//        }
-//    }
-//
-//    pub fn redeliver_unacknowleged_messages(
-//        consumer_id: u64,
-//        message_ids: Vec<proto::MessageIdData>,
-//    ) -> Message {
-//        Message {
-//            command: proto::BaseCommand {
-//                type_: CommandType::RedeliverUnacknowledgedMessages as i32,
-//                redeliver_unacknowledged_messages: Some(
-//                    proto::CommandRedeliverUnacknowledgedMessages {
-//                        consumer_id,
-//                        message_ids,
-//                    },
-//                ),
-//                ..Default::default()
-//            },
-//            payload: None,
-//        }
-//    }
-//
-//    pub fn close_consumer(consumer_id: u64, request_id: u64) -> Message {
-//        Message {
-//            command: proto::BaseCommand {
-//                type_: CommandType::CloseConsumer as i32,
-//                close_consumer: Some(proto::CommandCloseConsumer {
-//                    consumer_id,
-//                    request_id,
-//                }),
-//                ..Default::default()
-//            },
-//            payload: None,
-//        }
-//    }
-//}
+
+pub enum Command {
+    CreateProducer(message::CreateProducer),
+    GetTopicsOfNamespace(message::GetTopicsOfNamespace),
+    Send(message::Send),
+    LookupTopic(message::LookupTopic),
+    LookupPartitionedTopic(message::LookupPartitionedTopic),
+    CloseProducer(message::CloseProducer),
+    Subscribe(message::Subscribe),
+    Flow(message::Flow),
+    Ack(message::Ack),
+    RedeliverUnacknowlegedMessages(message::RedeliverUnacknowlegedMessages),
+    CloseConsumer(message::CloseConsumer),
+}

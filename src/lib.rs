@@ -25,11 +25,15 @@ extern crate serde;
 
 //mod client;
 mod connection;
-//mod connection_manager;
-//mod consumer;
+mod connection_manager;
+mod consumer;
 mod error;
-//pub mod message;
-//pub mod producer;
+mod engine;
+mod util;
+mod resolver;
+mod proto;
+mod message;
+pub mod producer;
 //mod service_discovery;
 
 //#[cfg(test)]
