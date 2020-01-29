@@ -22,6 +22,7 @@ pub use message::proto;
 pub use message::proto::command_subscribe::SubType;
 pub use producer::{Producer, ProducerOptions, TopicProducer};
 pub use service_discovery::ServiceDiscovery;
+pub use executor::{PulsarExecutor, TaskExecutor};
 
 mod client;
 mod connection;
