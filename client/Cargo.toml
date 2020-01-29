@@ -37,5 +37,7 @@ trust-dns-resolver = "0.18.0-alpha.1"
 url = "2.1.0"
 regex = "1.1.7"
 
+static_assertions = "1.1.0"
+
 [build-dependencies]
 prost-build = { git = "https://github.com/vivint-smarthome/prost", branch = "syn-quote-proc_macro2-1.0" }

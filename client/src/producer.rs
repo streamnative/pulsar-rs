@@ -226,7 +226,7 @@ impl Producer {
                 move |_| sender.create_producer(topic.clone(), producer_id, name)
             .map_err(|e| e.into())
             })
-            .map(move |success| {
+            .map_ok(move |success| {
                 Producer {
                     connection,
                     id: producer_id,
@@ -247,7 +247,7 @@ impl Producer {
 
     pub fn check_connection(&self) -> impl Future<Output=Result<(), Error>> {
         self.connection.sender().lookup_topic("test", false)
-            .map(|_| ())
+            .map_ok(|_| ())
             .map_err(|e| e.into())
     }
 

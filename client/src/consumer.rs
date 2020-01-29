@@ -7,7 +7,7 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use futures::{Future, Stream};
+use futures::{Future, Stream, TryFutureExt};
 use futures::channel::mpsc::{unbounded, UnboundedSender, UnboundedReceiver};
 use futures::stream::TryStreamExt;
 use rand;
@@ -43,7 +43,7 @@ impl<T: DeserializeMessage> Consumer<T> {
         proxy_to_broker_url: Option<String>,
         executor: TaskExecutor,
         batch_size: Option<u32>,
-    ) -> impl Future<Item=Consumer<T>, Error=Error> {
+    ) -> impl Future<Output=Result<Consumer<T>, Error>> {
         let consumer_id = consumer_id.unwrap_or_else(rand::random);
         let (resolver, messages) = unbounded();
         let batch_size = batch_size.unwrap_or(1000);
@@ -53,14 +53,14 @@ impl<T: DeserializeMessage> Consumer<T> {
                 let topic = topic.clone();
                 move |conn|
                     conn.sender().subscribe(resolver, topic, subscription, sub_type, consumer_id, consumer_name)
-                        .map(move |resp| (resp, conn))
+                        .map_ok(move |resp| (resp, conn))
             })
             .and_then(move |(_, conn)| {
                 conn.sender().send_flow(consumer_id, batch_size)
-                    .map(move |()| conn)
+                    .map_ok(move |()| conn)
             })
             .map_err(|e| e.into())
-            .map(move |connection| {
+            .map_ok(move |connection| {
                 Consumer {
                     connection: Arc::new(connection),
                     topic,
@@ -81,13 +81,13 @@ impl<T: DeserializeMessage> Consumer<T> {
         consumer_id: Option<u64>,
         consumer_name: Option<String>,
         batch_size: Option<u32>,
-    ) -> impl Future<Item=Consumer<T>, Error=Error> {
+    ) -> impl Future<Output=Result<Consumer<T>, Error>> {
         let consumer_id = consumer_id.unwrap_or_else(rand::random);
         let (resolver, messages) = unbounded();
         let batch_size = batch_size.unwrap_or(1000);
 
         conn.sender().subscribe(resolver, topic.clone(), subscription, sub_type, consumer_id, consumer_name)
-            .map(move |resp| (resp, conn))
+            .map_ok(move |resp| (resp, conn))
             .and_then(move |(_, conn)| {
                 conn.sender().send_flow(consumer_id, batch_size)
                     .map(move |()| conn)
@@ -331,7 +331,7 @@ impl<'a, Topic, Subscription, SubscriptionType> ConsumerBuilder<'a, Topic, Subsc
 }
 
 impl<'a> ConsumerBuilder<'a, Set<String>, Set<String>, Set<SubType>> {
-    pub fn build<T: DeserializeMessage>(self) -> impl Future<Item=Consumer<T>, Error=Error> {
+    pub fn build<T: DeserializeMessage>(self) -> impl Future<Output=Result<Consumer<T>, Error>> {
         let ConsumerBuilder {
             pulsar,
             topic: Set(topic),

@@ -56,6 +56,8 @@ impl Message {
 
 pub struct Codec;
 
+impl std::marker::Unpin for Codec {}
+
 impl Encoder for Codec {
     type Item = Message;
     type Error = ConnectionError;

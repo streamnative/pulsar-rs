@@ -29,10 +29,10 @@ impl ServiceDiscovery {
         addr: SocketAddr,
         auth: Option<Authentication>,
         executor: TaskExecutor,
-    ) -> impl Future<Item = Self, Error = ServiceDiscoveryError> {
+    ) -> impl Future<Output = Result<Self, ServiceDiscoveryError>> {
         ConnectionManager::new(addr, auth.clone(), executor.clone())
             .map_err(|e| e.into())
-            .map(move |conn| ServiceDiscovery::with_manager(Arc::new(conn), executor))
+            .map_ok(move |conn| ServiceDiscovery::with_manager(Arc::new(conn), executor))
     }
 
     pub fn with_manager(
@@ -47,21 +47,21 @@ impl ServiceDiscovery {
     pub fn lookup_topic<S: Into<String>>(
         &self,
         topic: S,
-    ) -> impl Future<Item = BrokerAddress, Error = ServiceDiscoveryError> {
+    ) -> impl Future<Output = Result<BrokerAddress, ServiceDiscoveryError>> {
         if self.tx.is_closed() {
-            return Either::A(future::err(ServiceDiscoveryError::Shutdown));
+            return Either::Left(future::err(ServiceDiscoveryError::Shutdown));
         }
 
-        Either::B(lookup_topic(topic, self.tx.clone()))
+        Either::Right(lookup_topic(topic, self.tx.clone()))
     }
 
     /// get the number of partitions for a partitioned topic
     pub fn lookup_partitioned_topic_number<S: Into<String>>(
         &self,
         topic: S,
-    ) -> impl Future<Item = u32, Error = ServiceDiscoveryError> {
+    ) -> impl Future<Output = Result<u32, ServiceDiscoveryError>> {
         if self.tx.is_closed() {
-            return Either::A(future::err(ServiceDiscoveryError::Shutdown));
+            return Either::Left(future::err(ServiceDiscoveryError::Shutdown));
         }
 
         let (tx, rx) = oneshot::channel();
@@ -71,19 +71,19 @@ impl ServiceDiscovery {
             .unbounded_send(Query::PartitionedTopic(topic.clone(), tx))
             .is_err()
         {
-            return Either::A(future::err(ServiceDiscoveryError::Shutdown));
+            return Either::Left(future::err(ServiceDiscoveryError::Shutdown));
         }
 
-        Either::B(rx.map_err(|_| ServiceDiscoveryError::Canceled).flatten())
+        Either::Right(rx.map_err(|_| ServiceDiscoveryError::Canceled).flatten())
     }
 
     /// get the list of topic names and addresses for a partitioned topic
     pub fn lookup_partitioned_topic<S: Into<String>>(
         &self,
         topic: S,
-    ) -> impl Future<Item = Vec<(String, BrokerAddress)>, Error = ServiceDiscoveryError> {
+    ) -> impl Future<Output = Result<Vec<(String, BrokerAddress)>, ServiceDiscoveryError>> {
         if self.tx.is_closed() {
-            return Either::A(future::err(ServiceDiscoveryError::Shutdown));
+            return Either::Left(future::err(ServiceDiscoveryError::Shutdown));
         }
 
         let (tx, rx) = oneshot::channel();
@@ -94,15 +94,15 @@ impl ServiceDiscovery {
             .unbounded_send(Query::PartitionedTopic(topic.clone(), tx))
             .is_err()
         {
-            return Either::A(future::err(ServiceDiscoveryError::Shutdown));
+            return Either::Left(future::err(ServiceDiscoveryError::Shutdown));
         }
 
         let self_tx = self.tx.clone();
 
-        Either::B(
+        Either::Right(
             rx.map_err(|_| ServiceDiscoveryError::Canceled)
                 .and_then(move |res| match res {
-                    Err(e) => Either::A(future::err(e)),
+                    Err(e) => Either::Left(future::err(e)),
                     Ok(partitions) => {
                         let topics = (0..partitions)
                             .map(|nb| {
@@ -112,7 +112,7 @@ impl ServiceDiscovery {
                             })
                             .collect::<Vec<_>>();
 
-                        Either::B(join_all(topics))
+                        Either::Right(join_all(topics))
                     }
                 }),
         )
@@ -145,17 +145,17 @@ enum Query {
 fn lookup_topic<S: Into<String>>(
     topic: S,
     self_tx: mpsc::UnboundedSender<Query>,
-) -> impl Future<Item = BrokerAddress, Error = ServiceDiscoveryError> {
+) -> impl Future<Output = Result<BrokerAddress, ServiceDiscoveryError>> {
     let (tx, rx) = oneshot::channel();
     let topic: String = topic.into();
     if self_tx
         .unbounded_send(Query::Topic(topic.clone(), None, false, tx))
         .is_err()
     {
-        return Either::A(future::err(ServiceDiscoveryError::Shutdown));
+        return Either::Left(future::err(ServiceDiscoveryError::Shutdown));
     }
 
-    Either::B(rx.map_err(|_| ServiceDiscoveryError::Canceled).flatten())
+    Either::Right(rx.map_err(|_| ServiceDiscoveryError::Canceled).flatten())
 }
 
 /// core of the service discovery
@@ -177,18 +177,18 @@ fn engine(manager: Arc<ConnectionManager>, executor: TaskExecutor) -> mpsc::Unbo
             let manager = manager.clone();
 
             match query {
-                Query::Topic(topic, broker_url, authoritative, tx) => Either::A({
+                Query::Topic(topic, broker_url, authoritative, tx) => Either::Left({
                     let url = broker_url.clone();
                     let conn_info = manager.get_connection_from_url(url);
 
                     conn_info.then(move |res| match res {
                         Err(conn_error) => {
                             let _ = tx.send(Err(ServiceDiscoveryError::Connection(conn_error)));
-                            Either::B(future::ok(()))
+                            Either::Right(future::ok(()))
                         }
                         Ok(conn_info) => {
                             if let Some((proxied_query, conn)) = conn_info {
-                                Either::A(lookup(
+                                Either::Left(lookup(
                                     topic.to_string(),
                                     proxied_query,
                                     conn.sender(),
@@ -204,19 +204,19 @@ fn engine(manager: Arc<ConnectionManager>, executor: TaskExecutor) -> mpsc::Unbo
                                     "unknown broker URL: {}",
                                     broker_url.unwrap_or_else(String::new)
                                 ))));
-                                Either::B(future::ok(()))
+                                Either::Right(future::ok(()))
                             }
                         }
                     })
                 }),
                 Query::PartitionedTopic(topic, tx) => {
-                    Either::B(manager.get_base_connection().then(|res| match res {
+                    Either::Right(manager.get_base_connection().then(|res| match res {
                         Err(conn_error) => {
                             let _ = tx.send(Err(ServiceDiscoveryError::Connection(conn_error)));
-                            Either::A(future::ok(()))
+                            Either::Left(future::ok(()))
                         }
                         Ok(conn) => {
-                            Either::B(conn.sender().lookup_partitioned_topic(topic).then(|res| {
+                            Either::Right(conn.sender().lookup_partitioned_topic(topic).then(|res| {
                                 match res {
                                     Err(e) => {
                                         let _ = tx.send(Err(e.into()));
@@ -333,14 +333,14 @@ fn lookup(
     manager: Arc<ConnectionManager>,
     tx: oneshot::Sender<Result<BrokerAddress, ServiceDiscoveryError>>,
     self_tx: mpsc::UnboundedSender<Query>,
-) -> impl Future<Item = (), Error = ()> {
+) -> impl Future<Output = Result<(), ()>> {
     sender
         .lookup_topic(topic.to_string(), authoritative)
         .then(move |res| {
             match res {
                 Err(e) => {
                     let _ = tx.send(Err(ServiceDiscoveryError::Connection(e)));
-                    Either::A(future::ok(()))
+                    Either::Left(future::ok(()))
                 }
 
                 Ok(response) => {
@@ -355,7 +355,7 @@ fn lookup(
                         Ok(info) => info,
                         Err(e) => {
                             let _ = tx.send(Err(e));
-                            return Either::A(future::ok(()));
+                            return Either::Left(future::ok(()));
                         }
                     };
 
@@ -363,9 +363,9 @@ fn lookup(
                     // if going through a proxy, we use the base address,
                     // otherwise we look it up by DNS query
                     let address_query = if proxied_query || proxy {
-                        Either::A(future::ok(base_address.clone()))
+                        Either::Left(future::ok(base_address.clone()))
                     } else {
-                        Either::B(
+                        Either::Right(
                             resolver
                                 .lookup_ip(broker_name.as_str())
                                 .map_err(move |e| {
@@ -378,7 +378,7 @@ fn lookup(
                         )
                     };
 
-                    Either::B(
+                    Either::Right(
                         address_query
                             .map(move |address| {
                                 let b = BrokerAddress {
@@ -410,11 +410,11 @@ fn lookup(
                                         Ok(_) => {}
                                     }
 
-                                    Either::A(
+                                    Either::Left(
                                         rx2.map_err(|_| ServiceDiscoveryError::Canceled).flatten(),
                                     )
                                 } else {
-                                    Either::B(future::ok(b))
+                                    Either::Right(future::ok(b))
                                 }
                             })
                             .and_then(move |broker| {
@@ -426,11 +426,11 @@ fn lookup(
                             .then(move |res| match res {
                                 Err(e) => {
                                     let _ = tx.send(Err(e));
-                                    Either::A(future::ok(()))
+                                    Either::Left(future::ok(()))
                                 }
                                 Ok(b) => {
                                     let _ = tx.send(Ok(b.clone()));
-                                    Either::B(future::ok(()))
+                                    Either::Right(future::ok(()))
                                 }
                             }),
                     )

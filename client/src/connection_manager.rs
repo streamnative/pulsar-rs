@@ -3,7 +3,7 @@ use crate::error::ConnectionError;
 use futures::{
     future::{self, Either},
     channel::{mpsc, oneshot},
-    Future, Stream,
+    Future, Stream, StreamExt, TryFutureExt,
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -37,7 +37,7 @@ impl ConnectionManager {
         addr: SocketAddr,
         auth: Option<Authentication>,
         executor: TaskExecutor,
-    ) -> impl Future<Item = Self, Error = ConnectionError> {
+    ) -> impl Future<Output = Result<Self, ConnectionError>> {
         Connection::new(addr.to_string(), auth.clone(), None, executor.clone())
             .map_err(|e| e.into())
             .and_then(move |conn| ConnectionManager::from_connection(conn, auth, addr, executor))
@@ -58,17 +58,17 @@ impl ConnectionManager {
     /// creates a connection if not available
     pub fn get_base_connection(
         &self,
-    ) -> impl Future<Item = Arc<Connection>, Error = ConnectionError> {
+    ) -> impl Future<Output = Result<Arc<Connection>, ConnectionError>> {
         if self.tx.is_closed() {
-            return Either::A(future::err(ConnectionError::Shutdown));
+            return Either::Left(future::err(ConnectionError::Shutdown));
         }
 
         let (tx, rx) = oneshot::channel();
         if self.tx.unbounded_send(Query::Base(tx)).is_err() {
-            return Either::A(future::err(ConnectionError::Shutdown));
+            return Either::Left(future::err(ConnectionError::Shutdown));
         }
 
-        Either::B(rx.map_err(|_| ConnectionError::Canceled).flatten())
+        Either::Right(rx.map_err(|_| ConnectionError::Canceled).flatten())
     }
 
     /// get an active Connection from a broker address
@@ -77,9 +77,9 @@ impl ConnectionManager {
     pub fn get_connection(
         &self,
         broker: &BrokerAddress,
-    ) -> impl Future<Item = Arc<Connection>, Error = ConnectionError> {
+    ) -> impl Future<Output = Result<Arc<Connection>, ConnectionError>> {
         if self.tx.is_closed() {
-            return Either::A(future::err(ConnectionError::Shutdown));
+            return Either::Left(future::err(ConnectionError::Shutdown));
         }
 
         let (tx, rx) = oneshot::channel();
@@ -88,26 +88,26 @@ impl ConnectionManager {
             .unbounded_send(Query::Connect(broker.clone(), tx))
             .is_err()
         {
-            return Either::A(future::err(ConnectionError::Shutdown));
+            return Either::Left(future::err(ConnectionError::Shutdown));
         }
 
-        Either::B(rx.map_err(|_| ConnectionError::Canceled).flatten())
+        Either::Right(rx.map_err(|_| ConnectionError::Canceled).flatten())
     }
 
     pub fn get_connection_from_url(
         &self,
         broker: Option<String>,
-    ) -> impl Future<Item = Option<(bool, Arc<Connection>)>, Error = ConnectionError> {
+    ) -> impl Future<Output = Result<Option<(bool, Arc<Connection>)>, ConnectionError>> {
         if self.tx.is_closed() {
-            return Either::A(future::err(ConnectionError::Shutdown));
+            return Either::Left(future::err(ConnectionError::Shutdown));
         }
 
         let (tx, rx) = oneshot::channel();
         if self.tx.unbounded_send(Query::Get(broker, tx)).is_err() {
-            return Either::A(future::err(ConnectionError::Shutdown));
+            return Either::Left(future::err(ConnectionError::Shutdown));
         }
 
-        Either::B(rx.map_err(|_| ConnectionError::Canceled).flatten())
+        Either::Right(rx.map_err(|_| ConnectionError::Canceled).flatten())
     }
 }
 
@@ -152,22 +152,22 @@ fn engine(
             let self_tx = tx2.clone();
 
             match query {
-                Query::Connect(broker, tx) => Either::A(match connections.get(&broker) {
+                Query::Connect(broker, tx) => Either::Left(match connections.get(&broker) {
                     Some(conn) => {
                         let _ = tx.send(Ok(conn.clone()));
-                        Either::A(future::ok(()))
+                        Either::Left(future::ok(()))
                     }
-                    None => Either::B(connect(broker, auth.clone(), tx, self_tx, exe)),
+                    None => Either::Right(connect(broker, auth.clone(), tx, self_tx, exe)),
                 }),
                 Query::Base(tx) => {
                     let _ = tx.send(Ok(connection.clone()));
-                    Either::B(future::ok(()))
+                    Either::Right(future::ok(()))
                 }
                 Query::Connected(broker, conn, tx) => {
                     let c = Arc::new(conn);
                     connections.insert(broker, c.clone());
                     let _ = tx.send(Ok(c));
-                    Either::B(future::ok(()))
+                    Either::Right(future::ok(()))
                 }
                 Query::Get(url_opt, tx) => {
                     let res = match url_opt {
@@ -190,7 +190,7 @@ fn engine(
                         }
                     };
                     let _ = tx.send(Ok(res));
-                    Either::B(future::ok(()))
+                    Either::Right(future::ok(()))
                 }
             }
         })
@@ -211,7 +211,7 @@ fn connect(
     tx: oneshot::Sender<Result<Arc<Connection>, ConnectionError>>,
     self_tx: mpsc::UnboundedSender<Query>,
     exe: TaskExecutor,
-) -> impl Future<Item = (), Error = ()> {
+) -> impl Future<Output = Result<(), ()>> {
     let proxy_url = if broker.proxy {
         Some(broker.broker_url.clone())
     } else {

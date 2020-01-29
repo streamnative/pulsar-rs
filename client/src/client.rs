@@ -98,7 +98,7 @@ impl Pulsar {
         addr: SocketAddr,
         auth: Option<Authentication>,
         executor: TaskExecutor,
-    ) -> impl Future<Item=Self, Error=Error> {
+    ) -> impl Future<Output=Result<Self, Error>> {
         ConnectionManager::new(addr, auth.clone(), executor.clone())
             .from_err()
             .map(|manager| {
@@ -116,7 +116,7 @@ impl Pulsar {
     pub fn lookup_topic<S: Into<String>>(
         &self,
         topic: S,
-    ) -> impl Future<Item=BrokerAddress, Error=Error> {
+    ) -> impl Future<Output=Result<BrokerAddress, Error>> {
         self.service_discovery.lookup_topic(topic).from_err()
     }
 
@@ -124,7 +124,7 @@ impl Pulsar {
     pub fn lookup_partitioned_topic_number<S: Into<String>>(
         &self,
         topic: S,
-    ) -> impl Future<Item=u32, Error=Error> {
+    ) -> impl Future<Output=Result<u32, Error>> {
         self.service_discovery
             .lookup_partitioned_topic_number(topic)
             .from_err()
@@ -133,13 +133,13 @@ impl Pulsar {
     pub fn lookup_partitioned_topic<S: Into<String>>(
         &self,
         topic: S,
-    ) -> impl Future<Item=Vec<(String, BrokerAddress)>, Error=Error> {
+    ) -> impl Future<Output=Result<Vec<(String, BrokerAddress)>, Error>> {
         self.service_discovery
             .lookup_partitioned_topic(topic)
             .from_err()
     }
 
-    pub fn get_topics_of_namespace(&self, namespace: String) -> impl Future<Item=Vec<String>, Error=Error> {
+    pub fn get_topics_of_namespace(&self, namespace: String) -> impl Future<Output=Result<Vec<String>, Error>> {
         self.manager.get_base_connection()
             .and_then(move |conn| conn.sender().get_topics_of_namespace(namespace))
             .from_err()
@@ -180,7 +180,7 @@ impl Pulsar {
         batch_size: Option<u32>,
         consumer_name: Option<String>,
         consumer_id: Option<u64>,
-    ) -> impl Future<Item=Consumer<T>, Error=Error>
+    ) -> impl Future<Output=Result<Consumer<T>, Error>>
         where T: DeserializeMessage,
               S1: Into<String>,
               S2: Into<String>,
@@ -215,7 +215,7 @@ impl Pulsar {
         topic: S1,
         subscription: S2,
         sub_type: SubType,
-    ) -> impl Future<Item=Vec<Consumer<T>>, Error=Error> {
+    ) -> impl Future<Output=Result<Vec<Consumer<T>>, Error>> {
         let manager = self.manager.clone();
 
         self.service_discovery
@@ -254,7 +254,7 @@ impl Pulsar {
         &self,
         topic: S,
         name: Option<String>,
-    ) -> impl Future<Item=Producer, Error=Error> {
+    ) -> impl Future<Output=Result<Producer, Error>> {
         let manager = self.manager.clone();
         let topic = topic.into();
         self.service_discovery
@@ -267,7 +267,7 @@ impl Pulsar {
     pub fn create_partitioned_producers<S: Into<String> + Clone>(
         &self,
         topic: S,
-    ) -> impl Future<Item=Vec<Producer>, Error=Error> {
+    ) -> impl Future<Output=Result<Vec<Producer>, Error>> {
         let manager = self.manager.clone();
 
         self.service_discovery
@@ -294,7 +294,7 @@ impl Pulsar {
         topic: S,
         data: Vec<u8>,
         properties: Option<HashMap<String, String>>,
-    ) -> impl Future<Item=CommandSendReceipt, Error=Error> {
+    ) -> impl Future<Output=Result<CommandSendReceipt, Error>> {
         self.create_producer(topic, None)
             .and_then(|producer| {
                 producer.send_raw(data, properties)
@@ -307,16 +307,16 @@ impl Pulsar {
         topic: S,
         msg: &T,
         properties: Option<HashMap<String, String>>,
-    ) -> impl Future<Item=CommandSendReceipt, Error=Error> {
+    ) -> impl Future<Output=Result<CommandSendReceipt, Error>> {
         let data = match serde_json::to_vec(msg) {
             Ok(data) => data,
             Err(e) => {
                 let e: ConsumerError = e.into();
-                return Either::A(err(e.into()));
+                return Either::Left(err(e.into()));
             }
         };
 
-        Either::B(self.send_raw(topic, data, properties))
+        Either::Right(self.send_raw(topic, data, properties))
     }
 
     pub fn producer(&self) -> MultiTopicProducer {

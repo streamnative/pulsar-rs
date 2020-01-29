@@ -164,14 +164,6 @@ impl<S: Sink<Message, Error=ConnectionError>> Sender<S> {
             shutdown,
         }
     }
-
-    fn try_start_send(&mut self, item: Message) -> Poll<Result<(), ConnectionError>> {
-        if let Err(_e) = self.sink.start_send(item)? {
-            self.buffered = Some(item);
-            return Ok(Poll::Pending);
-        }
-        Ok(Poll::Ready(()))
-    }
 }
 
 impl<S: Sink<Message, Error=ConnectionError>> Future for Sender<S> {
@@ -183,20 +175,16 @@ impl<S: Sink<Message, Error=ConnectionError>> Future for Sender<S> {
             Ok(Poll::Pending) => {}
         }
 
-        if let Some(item) = self.buffered.take() {
-            self.try_start_send(item).map_err(|e| self.error.set(e))?;
-        }
-
         loop {
             match self.outbound.poll()? {
-                Poll::Ready(Some(item)) => self.try_start_send(item).map_err(|e| self.error.set(e))?,
+                Poll::Ready(Some(item)) => self.sink.start_send(item).map_err(|e| self.error.set(e))?,
                 Poll::Ready(None) => {
-                    self.sink.close().map_err(|e| self.error.set(e))?;
-                    return Ok(Poll::Ready(()));
+                    self.sink.poll_close().map_err(|e| self.error.set(e))?;
+                    return Poll::Ready(Ok(()));
                 }
                 Poll::Pending => {
-                    self.sink.poll_complete().map_err(|e| self.error.set(e))?;
-                    return Ok(Poll::Pending);
+                    self.sink.poll_flush().map_err(|e| self.error.set(e))?;
+                    return Poll::Pending;
                 }
             }
         }
@@ -312,10 +300,10 @@ impl ConnectionSender {
             Ok(_) => {}
             Err(_) => {
                 self.error.set(ConnectionError::Disconnected);
-                return Either::A(err(ConnectionError::Disconnected));
+                return Either::Left(err(ConnectionError::Disconnected));
             }
         }
-        Either::B(self.send_message(msg, RequestKey::RequestId(request_id), |resp| resp.command.success))
+        Either::Right(self.send_message(msg, RequestKey::RequestId(request_id), |resp| resp.command.success))
     }
 
     pub fn send_flow(&self, consumer_id: u64, message_permits: u32) -> Result<(), ConnectionError> {
@@ -349,8 +337,8 @@ impl ConnectionSender {
             });
 
         match (self.registrations.unbounded_send(Register::Request { key, resolver }), self.tx.unbounded_send(msg)) {
-            (Ok(_), Ok(_)) => Either::A(response),
-            _ => Either::B(future::err(ConnectionError::Disconnected))
+            (Ok(_), Ok(_)) => Either::Left(response),
+            _ => Either::Right(future::err(ConnectionError::Disconnected))
         }
     }
 }
@@ -372,12 +360,13 @@ impl Connection {
         ready(SocketAddr::from_str(&addr))
             .map_err(|e| ConnectionError::SocketAddr(e.to_string()))
             .and_then(|addr| {
+                static_assertions::assert_impl_all!(TcpStream: std::marker::Unpin);
+                static_assertions::assert_impl_all!(tokio::codec::Framed<TcpStream, Codec>: Unpin);
                 TcpStream::connect(&addr)
                     .map_err(|e| e.into())
-                    .map_ok(|stream| codec::Framed::new(stream, Codec))
+                    .map_ok(|stream| -> tokio::codec::Framed<TcpStream, Codec> { codec::Framed::new(stream, Codec) })
                     .and_then(|stream| {
-                        use futures::sink::SinkExt;
-                        stream.send({
+                        futures::sink::SinkExt::send(&mut stream, {
                             let msg = messages::connect(auth_data, proxy_to_broker_url);
                             trace!("connection message: {:?}", msg);
                             msg
@@ -413,14 +402,14 @@ impl Connection {
                     error.clone(),
                     registrations_rx,
                     receiver_shutdown_rx,
-                ));
+                ).map(|_res| ()));
 
                 executor.spawn(Sender::new(
                     sink,
                     rx,
                     error.clone(),
                     sender_shutdown_rx,
-                ));
+                ).map(|_res| ()));
 
                 let sender = ConnectionSender::new(tx, registrations_tx, SerialId::new(), error);
 
