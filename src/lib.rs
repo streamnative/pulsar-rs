@@ -168,6 +168,79 @@ mod tests {
     }
 
     #[test]
+    fn unsized_data() {
+        let addr = "127.0.0.1:6650".parse().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let pulsar: Pulsar = Pulsar::new(addr, None, runtime.executor()).wait().unwrap();
+        let producer = pulsar.producer(None);
+        let str_topic = "test_unsized_data_str";
+        let bytes_topic = "test_unsized_data_bytes";
+
+        let str_data = "some unsized data";
+
+        producer.send(str_topic, str_data)
+            .wait()
+            .unwrap();
+
+        pulsar
+            .consumer()
+            .with_topic(str_topic)
+            .with_subscription_type(SubType::Exclusive)
+            .with_subscription("test_subscription")
+            .build::<String>()
+            .wait()
+            .unwrap()
+            .take(1)
+            .map_err(|e| e.into())
+            .for_each(move |Message { payload, ack, .. }| {
+                ack.ack();
+                let data = payload?;
+                if data.as_str() == str_data {
+                    Ok(())
+                } else {
+                    Err(Error::Message(format!(
+                        "Unexpected payload in &str test: {}",
+                        &data
+                    )))
+                }
+            })
+            .timeout(Duration::from_secs(1))
+            .wait()
+            .unwrap();
+
+        let bytes: &[u8] = &[0,1,2,3];
+        producer.send(bytes, bytes)
+            .wait()
+            .unwrap();
+
+        pulsar
+            .consumer()
+            .with_topic(str_topic)
+            .with_subscription_type(SubType::Exclusive)
+            .with_subscription("test_subscription")
+            .build::<Vec<u8>>()
+            .wait()
+            .unwrap()
+            .take(1)
+            .map_err(|e| e.into())
+            .for_each(move |Message { payload, ack, .. }| {
+                ack.ack();
+                let data = payload;
+                if data.as_slice() == bytes {
+                    Ok(())
+                } else {
+                    Err(Error::Message(format!(
+                        "Unexpected payload in &[u8] test: {}",
+                        &data
+                    )))
+                }
+            })
+            .timeout(Duration::from_secs(1))
+            .wait()
+            .unwrap();
+    }
+
+    #[test]
     #[ignore]
     fn redelivery() {
         let addr = "127.0.0.1:6650".parse().unwrap();

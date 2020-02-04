@@ -75,7 +75,7 @@ impl Producer {
         Producer { message_sender: tx }
     }
 
-    pub fn send<T: SerializeMessage, S: Into<String>>(
+    pub fn send<T: SerializeMessage + ?Sized, S: Into<String>>(
         &self,
         topic: S,
         message: &T,
@@ -94,7 +94,7 @@ impl Producer {
     ) -> impl Future<Item = Vec<proto::CommandSendReceipt>, Error = Error>
     where
         'b: 'a,
-        T: 'b + SerializeMessage,
+        T: 'b + SerializeMessage + ?Sized,
         I: IntoIterator<Item = &'a T>,
         S: Into<String>,
     {
@@ -338,7 +338,7 @@ impl TopicProducer {
             .map_err(|e| e.into())
     }
 
-    pub fn send<T: SerializeMessage>(
+    pub fn send<T: SerializeMessage + ?Sized>(
         &self,
         message: &T,
         num_messages: Option<i32>,
