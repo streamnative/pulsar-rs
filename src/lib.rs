@@ -176,6 +176,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn unsized_data() {
         let addr = "127.0.0.1:6650".parse().unwrap();
         let runtime = tokio::runtime::Runtime::new().unwrap();
