@@ -83,6 +83,7 @@ mod tests {
         Message(String),
         Timeout(std::io::Error),
         Serde(serde_json::Error),
+        Utf8(std::string::FromUtf8Error),
     }
 
     impl From<std::io::Error> for Error {
@@ -103,6 +104,12 @@ mod tests {
         }
     }
 
+    impl From<std::string::FromUtf8Error> for Error {
+        fn from(err: std::string::FromUtf8Error) -> Self {
+            Error::Utf8(err)
+        }
+    }
+
     impl std::fmt::Display for Error {
         fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
             match self {
@@ -110,6 +117,7 @@ mod tests {
                 Error::Message(e) => write!(f, "{}", e),
                 Error::Timeout(e) => write!(f, "{}", e),
                 Error::Serde(e) => write!(f, "{}", e),
+                Error::Utf8(e) => write!(f, "{}", e),
             }
         }
     }
@@ -165,6 +173,88 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .wait()
             .unwrap();
+    }
+
+    #[test]
+    fn unsized_data() {
+        let addr = "127.0.0.1:6650".parse().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let pulsar: Pulsar = Pulsar::new(addr, None, runtime.executor()).wait().unwrap();
+        let producer = pulsar.producer(None);
+
+        // test &str
+        {
+            let topic = "test_unsized_data_str";
+            let send_data = "some unsized data";
+
+            let consumer = pulsar
+                .consumer()
+                .with_topic(topic)
+                .with_subscription_type(SubType::Exclusive)
+                .with_subscription("test_subscription")
+                .build::<String>()
+                .wait()
+                .unwrap();
+
+            producer.send(topic, send_data)
+                .wait()
+                .unwrap();
+
+            consumer.take(1)
+                .map_err(|e| e.into())
+                .for_each(move |Message { payload, ack, .. }| {
+                    ack.ack();
+                    let data = payload?;
+                    if data.as_str() == send_data {
+                        Ok(())
+                    } else {
+                        Err(Error::Message(format!(
+                            "Unexpected payload in &str test: {}",
+                            &data
+                        )))
+                    }
+                })
+                .timeout(Duration::from_secs(1))
+                .wait()
+                .unwrap();
+        }
+
+        // test &[u8]
+        {
+            let topic = "test_unsized_data_bytes";
+            let send_data: &[u8] = &[0,1,2,3];
+
+            let consumer = pulsar
+                .consumer()
+                .with_topic(topic)
+                .with_subscription_type(SubType::Exclusive)
+                .with_subscription("test_subscription")
+                .build::<Vec<u8>>()
+                .wait()
+                .unwrap();
+
+            producer.send(topic, send_data)
+                .wait()
+                .unwrap();
+
+            consumer.take(1)
+                .map_err(|e| e.into())
+                .for_each(move |Message { payload, ack, .. }| {
+                    ack.ack();
+                    let data = payload;
+                    if data.as_slice() == send_data {
+                        Ok(())
+                    } else {
+                        Err(Error::Message(format!(
+                            "Unexpected payload in &[u8] test: {:?}",
+                            &data
+                        )))
+                    }
+                })
+                .timeout(Duration::from_secs(1))
+                .wait()
+                .unwrap();
+        }
     }
 
     #[test]

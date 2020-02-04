@@ -315,7 +315,7 @@ impl Pulsar {
             })
     }
 
-    pub fn send<S: Into<String>, M: SerializeMessage>(
+    pub fn send<S: Into<String>, M: SerializeMessage + ?Sized>(
         &self,
         topic: S,
         message: &M,
