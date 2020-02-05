@@ -1,5 +1,6 @@
 use crate::connection::{Authentication, Connection};
 use crate::error::ConnectionError;
+use crate::executor::{PulsarExecutor, TaskExecutor};
 use futures::{
     future::{self, Either},
     sync::{mpsc, oneshot},
@@ -8,7 +9,6 @@ use futures::{
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::runtime::TaskExecutor;
 
 /// holds connection information for a broker
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -33,22 +33,24 @@ pub struct ConnectionManager {
 }
 
 impl ConnectionManager {
-    pub fn new(
+    pub fn new<E: PulsarExecutor>(
         addr: SocketAddr,
         auth: Option<Authentication>,
-        executor: TaskExecutor,
+        executor: E,
     ) -> impl Future<Item = Self, Error = ConnectionError> {
+        let executor = TaskExecutor::new(executor);
         Connection::new(addr.to_string(), auth.clone(), None, executor.clone())
-            .map_err(|e| e.into())
+            .map_err(|e| e)
             .and_then(move |conn| ConnectionManager::from_connection(conn, auth, addr, executor))
     }
 
-    pub fn from_connection(
+    pub fn from_connection<E: PulsarExecutor>(
         connection: Connection,
         auth: Option<Authentication>,
         address: SocketAddr,
-        executor: TaskExecutor,
+        executor: E,
     ) -> Result<ConnectionManager, ConnectionError> {
+        let executor = TaskExecutor::new(executor);
         let tx = engine(Arc::new(connection), auth, executor);
         Ok(ConnectionManager { tx, address })
     }
@@ -194,10 +196,7 @@ fn engine(
                 }
             }
         })
-        .map_err(|_| {
-            error!("service discovery engine stopped");
-            ()
-        })
+        .map_err(|_| error!("service discovery engine stopped"))
     };
 
     executor.spawn(f());

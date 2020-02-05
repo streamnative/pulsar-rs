@@ -1,6 +1,7 @@
 use crate::connection::{Authentication, ConnectionSender};
 use crate::connection_manager::{BrokerAddress, ConnectionManager};
 use crate::error::ServiceDiscoveryError;
+use crate::executor::{PulsarExecutor, TaskExecutor};
 use crate::message::proto::{command_lookup_topic_response, CommandLookupTopicResponse};
 use futures::{
     future::{self, join_all, Either},
@@ -9,7 +10,6 @@ use futures::{
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::runtime::TaskExecutor;
 use trust_dns_resolver::config::*;
 use trust_dns_resolver::AsyncResolver;
 use url::Url;
@@ -25,20 +25,19 @@ pub struct ServiceDiscovery {
 }
 
 impl ServiceDiscovery {
-    pub fn new(
+    pub fn new<E: PulsarExecutor>(
         addr: SocketAddr,
         auth: Option<Authentication>,
-        executor: TaskExecutor,
+        executor: E,
     ) -> impl Future<Item = Self, Error = ServiceDiscoveryError> {
-        ConnectionManager::new(addr, auth.clone(), executor.clone())
+        let executor = TaskExecutor::new(executor);
+        ConnectionManager::new(addr, auth, executor.clone())
             .map_err(|e| e.into())
             .map(move |conn| ServiceDiscovery::with_manager(Arc::new(conn), executor))
     }
 
-    pub fn with_manager(
-        manager: Arc<ConnectionManager>,
-        executor: TaskExecutor,
-    ) -> ServiceDiscovery {
+    pub fn with_manager<E: PulsarExecutor>(manager: Arc<ConnectionManager>, executor: E) -> Self {
+        let executor = TaskExecutor::new(executor);
         let tx = engine(manager, executor);
         ServiceDiscovery { tx }
     }
@@ -68,7 +67,7 @@ impl ServiceDiscovery {
         let topic: String = topic.into();
         if self
             .tx
-            .unbounded_send(Query::PartitionedTopic(topic.clone(), tx))
+            .unbounded_send(Query::PartitionedTopic(topic, tx))
             .is_err()
         {
             return Either::A(future::err(ServiceDiscoveryError::Shutdown));
@@ -149,7 +148,7 @@ fn lookup_topic<S: Into<String>>(
     let (tx, rx) = oneshot::channel();
     let topic: String = topic.into();
     if self_tx
-        .unbounded_send(Query::Topic(topic.clone(), None, false, tx))
+        .unbounded_send(Query::Topic(topic, None, false, tx))
         .is_err()
     {
         return Either::A(future::err(ServiceDiscoveryError::Shutdown));
@@ -172,7 +171,7 @@ fn engine(manager: Arc<ConnectionManager>, executor: TaskExecutor) -> mpsc::Unbo
     let f = move || {
         rx.for_each(move |query: Query| {
             let self_tx = tx2.clone();
-            let base_address = manager.address.clone();
+            let base_address = manager.address;
             let resolver = resolver.clone();
             let manager = manager.clone();
 
@@ -246,10 +245,7 @@ fn engine(manager: Arc<ConnectionManager>, executor: TaskExecutor) -> mpsc::Unbo
                 }
             }
         })
-        .map_err(|_| {
-            error!("service discovery engine stopped");
-            ()
-        })
+        .map_err(|_| error!("service discovery engine stopped"))
     };
 
     executor.spawn(f());
@@ -363,7 +359,7 @@ fn lookup(
                     // if going through a proxy, we use the base address,
                     // otherwise we look it up by DNS query
                     let address_query = if proxied_query || proxy {
-                        Either::A(future::ok(base_address.clone()))
+                        Either::A(future::ok(base_address))
                     } else {
                         Either::B(
                             resolver
@@ -429,7 +425,7 @@ fn lookup(
                                     Either::A(future::ok(()))
                                 }
                                 Ok(b) => {
-                                    let _ = tx.send(Ok(b.clone()));
+                                    let _ = tx.send(Ok(b));
                                     Either::B(future::ok(()))
                                 }
                             }),

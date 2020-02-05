@@ -10,11 +10,11 @@ use futures::{
 };
 use rand;
 use tokio::prelude::*;
-use tokio::runtime::TaskExecutor;
 
 use crate::client::SerializeMessage;
 use crate::connection::{Authentication, Connection, SerialId};
 use crate::error::ProducerError;
+use crate::executor::{PulsarExecutor, TaskExecutor};
 use crate::message::proto::{self, EncryptionKeys, Schema};
 use crate::{Error, Pulsar};
 
@@ -83,7 +83,7 @@ impl Producer {
         let topic = topic.into();
         match T::serialize_message(message) {
             Ok(message) => Either::A(self.send_message(topic, message)),
-            Err(e) => Either::B(future::failed(e.into())),
+            Err(e) => Either::B(future::failed(e)),
         }
     }
 
@@ -112,7 +112,7 @@ impl Producer {
                     .map(|m| self.send_message(topic.clone(), m))
                     .collect::<Vec<_>>(),
             )),
-            Err(e) => Either::B(future::failed(e.into())),
+            Err(e) => Either::B(future::failed(e)),
         }
     }
 
@@ -130,7 +130,7 @@ impl Producer {
             Ok(_) => Either::A(future.then(|r| {
                 match r {
                     Ok(Ok(data)) => Ok(data),
-                    Ok(Err(e)) => Err(e.into()),
+                    Ok(Err(e)) => Err(e),
                     Err(oneshot::Canceled) => Err(ProducerError::Custom(
                         "Unexpected error: pulsar producer engine unexpectedly dropped".to_owned(),
                     )
@@ -202,10 +202,7 @@ impl Future for ProducerEngine {
                                             None,
                                             self.producer_options.clone(),
                                         )
-                                        .then(|r| {
-                                            tx.send(r.map(|producer| Arc::new(producer)))
-                                                .map_err(drop)
-                                        })
+                                        .then(|r| tx.send(r.map(Arc::new)).map_err(drop))
                                 });
                                 rx
                             });
@@ -254,14 +251,14 @@ pub struct TopicProducer {
 }
 
 impl TopicProducer {
-    pub fn new<S1, S2>(
+    pub fn new<S1, S2, E: PulsarExecutor>(
         addr: S1,
         topic: S2,
         name: Option<String>,
         auth: Option<Authentication>,
         proxy_to_broker_url: Option<String>,
         options: ProducerOptions,
-        executor: TaskExecutor,
+        executor: E,
     ) -> impl Future<Item = TopicProducer, Error = Error>
     where
         S1: Into<String>,
@@ -270,7 +267,7 @@ impl TopicProducer {
         Connection::new(addr.into(), auth, proxy_to_broker_url, executor)
             .map_err(|e| e.into())
             .and_then(move |conn| {
-                TopicProducer::from_connection(Arc::new(conn), topic.into(), name, options)
+                TopicProducer::from_connection::<_>(Arc::new(conn), topic.into(), name, options)
             })
     }
 
@@ -345,7 +342,7 @@ impl TopicProducer {
     ) -> impl Future<Item = proto::CommandSendReceipt, Error = Error> {
         match T::serialize_message(message) {
             Ok(message) => Either::A(self.send_message(message, num_messages)),
-            Err(e) => Either::B(future::failed(e.into())),
+            Err(e) => Either::B(future::failed(e)),
         }
     }
 

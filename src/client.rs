@@ -7,12 +7,12 @@ use futures::{
     future::{self, Either},
     Future,
 };
-use tokio::runtime::TaskExecutor;
 
 use crate::connection::Authentication;
 use crate::connection_manager::{BrokerAddress, ConnectionManager};
 use crate::consumer::{Consumer, ConsumerBuilder, ConsumerOptions, MultiTopicConsumer, Unset};
 use crate::error::Error;
+use crate::executor::{PulsarExecutor, TaskExecutor};
 use crate::message::proto::{self, command_subscribe::SubType, CommandSendReceipt};
 use crate::message::Payload;
 use crate::producer::{self, Producer, ProducerOptions, TopicProducer};
@@ -92,12 +92,14 @@ pub struct Pulsar {
 }
 
 impl Pulsar {
-    pub fn new(
+    pub fn new<E: PulsarExecutor>(
         addr: SocketAddr,
         auth: Option<Authentication>,
-        executor: TaskExecutor,
+        executor: E,
     ) -> impl Future<Item = Self, Error = Error> {
-        ConnectionManager::new(addr, auth.clone(), executor.clone())
+        let executor = TaskExecutor::new(executor);
+
+        ConnectionManager::new(addr, auth, executor.clone())
             .from_err()
             .map(|manager| {
                 let manager = Arc::new(manager);
@@ -235,7 +237,7 @@ impl Pulsar {
         let manager = self.manager.clone();
 
         self.service_discovery
-            .lookup_partitioned_topic(topic.clone())
+            .lookup_partitioned_topic(topic)
             .from_err()
             .and_then(move |v| {
                 let res =
@@ -281,11 +283,11 @@ impl Pulsar {
             .from_err()
             .and_then(move |broker_address| manager.get_connection(&broker_address).from_err())
             .and_then(move |conn| {
-                TopicProducer::from_connection(conn, topic, name, options).from_err()
+                TopicProducer::from_connection::<_>(conn, topic, name, options).from_err()
             })
     }
 
-    pub fn create_partitioned_producers<S: Into<String> + Clone>(
+    pub fn create_partitioned_producers<S: Into<String>>(
         &self,
         topic: S,
         options: ProducerOptions,
@@ -293,7 +295,7 @@ impl Pulsar {
         let manager = self.manager.clone();
 
         self.service_discovery
-            .lookup_partitioned_topic(topic.clone())
+            .lookup_partitioned_topic(topic)
             .from_err()
             .and_then(move |v| {
                 let res = v
@@ -322,8 +324,8 @@ impl Pulsar {
         options: ProducerOptions,
     ) -> impl Future<Item = CommandSendReceipt, Error = Error> {
         match M::serialize_message(message) {
-            Ok(message) => Either::A(self.send_raw(message, topic, options)),
-            Err(e) => Either::B(future::failed(e.into())),
+            Ok(message) => Either::A(self.send_raw::<S>(message, topic, options)),
+            Err(e) => Either::B(future::failed(e)),
         }
     }
 

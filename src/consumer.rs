@@ -10,11 +10,11 @@ use futures::Future;
 use futures::{sync::mpsc, Async, Stream};
 use rand;
 use regex::Regex;
-use tokio::runtime::TaskExecutor;
 use tokio::timer::Interval;
 
 use crate::connection::{Authentication, Connection};
 use crate::error::{ConnectionError, ConsumerError, Error};
+use crate::executor::{PulsarExecutor, TaskExecutor};
 use crate::message::{
     proto::{self, command_subscribe::SubType, MessageIdData, Schema},
     Message as RawMessage, Payload,
@@ -49,7 +49,7 @@ pub struct Consumer<T: DeserializeMessage> {
 }
 
 impl<T: DeserializeMessage> Consumer<T> {
-    pub fn new(
+    pub fn new<E: PulsarExecutor>(
         addr: String,
         topic: String,
         subscription: String,
@@ -58,12 +58,12 @@ impl<T: DeserializeMessage> Consumer<T> {
         consumer_name: Option<String>,
         auth_data: Option<Authentication>,
         proxy_to_broker_url: Option<String>,
-        executor: TaskExecutor,
+        executor: E,
         batch_size: Option<u32>,
         unacked_message_redelivery_delay: Option<Duration>,
         options: ConsumerOptions,
     ) -> impl Future<Item = Consumer<T>, Error = Error> {
-        Connection::new(addr, auth_data, proxy_to_broker_url, executor.clone())
+        Connection::new(addr, auth_data, proxy_to_broker_url, executor)
             .from_err()
             .and_then(move |conn| {
                 Consumer::from_connection(
@@ -120,7 +120,7 @@ impl<T: DeserializeMessage> Consumer<T> {
                     connection.clone(),
                     unacked_message_redelivery_delay,
                     tick_delay,
-                    &connection.executor(),
+                    connection.executor(),
                 );
                 Consumer {
                     connection,
@@ -279,14 +279,16 @@ struct AckHandler {
 impl AckHandler {
     /// Create and spawn a new AckHandler future, which will run until the connection fails, or all
     /// inbound senders are dropped and any pending redelivery messages have been sent
-    pub fn new(
+    pub fn new<E: PulsarExecutor>(
         conn: Arc<Connection>,
         redelivery_delay: Option<Duration>,
         tick_delay: Duration,
-        executor: &TaskExecutor,
+        executor: E,
     ) -> UnboundedSender<AckMessage> {
         let (tx, rx) = mpsc::unbounded();
-        executor.spawn(AckHandler {
+        let executor = TaskExecutor::new(executor);
+
+        executor.clone().spawn(AckHandler {
             pending_nacks: BinaryHeap::new(),
             conn,
             inbound: Some(rx),
@@ -386,13 +388,12 @@ impl Future for AckHandler {
                 }
                 Ok(Async::NotReady) => {
                     if self.inbound.is_none() && self.pending_nacks.is_empty() {
-                        return Ok(Async::Ready(()))
+                        return Ok(Async::Ready(()));
                     } else {
-                        return Ok(Async::NotReady)
+                        return Ok(Async::NotReady);
                     }
                 }
-                Ok(Async::Ready(None)) |
-                Err(_) => return Err(()),
+                Ok(Async::Ready(None)) | Err(_) => return Err(()),
             }
         }
     }
