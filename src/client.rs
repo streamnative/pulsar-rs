@@ -270,7 +270,7 @@ impl Pulsar {
             })
     }
 
-    pub fn create_producer<S: Into<String>, E: PulsarExecutor>(
+    pub fn create_producer<S: Into<String>>(
         &self,
         topic: S,
         name: Option<String>,
@@ -283,11 +283,11 @@ impl Pulsar {
             .from_err()
             .and_then(move |broker_address| manager.get_connection(&broker_address).from_err())
             .and_then(move |conn| {
-                TopicProducer::from_connection::<_, E>(conn, topic, name, options).from_err()
+                TopicProducer::from_connection::<_>(conn, topic, name, options).from_err()
             })
     }
 
-    pub fn create_partitioned_producers<S: Into<String>, E: PulsarExecutor>(
+    pub fn create_partitioned_producers<S: Into<String>>(
         &self,
         topic: S,
         options: ProducerOptions,
@@ -298,48 +298,44 @@ impl Pulsar {
             .lookup_partitioned_topic(topic)
             .from_err()
             .and_then(move |v| {
-                let res =
-                    v.iter()
-                        .cloned()
-                        .map(|(topic, broker_address)| {
-                            let options = options.clone();
-                            manager.get_connection(&broker_address).from_err().and_then(
-                                move |conn| {
-                                    TopicProducer::from_connection::<_, E>(
-                                        conn,
-                                        topic,
-                                        None,
-                                        options.clone(),
-                                    )
+                let res = v
+                    .iter()
+                    .cloned()
+                    .map(|(topic, broker_address)| {
+                        let options = options.clone();
+                        manager
+                            .get_connection(&broker_address)
+                            .from_err()
+                            .and_then(move |conn| {
+                                TopicProducer::from_connection(conn, topic, None, options.clone())
                                     .from_err()
-                                },
-                            )
-                        })
-                        .collect::<Vec<_>>();
+                            })
+                    })
+                    .collect::<Vec<_>>();
 
                 future::join_all(res)
             })
     }
 
-    pub fn send<S: Into<String>, M: SerializeMessage + ?Sized, E: PulsarExecutor>(
+    pub fn send<S: Into<String>, M: SerializeMessage + ?Sized>(
         &self,
         topic: S,
         message: &M,
         options: ProducerOptions,
     ) -> impl Future<Item = CommandSendReceipt, Error = Error> {
         match M::serialize_message(message) {
-            Ok(message) => Either::A(self.send_raw::<S, E>(message, topic, options)),
+            Ok(message) => Either::A(self.send_raw::<S>(message, topic, options)),
             Err(e) => Either::B(future::failed(e)),
         }
     }
 
-    pub fn send_raw<S: Into<String>, E: PulsarExecutor>(
+    pub fn send_raw<S: Into<String>>(
         &self,
         message: producer::Message,
         topic: S,
         options: ProducerOptions,
     ) -> impl Future<Item = CommandSendReceipt, Error = Error> {
-        self.create_producer::<_, E>(topic, None, options)
+        self.create_producer(topic, None, options)
             .and_then(|producer| producer.send_raw(message).from_err())
     }
 

@@ -197,7 +197,7 @@ impl Future for ProducerEngine {
                                 let (tx, rx) = oneshot::channel();
                                 tokio::spawn({
                                     self.pulsar
-                                        .create_producer::<_, TaskExecutor>(
+                                        .create_producer(
                                             topic.clone(),
                                             None,
                                             self.producer_options.clone(),
@@ -267,11 +267,11 @@ impl TopicProducer {
         Connection::new(addr.into(), auth, proxy_to_broker_url, executor)
             .map_err(|e| e.into())
             .and_then(move |conn| {
-                TopicProducer::from_connection::<_, E>(Arc::new(conn), topic.into(), name, options)
+                TopicProducer::from_connection::<_>(Arc::new(conn), topic.into(), name, options)
             })
     }
 
-    pub fn from_connection<S: Into<String>, E: PulsarExecutor>(
+    pub fn from_connection<S: Into<String>>(
         connection: Arc<Connection>,
         topic: S,
         name: Option<String>,
