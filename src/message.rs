@@ -237,6 +237,39 @@ named!(payload_frame<PayloadFrame>,
     )
 );
 
+pub(crate) struct BatchedMessage {
+    pub metadata: proto::SingleMessageMetadata,
+    pub payload: Vec<u8>,
+}
+
+#[rustfmt::skip::macros(named)]
+named!(batched_message<BatchedMessage>,
+    do_parse!(
+        metadata_size: be_u32 >>
+        metadata: map_res!(
+            take!(metadata_size),
+            proto::SingleMessageMetadata::decode
+        ) >>
+        payload: take!(metadata.payload_size) >>
+
+        (BatchedMessage {
+            metadata,
+            payload: payload.to_vec(),
+        })
+    )
+);
+
+pub(crate) fn parse_batched_message(
+    count: u32,
+    payload: &[u8],
+) -> Result<Vec<BatchedMessage>, ConnectionError> {
+    let (_, result) =
+        nom::multi::count(batched_message, count as usize)(payload).map_err(|err| {
+            ConnectionError::Decoding(format!("Error decoding batched messages: {:?}", err))
+        })?;
+    Ok(result)
+}
+
 #[rustfmt::skip]
 pub mod proto {
     #[derive(Clone, PartialEq, Message)]
@@ -260,7 +293,7 @@ pub mod proto {
             Avro = 4,
         }
     }
-    #[derive(Clone, PartialEq, Eq, Message)]
+    #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Message)]
     pub struct MessageIdData {
         #[prost(uint64, required, tag="1")]
         pub ledger_id: u64,

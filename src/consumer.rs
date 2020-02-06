@@ -16,10 +16,12 @@ use tokio::timer::Interval;
 use crate::connection::{Authentication, Connection};
 use crate::error::{ConnectionError, ConsumerError, Error};
 use crate::message::{
+    parse_batched_message,
     proto::{self, command_subscribe::SubType, MessageIdData, Schema},
-    Message as RawMessage, Payload,
+    BatchedMessage, Message as RawMessage, Metadata, Payload,
 };
 use crate::{DeserializeMessage, Pulsar};
+use bit_vec::BitVec;
 use nom::lib::std::cmp::Ordering;
 use nom::lib::std::collections::BinaryHeap;
 use tokio::prelude::Poll;
@@ -46,6 +48,7 @@ pub struct Consumer<T: DeserializeMessage> {
     #[allow(unused)]
     data_type: PhantomData<fn(Payload) -> T::Output>,
     options: ConsumerOptions,
+    current_message: Option<BatchedMessageIterator>,
 }
 
 impl<T: DeserializeMessage> Consumer<T> {
@@ -132,6 +135,7 @@ impl<T: DeserializeMessage> Consumer<T> {
                     remaining_messages: batch_size,
                     data_type: PhantomData,
                     options,
+                    current_message: None,
                 }
             })
     }
@@ -143,19 +147,54 @@ impl<T: DeserializeMessage> Consumer<T> {
     pub fn options(&self) -> &ConsumerOptions {
         &self.options
     }
+
+    fn create_message(
+        &self,
+        message_id: proto::MessageIdData,
+        payload: Payload,
+    ) -> Message<T::Output> {
+        Message {
+            topic: self.topic.clone(),
+            ack: Ack::new(
+                self.id,
+                MessageData {
+                    id: message_id,
+                    batch_size: payload.metadata.num_messages_in_batch.clone(),
+                },
+                self.ack_handler.clone(),
+            ),
+            payload: T::deserialize_message(payload),
+        }
+    }
+
+    fn poll_current_message(&mut self) -> Poll<Option<Message<T::Output>>, Error> {
+        if let Some(mut iterator) = self.current_message.take() {
+            match iterator.next() {
+                Some((id, payload)) => {
+                    self.current_message = Some(iterator);
+                    let message = self.create_message(id, payload);
+                    Ok(Async::Ready(Some(message)))
+                }
+                None => Ok(Async::NotReady),
+            }
+        } else {
+            Ok(Async::NotReady)
+        }
+    }
+}
+
+struct MessageData {
+    id: proto::MessageIdData,
+    batch_size: Option<i32>,
 }
 
 pub struct Ack {
-    message_ids: BTreeMap<u64, Vec<proto::MessageIdData>>,
+    message_ids: BTreeMap<u64, Vec<MessageData>>,
     sender: UnboundedSender<AckMessage>,
 }
 
 impl Ack {
-    fn new(
-        consumer_id: u64,
-        msg: proto::MessageIdData,
-        sender: UnboundedSender<AckMessage>,
-    ) -> Ack {
+    fn new(consumer_id: u64, msg: MessageData, sender: UnboundedSender<AckMessage>) -> Ack {
         let mut message_ids = BTreeMap::new();
         message_ids.insert(consumer_id, vec![msg]);
         Ack {
@@ -211,7 +250,7 @@ impl Ack {
         self.send_nack();
     }
 
-    fn take_message_ids(&mut self) -> BTreeMap<u64, Vec<proto::MessageIdData>> {
+    fn take_message_ids(&mut self) -> BTreeMap<u64, Vec<MessageData>> {
         let mut message_ids = BTreeMap::new();
         std::mem::swap(&mut message_ids, &mut self.message_ids);
         message_ids
@@ -238,12 +277,12 @@ impl Drop for Ack {
 enum AckMessage {
     Ack {
         consumer_id: u64,
-        message_ids: Vec<MessageIdData>,
+        message_ids: Vec<MessageData>,
         cumulative: bool,
     },
     Nack {
         consumer_id: u64,
-        message_ids: Vec<MessageIdData>,
+        message_ids: Vec<MessageData>,
     },
 }
 
@@ -274,6 +313,7 @@ struct AckHandler {
     inbound: Option<UnboundedReceiver<AckMessage>>,
     unack_redelivery_delay: Option<Duration>,
     tick_timer: tokio::timer::Interval,
+    batch_messages: BTreeMap<MessageIdData, (bool, BitVec)>,
 }
 
 impl AckHandler {
@@ -292,6 +332,7 @@ impl AckHandler {
             inbound: Some(rx),
             unack_redelivery_delay: redelivery_delay,
             tick_timer: Interval::new_interval(tick_delay),
+            batch_messages: BTreeMap::new(),
         });
         tx
     }
@@ -317,6 +358,62 @@ impl AckHandler {
             None
         }
     }
+
+    fn should_ack(&mut self, message_data: MessageData) -> Option<proto::MessageIdData> {
+        let MessageData { mut id, batch_size } = message_data;
+        let batch_index = id.batch_index.take();
+
+        match (batch_index, batch_size) {
+            (Some(index), Some(size)) if index >= 0 && size > 1 => {
+                let (is_nacked, seen_messages) = self
+                    .batch_messages
+                    .entry(id.clone())
+                    .or_insert_with(|| (false, BitVec::from_elem(size as usize, false)));
+
+                seen_messages.set(index as usize, true);
+                let complete = seen_messages.all();
+                let should_ack = complete && !*is_nacked;
+                if complete {
+                    self.batch_messages.remove(&id);
+                }
+
+                if should_ack {
+                    Some(id)
+                } else {
+                    None
+                }
+            }
+            _ => Some(id),
+        }
+    }
+
+    fn should_nack(&mut self, message_data: MessageData) -> Option<proto::MessageIdData> {
+        let MessageData { mut id, batch_size } = message_data;
+        let batch_index = id.batch_index.take();
+
+        match (batch_index, batch_size) {
+            (Some(index), Some(size)) if index >= 0 && size > 1 => {
+                let (is_nacked, seen_messages) = self
+                    .batch_messages
+                    .entry(id.clone())
+                    .or_insert_with(|| (false, BitVec::from_elem(size as usize, false)));
+
+                seen_messages.set(index as usize, true);
+                let should_nack = !*is_nacked;
+                *is_nacked = true;
+                if seen_messages.all() {
+                    self.batch_messages.remove(&id);
+                }
+
+                if should_nack {
+                    Some(id)
+                } else {
+                    None
+                }
+            }
+            _ => Some(id),
+        }
+    }
 }
 
 impl Future for AckHandler {
@@ -332,9 +429,12 @@ impl Future for AckHandler {
                     message_ids,
                     cumulative,
                 } => {
+                    let ids = message_ids
+                        .into_iter()
+                        .filter_map(|message| self.should_ack(message));
                     acks.entry((consumer_id, cumulative))
                         .or_insert_with(Vec::new)
-                        .extend(message_ids);
+                        .extend(ids);
                 }
                 AckMessage::Nack {
                     consumer_id,
@@ -342,12 +442,18 @@ impl Future for AckHandler {
                 } => {
                     // if timeout is not set, messages will only be redelivered on reconnect,
                     // so we don't manually send redelivery request
+                    let ids: Vec<proto::MessageIdData> = message_ids
+                        .into_iter()
+                        .filter_map(|message| self.should_nack(message))
+                        .collect();
                     if let Some(nack_timeout) = self.unack_redelivery_delay {
-                        self.pending_nacks.push(MessageResend {
-                            consumer_id,
-                            when: Instant::now() + nack_timeout,
-                            message_ids,
-                        });
+                        if !ids.is_empty() {
+                            self.pending_nacks.push(MessageResend {
+                                consumer_id,
+                                when: Instant::now() + nack_timeout,
+                                message_ids: ids,
+                            });
+                        }
                     }
                 }
             }
@@ -386,14 +492,74 @@ impl Future for AckHandler {
                 }
                 Ok(Async::NotReady) => {
                     if self.inbound.is_none() && self.pending_nacks.is_empty() {
-                        return Ok(Async::Ready(()))
+                        return Ok(Async::Ready(()));
                     } else {
-                        return Ok(Async::NotReady)
+                        return Ok(Async::NotReady);
                     }
                 }
-                Ok(Async::Ready(None)) |
-                Err(_) => return Err(()),
+                Ok(Async::Ready(None)) | Err(_) => return Err(()),
             }
+        }
+    }
+}
+
+struct BatchedMessageIterator {
+    messages: std::vec::IntoIter<BatchedMessage>,
+    message_id: proto::MessageIdData,
+    metadata: Metadata,
+    total_messages: u32,
+    current_index: u32,
+}
+
+impl BatchedMessageIterator {
+    fn new(message_id: proto::MessageIdData, payload: Payload) -> Result<Self, ConnectionError> {
+        let total_messages = payload
+            .metadata
+            .num_messages_in_batch
+            .expect("expected batched message") as u32;
+        let messages = parse_batched_message(total_messages, &payload.data)?;
+
+        Ok(Self {
+            messages: messages.into_iter(),
+            message_id,
+            total_messages,
+            metadata: payload.metadata,
+            current_index: 0,
+        })
+    }
+}
+
+impl Iterator for BatchedMessageIterator {
+    type Item = (proto::MessageIdData, Payload);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let remaining = self.total_messages - self.current_index;
+        if remaining == 0 {
+            return None;
+        }
+        let index = self.current_index;
+        self.current_index += 1;
+        if let Some(batched_message) = self.messages.next() {
+            let id = proto::MessageIdData {
+                batch_index: Some(index as i32),
+                ..self.message_id.clone()
+            };
+
+            let metadata = Metadata {
+                properties: batched_message.metadata.properties,
+                partition_key: batched_message.metadata.partition_key,
+                event_time: batched_message.metadata.event_time,
+                ..self.metadata.clone()
+            };
+
+            let payload = Payload {
+                metadata,
+                data: batched_message.payload,
+            };
+
+            Some((id, payload))
+        } else {
+            None
         }
     }
 }
@@ -403,13 +569,17 @@ impl<T: DeserializeMessage> Stream for Consumer<T> {
     type Error = Error;
 
     fn poll(&mut self) -> Result<Async<Option<Self::Item>>, Self::Error> {
+        if let Ok(Async::Ready(message)) = self.poll_current_message() {
+            return Ok(Async::Ready(message));
+        }
+
         if !self.connection.is_valid() {
             if let Some(err) = self.connection.error() {
                 return Err(Error::Consumer(ConsumerError::Connection(err)));
             }
         }
 
-        if self.remaining_messages <= self.batch_size / 2 {
+        if self.remaining_messages < self.batch_size / 2 {
             self.connection
                 .sender()
                 .send_flow(self.id, self.batch_size - self.remaining_messages)?;
@@ -431,11 +601,16 @@ impl<T: DeserializeMessage> Stream for Consumer<T> {
         }
 
         match message {
-            Some(Some((message, payload))) => Ok(Async::Ready(Some(Message {
-                topic: self.topic.clone(),
-                payload: T::deserialize_message(payload),
-                ack: Ack::new(self.id, message.message_id, self.ack_handler.clone()),
-            }))),
+            Some(Some((message, payload))) => match payload.metadata.num_messages_in_batch {
+                Some(_) => {
+                    self.current_message =
+                        Some(BatchedMessageIterator::new(message.message_id, payload)?);
+                    self.poll_current_message()
+                }
+                None => Ok(Async::Ready(Some(
+                    self.create_message(message.message_id, payload),
+                ))),
+            },
             Some(None) => Err(Error::Consumer(ConsumerError::MissingPayload(format!(
                 "Missing payload for message {:?}",
                 message

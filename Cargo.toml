@@ -34,6 +34,7 @@ log = "0.4.6"
 trust-dns-resolver = "0.12"
 url = "2.1"
 regex = "1.1.7"
+bit-vec = "0.6"
 
 [dev-dependencies]
 serde = { version = "1.0.101", features = ["derive"] }
