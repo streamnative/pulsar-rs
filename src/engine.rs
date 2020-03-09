@@ -26,12 +26,7 @@ pub struct ProducerReady {
     sender: mpsc::Sender<producer::Message>
 }
 
-pub enum ConsumerMessage {
-    Message(Result<Message, Error>),
-    Batch(Result<Vec<Message>, Error>),
-    CloseConsumer(u64),
-    EndOfTopic(u64),
-}
+
 
 pub struct ConnectProducer {
     pub topic: String,

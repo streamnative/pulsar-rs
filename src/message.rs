@@ -10,7 +10,7 @@ use crate::error::Error;
 use crate::proto::command_lookup_topic_response::LookupType as TopicLookupType;
 use crate::proto::command_partitioned_topic_metadata_response::LookupType as PartitionLookupType;
 use std::collections::BTreeMap;
-use std::convert::TryInto;
+use std::convert::{TryInto, TryFrom};
 
 pub(crate) trait IntoProto {
     fn into_proto(self, request_ids: &mut SerialId) -> proto::Message;
@@ -25,9 +25,6 @@ pub(crate) struct Connect {
     pub auth_method_name: Option<String>,
     pub auth_data: Option<Vec<u8>>,
     pub proxy_to_broker_url: Option<String>,
-    pub original_principal: Option<String>,
-    pub original_auth_data: Option<String>,
-    pub original_auth_method: Option<String>,
 }
 
 impl IntoProto for Connect {
@@ -41,10 +38,8 @@ impl IntoProto for Connect {
                     auth_method_name: self.auth_method_name,
                     auth_data: self.auth_data,
                     proxy_to_broker_url: self.proxy_to_broker_url,
-                    original_principal: self.original_principal,
-                    original_auth_data: self.original_auth_data,
                     auth_method: self.auth_method.map(|a| a as i32),
-                    original_auth_method: self.original_auth_method
+                    ..Default::default()
                 }),
                 ..Default::default()
             },
@@ -112,12 +107,11 @@ impl FromProto for Pong {
 pub(crate) struct CreateProducer {
     pub topic: String,
     pub producer_id: u64,
-    pub options: Option<ProducerOptions>,
+    pub options: ProducerOptions,
 }
 
 impl IntoProto for CreateProducer {
     fn into_proto(self, request_ids: &mut SerialId) -> proto::Message {
-        let options = self.options.unwrap_or_default();
         Message {
             command: proto::BaseCommand {
                 type_: CommandType::Producer as i32,
@@ -125,10 +119,10 @@ impl IntoProto for CreateProducer {
                     topic: self.topic,
                     producer_id: self.producer_id,
                     request_id: request_ids.next(),
-                    producer_name: options.producer_name,
-                    encrypted: options.encrypted,
-                    metadata: options.metadata.map(to_key_value).unwrap_or_default(),
-                    schema: options.schema,
+                    producer_name: self.options.producer_name,
+                    encrypted: self.options.encrypted,
+                    metadata: self.options.metadata.map(to_key_value).unwrap_or_default(),
+                    schema: self.options.schema,
                 }),
                 ..Default::default()
             },
@@ -541,7 +535,7 @@ impl FromProto for CommandSuccess {
                 Ok(CommandSuccess)
             },
             other => {
-                Err(Error::unexpected_response(format!("Expected `NamespaceTopics`, found {:?}", other)))
+                Err(Error::unexpected_response(format!("Expected `CommandSuccess`, found {:?}", other)))
             }
         }
     }
@@ -566,6 +560,88 @@ impl FromProto for SendReceipt {
             other => {
                 Err(Error::unexpected_response(format!("Expected `SendReceipt`, found {:?}", other)))
             }
+        }
+    }
+}
+
+pub(crate) struct TopicMessage {
+    pub consumer_id: u64,
+    pub message_id: MessageIdData,
+    pub payload: Payload,
+}
+
+impl FromProto for TopicMessage {
+    fn from_proto(proto: Message) -> Result<Self, Error> {
+        let proto = check_error(proto)?;
+        match proto.command {
+            proto::BaseCommand { message: Some(message), .. } => {
+                Ok(TopicMessage {
+                    consumer_id: message.consumer_id,
+                    message_id: response.message_id,
+                    payload: proto.payload.ok_or_else(|| Error::unexpected_response(format!("Consumer {} received message with no payload", msg_data.consumer_id)))?
+                })
+            },
+            other => {
+                Err(Error::unexpected_response(format!("Expected `Message`, found {:?}", other)))
+            }
+        }
+    }
+}
+
+pub(crate) struct EndOfTopic {
+    pub consumer_id: u64,
+}
+
+impl FromProto for EndOfTopic {
+    fn from_proto(proto: Message) -> Result<Self, Error> {
+        match check_error(proto)?.command {
+            proto::BaseCommand { reached_end_of_topic: Some(message), .. } => {
+                Ok(EndOfTopic {
+                    consumer_id: message.consumer_id,
+                })
+            },
+            other => {
+                Err(Error::unexpected_response(format!("Expected `EndOfTopic`, found {:?}", other)))
+            }
+        }
+    }
+}
+
+pub(crate) struct ActiveConsumerChange {
+    pub consumer_id: u64,
+    pub is_active: Option<bool>,
+}
+
+impl FromProto for ActiveConsumerChange {
+    fn from_proto(proto: Message) -> Result<Self, Error> {
+        match check_error(proto)?.command {
+            proto::BaseCommand { active_consumer_change: Some(message), .. } => {
+                Ok(ActiveConsumerChange {
+                    consumer_id: message.consumer_id,
+                    is_active: message.is_active,
+                })
+            },
+            other => {
+                Err(Error::unexpected_response(format!("Expected `EndOfTopic`, found {:?}", other)))
+            }
+        }
+    }
+}
+
+pub(crate) enum ConsumerMessage {
+    Message(TopicMessage),
+    EndOfTopic(EndOfTopic),
+    ActiveConsumerChange(ActiveConsumerChange)
+}
+
+impl FromProto for ConsumerMessage {
+    fn from_proto(proto: Message) -> Result<Self, Error> {
+        let msg = check_error(proto)?;
+        match CommandType::try_from(msg.command.type_)? {
+            CommandType::Message => Ok(ConsumerMessage::Message(TopicMessage::from_proto(proto)?)),
+            CommandType::ReachedEndOfTopic => Ok(ConsumerMessage::EndOfTopic(EndOfTopic::from_proto(proto)?)),
+            CommandType::ActiveConsumerChange => Ok(ConsumerMessage::ActiveConsumerChange(ActiveConsumerChange::from_proto(proto)?)),
+            _ => Err(Error::unexpected_response(format!("Expected one of `Message`, `EndOfTopic`, `ActiveConsumerChange`, found {:?}", proto.command)))
         }
     }
 }

@@ -34,6 +34,7 @@ mod resolver;
 mod proto;
 mod message;
 pub mod producer;
+mod client;
 //mod service_discovery;
 
 //#[cfg(test)]

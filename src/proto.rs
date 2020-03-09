@@ -1,11 +1,11 @@
 use crate::error::Error;
 use bytes::{Buf, BufMut, BytesMut};
 use crc::crc32;
-use tokio_util::codec::{Decoder, Encoder};
 use nom::number::streaming::{be_u16, be_u32};
 use prost::{self, Message as ImplProtobuf};
+use std::convert::{TryFrom, TryInto};
 use std::io::Cursor;
-use std::convert::TryFrom;
+use tokio_util::codec::{Decoder, Encoder};
 
 pub use self::proto::*;
 use crate::proto::proto::base_command::Type;
@@ -19,6 +19,162 @@ use futures::io::ErrorKind;
 pub enum RequestKey {
     RequestId(u64),
     ProducerSend { producer_id: u64, sequence_id: u64 },
+    Consumer { consumer_id: u64 }
+}
+
+pub trait ObtainKey {
+    fn request_key(&self) -> RequestKey;
+}
+
+impl ObtainKey for CommandSubscribe {
+    fn request_key(&self) -> RequestKey {
+        RequestKey::RequestId(self.request_id)
+    }
+}
+impl ObtainKey for CommandProducer {
+    fn request_key(&self) -> RequestKey {
+        RequestKey::RequestId(self.request_id)
+    }
+}
+impl ObtainKey for CommandUnsubscribe {
+    fn request_key(&self) -> RequestKey {
+        RequestKey::RequestId(self.request_id)
+    }
+}
+impl ObtainKey for CommandSuccess {
+    fn request_key(&self) -> RequestKey {
+        RequestKey::RequestId(self.request_id)
+    }
+}
+impl ObtainKey for CommandError {
+    fn request_key(&self) -> RequestKey {
+        RequestKey::RequestId(self.request_id)
+    }
+}
+impl ObtainKey for CommandCloseProducer {
+    fn request_key(&self) -> RequestKey {
+        RequestKey::RequestId(self.request_id)
+    }
+}
+impl ObtainKey for CommandCloseConsumer {
+    fn request_key(&self) -> RequestKey {
+        RequestKey::RequestId(self.request_id)
+    }
+}
+impl ObtainKey for CommandProducerSuccess {
+    fn request_key(&self) -> RequestKey {
+        RequestKey::RequestId(self.request_id)
+    }
+}
+impl ObtainKey for CommandPartitionedTopicMetadata {
+    fn request_key(&self) -> RequestKey {
+        RequestKey::RequestId(self.request_id)
+    }
+}
+impl ObtainKey for CommandPartitionedTopicMetadataResponse {
+    fn request_key(&self) -> RequestKey {
+        RequestKey::RequestId(self.request_id)
+    }
+}
+impl ObtainKey for CommandLookupTopic {
+    fn request_key(&self) -> RequestKey {
+        RequestKey::RequestId(self.request_id)
+    }
+}
+impl ObtainKey for CommandLookupTopicResponse {
+    fn request_key(&self) -> RequestKey {
+        RequestKey::RequestId(self.request_id)
+    }
+}
+impl ObtainKey for CommandConsumerStats {
+    fn request_key(&self) -> RequestKey {
+        RequestKey::RequestId(self.request_id)
+    }
+}
+impl ObtainKey for CommandConsumerStatsResponse {
+    fn request_key(&self) -> RequestKey {
+        RequestKey::RequestId(self.request_id)
+    }
+}
+impl ObtainKey for CommandSeek {
+    fn request_key(&self) -> RequestKey {
+        RequestKey::RequestId(self.request_id)
+    }
+}
+impl ObtainKey for CommandGetLastMessageId {
+    fn request_key(&self) -> RequestKey {
+        RequestKey::RequestId(self.request_id)
+    }
+}
+impl ObtainKey for CommandGetLastMessageIdResponse {
+    fn request_key(&self) -> RequestKey {
+        RequestKey::RequestId(self.request_id)
+    }
+}
+impl ObtainKey for CommandGetTopicsOfNamespace {
+    fn request_key(&self) -> RequestKey {
+        RequestKey::RequestId(self.request_id)
+    }
+}
+impl ObtainKey for CommandGetTopicsOfNamespaceResponse {
+    fn request_key(&self) -> RequestKey {
+        RequestKey::RequestId(self.request_id)
+    }
+}
+impl ObtainKey for CommandGetSchema {
+    fn request_key(&self) -> RequestKey {
+        RequestKey::RequestId(self.request_id)
+    }
+}
+impl ObtainKey for CommandGetSchemaResponse {
+    fn request_key(&self) -> RequestKey {
+        RequestKey::RequestId(self.request_id)
+    }
+}
+impl ObtainKey for CommandSend {
+    fn request_key(&self) -> RequestKey {
+        RequestKey::ProducerSend { producer_id: self.producer_id, sequence_id: self.sequence_id }
+    }
+}
+impl ObtainKey for CommandSendReceipt {
+    fn request_key(&self) -> RequestKey {
+        RequestKey::ProducerSend { producer_id: self.producer_id, sequence_id: self.sequence_id }
+    }
+}
+impl ObtainKey for CommandSendError {
+    fn request_key(&self) -> RequestKey {
+        RequestKey::ProducerSend { producer_id: self.producer_id, sequence_id: self.sequence_id }
+    }
+}
+impl ObtainKey for CommandAck {
+    fn request_key(&self) -> RequestKey {
+        RequestKey::Consumer { consumer_id: self.consumer_id }
+    }
+}
+impl ObtainKey for CommandActiveConsumerChange {
+    fn request_key(&self) -> RequestKey {
+        RequestKey::Consumer { consumer_id: self.consumer_id }
+    }
+}
+impl ObtainKey for CommandFlow {
+    fn request_key(&self) -> RequestKey {
+        RequestKey::Consumer { consumer_id: self.consumer_id }
+    }
+}
+impl ObtainKey for CommandMessage {
+    fn request_key(&self) -> RequestKey {
+        RequestKey::Consumer { consumer_id: self.consumer_id }
+    }
+}
+impl ObtainKey for CommandReachedEndOfTopic {
+    fn request_key(&self) -> RequestKey {
+        RequestKey::Consumer { consumer_id: self.consumer_id }
+    }
+}
+impl ObtainKey for CommandRedeliverUnacknowledgedMessages {
+    fn request_key(&self) -> RequestKey {
+        RequestKey::Consumer { consumer_id: self.consumer_id }
+    }
 }
 
 #[derive(Debug)]
@@ -29,62 +185,53 @@ pub struct Message {
 
 impl Message {
     pub fn request_key(&self) -> Option<RequestKey> {
+        fn key<T: ObtainKey>(cmd: &Option<T>) -> Option<RequestKey> {
+            cmd.as_ref().map(|c| c.request_key())
+        }
+        let command_type = match Type::try_from(command.type_) {
+            Ok(command_type) => command_type,
+            Err(e) => {
+                error!("{}", e);
+                return None;
+            }
+        };
         let command = &self.command;
-        command
-            .subscribe
-            .as_ref()
-            .map(|m| m.request_id)
-            .or(command.partition_metadata.as_ref().map(|m| m.request_id))
-            .or(command
-                .partition_metadata_response
-                .as_ref()
-                .map(|m| m.request_id))
-            .or(command.lookup_topic.as_ref().map(|m| m.request_id))
-            .or(command.lookup_topic_response.as_ref().map(|m| m.request_id))
-            .or(command.producer.as_ref().map(|m| m.request_id))
-            .or(command.producer_success.as_ref().map(|m| m.request_id))
-            .or(command.unsubscribe.as_ref().map(|m| m.request_id))
-            .or(command.seek.as_ref().map(|m| m.request_id))
-            .or(command.close_producer.as_ref().map(|m| m.request_id))
-            .or(command.close_consumer.as_ref().map(|m| m.request_id))
-            .or(command.success.as_ref().map(|m| m.request_id))
-            .or(command.producer_success.as_ref().map(|m| m.request_id))
-            .or(command.error.as_ref().map(|m| m.request_id))
-            .or(command.consumer_stats.as_ref().map(|m| m.request_id))
-            .or(command
-                .consumer_stats_response
-                .as_ref()
-                .map(|m| m.request_id))
-            .or(command.get_last_message_id.as_ref().map(|m| m.request_id))
-            .or(command
-                .get_last_message_id_response
-                .as_ref()
-                .map(|m| m.request_id))
-            .or(command
-                .get_topics_of_namespace
-                .as_ref()
-                .map(|m| m.request_id))
-            .or(command
-                .get_topics_of_namespace_response
-                .as_ref()
-                .map(|m| m.request_id))
-            .or(command.get_schema.as_ref().map(|m| m.request_id))
-            .or(command.get_schema_response.as_ref().map(|m| m.request_id))
-            .map(|request_id| RequestKey::RequestId(request_id))
-            .or(command
-                .send_receipt
-                .as_ref()
-                .map(|r| RequestKey::ProducerSend {
-                    producer_id: r.producer_id,
-                    sequence_id: r.sequence_id,
-                }))
-            .or(command
-                .send_error
-                .as_ref()
-                .map(|r| RequestKey::ProducerSend {
-                    producer_id: r.producer_id,
-                    sequence_id: r.sequence_id,
-                }))
+        match command_type {
+            Type::Subscribe => key(&command.subscribe),
+            Type::Producer => key(&command.producer),
+            Type::Send => key(&command.send),
+            Type::SendReceipt => key(&command.send_receipt),
+            Type::SendError => key(&command.send_error),
+            Type::Unsubscribe => key(&command.unsubscribe),
+            Type::Success => key(&command.success),
+            Type::Error => key(&command.error),
+            Type::CloseProducer => key(&command.close_producer),
+            Type::CloseConsumer => key(&command.close_consumer),
+            Type::ProducerSuccess => key(&command.producer_success),
+            Type::PartitionedMetadata => key(&command.partition_metadata),
+            Type::PartitionedMetadataResponse => key(&command.partition_metadata_response),
+            Type::Lookup => key(&command.lookup_topic),
+            Type::LookupResponse => key(&command.lookup_topic_response),
+            Type::ConsumerStats => key(&command.consumer_stats),
+            Type::ConsumerStatsResponse => key(&command.consumer_stats_response),
+            Type::ReachedEndOfTopic => key(&command.reached_end_of_topic),
+            Type::Seek => key(&command.seek),
+            Type::GetLastMessageId => key(&command.get_last_message_id),
+            Type::GetLastMessageIdResponse => key(&command.get_last_message_id_response),
+            Type::GetTopicsOfNamespace => key(&command.get_topics_of_namespace),
+            Type::GetTopicsOfNamespaceResponse => key(&command.get_topics_of_namespace_response),
+            Type::GetSchema => key(&command.get_schema),
+            Type::GetSchemaResponse => key(&command.get_schema_response),
+            Type::Ack => key(&command.ack),
+            Type::Flow => key(&command.flow),
+            Type::Message => key(&command.message),
+            Type::RedeliverUnacknowledgedMessages => key(&command.redeliver_unacknowledged_messages),
+            Type::ActiveConsumerChange => key(&command.active_consumer_change),
+            Type::Connect |
+            Type::Connected |
+            Type::Ping |
+            Type::Pong => None,
+        }
     }
 }
 
@@ -152,19 +299,13 @@ impl Decoder for Codec {
                 let msg = {
                     let (buf, command_frame) =
                         command_frame(&src[..message_size]).map_err(|err| {
-                            Error::decoding(format!(
-                                "Error decoding command frame: {:?}",
-                                err
-                            ))
+                            Error::decoding(format!("Error decoding command frame: {:?}", err))
                         })?;
                     let command = BaseCommand::decode(command_frame.command)?;
 
                     let payload = if buf.len() > 0 {
                         let (buf, payload_frame) = payload_frame(buf).map_err(|err| {
-                            Error::decoding(format!(
-                                "Error decoding payload frame: {:?}",
-                                err
-                            ))
+                            Error::decoding(format!("Error decoding payload frame: {:?}", err))
                         })?;
 
                         // TODO: Check crc32 of payload data
@@ -254,7 +395,10 @@ impl TryFrom<i32> for AuthMethod {
             value if value == AuthMethod::None as i32 => Ok(AuthMethod::None),
             value if value == AuthMethod::YcaV1 as i32 => Ok(AuthMethod::YcaV1),
             value if value == AuthMethod::Athens as i32 => Ok(AuthMethod::Athens),
-            unknown => Err(Error::unknown_variant(format!("Expected AuthMethod::None, found {}", unknown)))
+            unknown => Err(Error::unknown_variant(format!(
+                "Expected AuthMethod, found {}",
+                unknown
+            ))),
         }
     }
 }
@@ -280,9 +424,13 @@ impl TryFrom<i32> for base_command::Type {
             value if value == Type::ProducerSuccess as i32 => Ok(Type::ProducerSuccess),
             value if value == Type::Ping as i32 => Ok(Type::Ping),
             value if value == Type::Pong as i32 => Ok(Type::Pong),
-            value if value == Type::RedeliverUnacknowledgedMessages as i32 => Ok(Type::RedeliverUnacknowledgedMessages),
+            value if value == Type::RedeliverUnacknowledgedMessages as i32 => {
+                Ok(Type::RedeliverUnacknowledgedMessages)
+            }
             value if value == Type::PartitionedMetadata as i32 => Ok(Type::PartitionedMetadata),
-            value if value == Type::PartitionedMetadataResponse as i32 => Ok(Type::PartitionedMetadataResponse),
+            value if value == Type::PartitionedMetadataResponse as i32 => {
+                Ok(Type::PartitionedMetadataResponse)
+            }
             value if value == Type::Lookup as i32 => Ok(Type::Lookup),
             value if value == Type::LookupResponse as i32 => Ok(Type::LookupResponse),
             value if value == Type::ConsumerStats as i32 => Ok(Type::ConsumerStats),
@@ -290,13 +438,20 @@ impl TryFrom<i32> for base_command::Type {
             value if value == Type::ReachedEndOfTopic as i32 => Ok(Type::ReachedEndOfTopic),
             value if value == Type::Seek as i32 => Ok(Type::Seek),
             value if value == Type::GetLastMessageId as i32 => Ok(Type::GetLastMessageId),
-            value if value == Type::GetLastMessageIdResponse as i32 => Ok(Type::GetLastMessageIdResponse),
+            value if value == Type::GetLastMessageIdResponse as i32 => {
+                Ok(Type::GetLastMessageIdResponse)
+            }
             value if value == Type::ActiveConsumerChange as i32 => Ok(Type::ActiveConsumerChange),
             value if value == Type::GetTopicsOfNamespace as i32 => Ok(Type::GetTopicsOfNamespace),
-            value if value == Type::GetTopicsOfNamespaceResponse as i32 => Ok(Type::GetTopicsOfNamespaceResponse),
+            value if value == Type::GetTopicsOfNamespaceResponse as i32 => {
+                Ok(Type::GetTopicsOfNamespaceResponse)
+            }
             value if value == Type::GetSchema as i32 => Ok(Type::GetSchema),
             value if value == Type::GetSchemaResponse as i32 => Ok(Type::GetSchemaResponse),
-            unknown => Err(Error::unknown_variant(format!("Expected AuthMethod::YcaV1, found {}", unknown)))
+            unknown => Err(Error::unknown_variant(format!(
+                "Expected base_command::Type, found {}",
+                unknown
+            ))),
         }
     }
 }
@@ -306,7 +461,10 @@ impl TryFrom<i32> for command_ack::AckType {
         match value {
             value if value == AckType::Individual as i32 => Ok(AckType::Individual),
             value if value == AckType::Cumulative as i32 => Ok(AckType::Cumulative),
-            unknown => Err(Error::unknown_variant(format!("Expected AuthMethod::Athens, found {}", unknown)))
+            unknown => Err(Error::unknown_variant(format!(
+                "Expected command_ack::AckType, found {}",
+                unknown
+            ))),
         }
     }
 }
@@ -314,12 +472,25 @@ impl TryFrom<i32> for command_ack::ValidationError {
     type Error = Error;
     fn try_from(value: i32) -> Result<Self, Self::Error> {
         match value {
-            value if value == ValidationError::UncompressedSizeCorruption as i32 => Ok(ValidationError::UncompressedSizeCorruption),
-            value if value == ValidationError::DecompressionError as i32 => Ok(ValidationError::DecompressionError),
-            value if value == ValidationError::ChecksumMismatch as i32 => Ok(ValidationError::ChecksumMismatch),
-            value if value == ValidationError::BatchDeSerializeError as i32 => Ok(ValidationError::BatchDeSerializeError),
-            value if value == ValidationError::DecryptionError as i32 => Ok(ValidationError::DecryptionError),
-            unknown => Err(Error::unknown_variant(format!("Expected Type::Connect, found {}", unknown)))
+            value if value == ValidationError::UncompressedSizeCorruption as i32 => {
+                Ok(ValidationError::UncompressedSizeCorruption)
+            }
+            value if value == ValidationError::DecompressionError as i32 => {
+                Ok(ValidationError::DecompressionError)
+            }
+            value if value == ValidationError::ChecksumMismatch as i32 => {
+                Ok(ValidationError::ChecksumMismatch)
+            }
+            value if value == ValidationError::BatchDeSerializeError as i32 => {
+                Ok(ValidationError::BatchDeSerializeError)
+            }
+            value if value == ValidationError::DecryptionError as i32 => {
+                Ok(ValidationError::DecryptionError)
+            }
+            unknown => Err(Error::unknown_variant(format!(
+                "Expected command_ack::ValidationError, found {}",
+                unknown
+            ))),
         }
     }
 }
@@ -331,7 +502,10 @@ impl TryFrom<i32> for command_lookup_topic_response::LookupType {
             value if value == LookupType::Redirect as i32 => Ok(LookupType::Redirect),
             value if value == LookupType::Connect as i32 => Ok(LookupType::Connect),
             value if value == LookupType::Failed as i32 => Ok(LookupType::Failed),
-            unknown => Err(Error::unknown_variant(format!("Expected Type::Connected, found {}", unknown)))
+            unknown => Err(Error::unknown_variant(format!(
+                "Expected command_lookup_topic_response::LookupType, found {}",
+                unknown
+            ))),
         }
     }
 }
@@ -342,7 +516,10 @@ impl TryFrom<i32> for command_partitioned_topic_metadata_response::LookupType {
         match value {
             value if value == LookupType::Success as i32 => Ok(LookupType::Success),
             value if value == LookupType::Failed as i32 => Ok(LookupType::Failed),
-            unknown => Err(Error::unknown_variant(format!("Expected Type::Subscribe, found {}", unknown)))
+            unknown => Err(Error::unknown_variant(format!(
+                "Expected command_partitioned_topic_metadata_response::LookupType, found {}",
+                unknown
+            ))),
         }
     }
 }
@@ -352,7 +529,10 @@ impl TryFrom<i32> for command_subscribe::InitialPosition {
         match value {
             value if value == InitialPosition::Latest as i32 => Ok(InitialPosition::Latest),
             value if value == InitialPosition::Earliest as i32 => Ok(InitialPosition::Earliest),
-            unknown => Err(Error::unknown_variant(format!("Expected Type::Producer, found {}", unknown)))
+            unknown => Err(Error::unknown_variant(format!(
+                "Expected command_subscribe::InitialPosition, found {}",
+                unknown
+            ))),
         }
     }
 }
@@ -363,7 +543,10 @@ impl TryFrom<i32> for command_subscribe::SubType {
             value if value == SubType::Exclusive as i32 => Ok(SubType::Exclusive),
             value if value == SubType::Shared as i32 => Ok(SubType::Shared),
             value if value == SubType::Failover as i32 => Ok(SubType::Failover),
-            unknown => Err(Error::unknown_variant(format!("Expected Type::Send, found {}", unknown)))
+            unknown => Err(Error::unknown_variant(format!(
+                "Expected command_subscribe::SubType, found {}",
+                unknown
+            ))),
         }
     }
 }
@@ -374,7 +557,10 @@ impl TryFrom<i32> for CompressionType {
             value if value == CompressionType::None as i32 => Ok(CompressionType::None),
             value if value == CompressionType::Lz4 as i32 => Ok(CompressionType::Lz4),
             value if value == CompressionType::Zlib as i32 => Ok(CompressionType::Zlib),
-            unknown => Err(Error::unknown_variant(format!("Expected Type::SendReceipt, found {}", unknown)))
+            unknown => Err(Error::unknown_variant(format!(
+                "Expected CompressionType, found {}",
+                unknown
+            ))),
         }
     }
 }
@@ -385,7 +571,10 @@ impl TryFrom<i32> for get_topics::Mode {
             value if value == Mode::Persistent as i32 => Ok(Mode::Persistent),
             value if value == Mode::NonPersistent as i32 => Ok(Mode::NonPersistent),
             value if value == Mode::All as i32 => Ok(Mode::All),
-            unknown => Err(Error::unknown_variant(format!("Expected Type::SendError, found {}", unknown)))
+            unknown => Err(Error::unknown_variant(format!(
+                "Expected get_topics::Mode, found {}",
+                unknown
+            ))),
         }
     }
 }
@@ -398,7 +587,10 @@ impl TryFrom<i32> for schema::Type {
             value if value == Type::Json as i32 => Ok(Type::Json),
             value if value == Type::Protobuf as i32 => Ok(Type::Protobuf),
             value if value == Type::Avro as i32 => Ok(Type::Avro),
-            unknown => Err(Error::unknown_variant(format!("Expected Type::Message, found {}", unknown)))
+            unknown => Err(Error::unknown_variant(format!(
+                "Expected schema::Type, found {}",
+                unknown
+            ))),
         }
     }
 }
@@ -408,27 +600,53 @@ impl TryFrom<i32> for ServerError {
         match value {
             value if value == ServerError::UnknownError as i32 => Ok(ServerError::UnknownError),
             value if value == ServerError::MetadataError as i32 => Ok(ServerError::MetadataError),
-            value if value == ServerError::PersistenceError as i32 => Ok(ServerError::PersistenceError),
-            value if value == ServerError::AuthenticationError as i32 => Ok(ServerError::AuthenticationError),
-            value if value == ServerError::AuthorizationError as i32 => Ok(ServerError::AuthorizationError),
+            value if value == ServerError::PersistenceError as i32 => {
+                Ok(ServerError::PersistenceError)
+            }
+            value if value == ServerError::AuthenticationError as i32 => {
+                Ok(ServerError::AuthenticationError)
+            }
+            value if value == ServerError::AuthorizationError as i32 => {
+                Ok(ServerError::AuthorizationError)
+            }
             value if value == ServerError::ConsumerBusy as i32 => Ok(ServerError::ConsumerBusy),
-            value if value == ServerError::ServiceNotReady as i32 => Ok(ServerError::ServiceNotReady),
-            value if value == ServerError::ProducerBlockedQuotaExceededError as i32 => Ok(ServerError::ProducerBlockedQuotaExceededError),
-            value if value == ServerError::ProducerBlockedQuotaExceededException as i32 => Ok(ServerError::ProducerBlockedQuotaExceededException),
+            value if value == ServerError::ServiceNotReady as i32 => {
+                Ok(ServerError::ServiceNotReady)
+            }
+            value if value == ServerError::ProducerBlockedQuotaExceededError as i32 => {
+                Ok(ServerError::ProducerBlockedQuotaExceededError)
+            }
+            value if value == ServerError::ProducerBlockedQuotaExceededException as i32 => {
+                Ok(ServerError::ProducerBlockedQuotaExceededException)
+            }
             value if value == ServerError::ChecksumError as i32 => Ok(ServerError::ChecksumError),
-            value if value == ServerError::UnsupportedVersionError as i32 => Ok(ServerError::UnsupportedVersionError),
+            value if value == ServerError::UnsupportedVersionError as i32 => {
+                Ok(ServerError::UnsupportedVersionError)
+            }
             value if value == ServerError::TopicNotFound as i32 => Ok(ServerError::TopicNotFound),
-            value if value == ServerError::SubscriptionNotFound as i32 => Ok(ServerError::SubscriptionNotFound),
-            value if value == ServerError::ConsumerNotFound as i32 => Ok(ServerError::ConsumerNotFound),
-            value if value == ServerError::TooManyRequests as i32 => Ok(ServerError::TooManyRequests),
-            value if value == ServerError::TopicTerminatedError as i32 => Ok(ServerError::TopicTerminatedError),
+            value if value == ServerError::SubscriptionNotFound as i32 => {
+                Ok(ServerError::SubscriptionNotFound)
+            }
+            value if value == ServerError::ConsumerNotFound as i32 => {
+                Ok(ServerError::ConsumerNotFound)
+            }
+            value if value == ServerError::TooManyRequests as i32 => {
+                Ok(ServerError::TooManyRequests)
+            }
+            value if value == ServerError::TopicTerminatedError as i32 => {
+                Ok(ServerError::TopicTerminatedError)
+            }
             value if value == ServerError::ProducerBusy as i32 => Ok(ServerError::ProducerBusy),
-            value if value == ServerError::InvalidTopicName as i32 => Ok(ServerError::InvalidTopicName),
-            unknown => Err(Error::unknown_variant(format!("Expected Type::Ack, found {}", unknown)))
+            value if value == ServerError::InvalidTopicName as i32 => {
+                Ok(ServerError::InvalidTopicName)
+            }
+            unknown => Err(Error::unknown_variant(format!(
+                "Expected ServerError, found {}",
+                unknown
+            ))),
         }
     }
 }
-
 
 #[rustfmt::skip]
 pub mod proto {

@@ -12,3 +12,9 @@ impl SerialId {
         id
     }
 }
+
+impl From<u64> for SerialId {
+    fn from(id: u64) -> Self {
+        SerialId(id)
+    }
+}

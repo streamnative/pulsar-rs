@@ -1,5 +1,8 @@
 use crate::proto::proto::{MessageIdData, Schema};
 use std::collections::BTreeMap;
+use crate::client::DeserializeMessage;
+use futures::channel::{oneshot, mpsc};
+use crate::message::TopicMessage;
 
 //use std::collections::{BTreeMap, BTreeSet, VecDeque};
 //use std::fmt::Debug;
@@ -32,11 +35,24 @@ pub struct ConsumerOptions {
     pub priority_level: Option<i32>,
     pub durable: Option<bool>,
     pub start_message_id: Option<MessageIdData>,
-    pub metadata: Option<BTreeMap<String, String>?,
+    pub metadata: Option<BTreeMap<String, String>>,
     pub read_compacted: Option<bool>,
     pub schema: Option<Schema>,
     pub initial_position: Option<i32>,
 }
+
+pub struct ConsumerEngine {
+
+}
+
+impl ConsumerEngine {
+
+}
+
+pub struct Consumer<T: DeserializeMessage> {
+
+}
+
 //
 //pub struct Consumer<T: DeserializeMessage> {
 //    connection: Arc<Connection>,

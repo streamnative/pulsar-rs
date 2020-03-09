@@ -31,7 +31,8 @@ regex = "1.1.7"
 futures = "0.3.1"
 tokio = { version = "0.2.10", features = ["tcp", "dns", "time"] }
 tokio-util = { version = "0.2.0", features = ["codec"] }
-compress = "0.1.2"
+lz4-compress = "0.1.1"
+flate2 = "1.0.13"
 
 [dev-dependencies]
 serde = { version = "1.0.101", features = ["derive"] }

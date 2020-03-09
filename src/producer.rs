@@ -27,6 +27,15 @@ use crate::error::Error;
 use futures::Future;
 use crate::message::{Send, SendReceipt};
 use crate::util::SerialId;
+use crate::client::SerializeMessage;
+use crate::proto::CompressionType;
+use std::mem;
+use flate2::Compression;
+use std::io::{Read, Write};
+use tokio::macros::support::Pin;
+use crate::proto::proto::command_lookup_topic_response::LookupType::Redirect;
+use futures::lock::Mutex;
+use std::sync::Arc;
 
 //use crate::{Error, Pulsar};
 //
@@ -41,7 +50,7 @@ pub struct Message {
     pub partition_key: Option<String>,
     /// Override namespace's replication
     pub replicate_to: Vec<String>,
-    pub compression: Option<i32>,
+    pub compression: Option<CompressionType>,
     pub uncompressed_size: Option<u32>,
     /// Removed below checksum field from Metadata as
     /// it should be part of send-command which keeps checksum of header + payload
@@ -58,6 +67,48 @@ pub struct Message {
     /// Additional parameters required by encryption
     pub encryption_param: Option<Vec<u8>>,
     pub schema_version: Option<Vec<u8>>,
+}
+
+impl Message {
+    fn compress(mut self, compression: CompressionType) -> Self {
+        match compression {
+            CompressionType::None => self,
+            CompressionType::Lz4 => {
+                self.payload = lz4_compress::compress(&self.payload);
+                self.compression = Some(compression);
+                self
+            }
+            CompressionType::Zlib => {
+                let mut bytes = Vec::new();
+                let mut encoder = flate2::write::ZlibEncoder::new(bytes, Compression::default());
+                encoder.write_all(&self.payload);
+                // This is safe, as the `Read` impl of &[u8] and the `Write` impl of `Vec<u8>` both
+                // never return errors
+                self.payload = encoder.finish().unwrap();
+                self.compression = Some(compression);
+                self
+            }
+        }
+    }
+    fn uncompress(mut self) -> Result<Self, Error> {
+        match self.compression {
+            Some(CompressionType::None) | None => Ok(self),
+            Some(CompressionType::Lz4) => {
+                let bytes = lz4_compress::decompress(&self.payload)?;
+                self.payload = bytes;
+                self.compression = None;
+                Ok(self)
+            }
+            Some(CompressionType::Zlib) => {
+                let mut decoder = flate2::read::ZlibDecoder::new(self.payload.as_slice());
+                let mut bytes = Vec::new();
+                decoder.read_to_end(&mut bytes)?;
+                self.payload = bytes;
+                self.compression = None;
+                Ok(self)
+            }
+        }
+    }
 }
 
 pub struct TopicPartition {
@@ -115,27 +166,121 @@ impl RouteMessage for SinglePartitionRouter {
     }
 }
 
-enum ProducerManagerMessage {
-    CreateProducer {
-        topic: String,
-        options: ProducerOptions,
-        resolver: Resolver<mpsc::Sender<Message>>,
+pub(crate) struct CreateProducer {
+    pub topic: String,
+    pub options: ProducerOptions,
+    pub resolver: Resolver<mpsc::UnboundedSender<Message>>,
+}
+
+struct SendMessage {
+    message: Message,
+    resolver: Resolver<Box<dyn Future<Output=Result<SendReceipt, Error>>>>,
+}
+
+struct PendingProducer {
+    producer: Box<dyn Future<Output=Result<ProducerEngine, Error>>>,
+    resolver: Resolver<Producer>,
+}
+
+pub struct Producers {
+    producers: BTreeMap<u64, ProducerEngine>,
+    pending: BTreeMap<u64, PendingProducer>,
+    connections: ConnectionManagerHandle,
+    producer_ids: Arc<Mutex<SerialId>>
+}
+
+impl Future for Producers {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut resolved =  BTreeMap::new();
+        for (id, pending) in &mut self.pending {
+            match pending.producer.poll() {
+                Poll::Ready(Ok(producer)) => {
+                    let handle = producer.handle();
+                    resolved.insert(*id, Ok(handle));
+                    self.producers.insert(*id, producer);
+                },
+                Poll::Ready(Err(e)) => {
+                    resolved.insert(*id, Err(e));
+                }
+                Poll::Pending => {}
+            }
+        }
+        for (id, handle) in resolved {
+            self.pending.remove(&id).into_iter()
+                .for_each(|p| {
+                    p.resolver.resolve(handle);
+                });
+        }
+        let mut shutdown = Vec::new();
+        for (id, producer) in &mut self.producers {
+            match producer.poll(cx) {
+                Poll::Ready(()) => {
+                    shutdown.push(*id);
+                }
+                Poll::Pending => {}
+            }
+        }
+        Poll::Pending
     }
 }
 
-enum ProducerMessage {
-    Send {
-        message: Message,
-        resolver: Resolver<Box<dyn Future<Output=Result<SendReceipt, Error>>>,
-    },
-    Close,
+impl Producers {
+    fn create_producer(
+        &mut self,
+        topic: String,
+        options: ProducerOptions,
+        routing_mode: Option<Box<dyn RouteMessage>>,
+        resolver: Resolver<Producer>,
+    ) {
+        let topic = topic.clone();
+        let conn = self.connections.get_base_connection();
+        let producer = async {
+            let conn = conn.await?;
+            let partitions = conn.lookup_partitioned_topic(topic.clone()).await?;
+            if partitions.partitions > 1 {
+
+            } else {
+                let metdata = conn.lookup_topic(topic, None).await?;
+                if metdata.proxy_through_service_url
+            }
+        }
+        self.connections.get_base_connection()
+            .and_then(move |c| c.lookup_topic())
+    }
 }
 
-pub struct ProducerManager {
-    pending: BTreeMap<u64, Box<dyn Future<Output=Result<(), ()>>>>,
-    producers: BTreeMap<u64, ProducerEngine>,
+async fn connect_producer(
+    conn_manager: ConnectionManagerHandle,
+    topic: String,
+    options: ProducerOptions,
+    routing_mode: Option<Box<dyn RouteMessage>>,
+    ids: Arc<Mutex<SerialId>>,
+) -> Result<Vec<ProducerEngine>, Error> {
+    let conn = conn_manager.get_base_connection().await?;
+    let partitions = conn.lookup_partitioned_topic(topic.clone()).await?;
+    let topics = if partitions.partitions > 1 {
+        (0..partitions.partitions)
+            .map(|p| format!("{}-partition-{}", &topic, p))
+            .collect()
+    } else {
+        vec![topic]
+    };
+    topics.into_iter().map(|topic| async {
+        let mut conn = conn.clone();
+        let mut metadata = conn.lookup_topic(topic.clone(), None).await?;
+        while metadata.response == TopicLookupType::Redirect {
+            conn = conn_manager.get_conn(metadata.broker_service_url).await?;
+            metadata = conn.lookup_topic(topic.clone(), Some(metadata.authoritative)).await?;
+        }
+        conn = conn_manager.get_conn(metadata.broker_service_url).await?;
+        let id = ids.lock().await.next();
+        let create_success = conn.create_producer(topic, id, options.clone()).await?;
+        Ok()
+    })
+    Ok()
 }
-
 
 #[derive(Clone, Default)]
 pub struct ProducerOptions {
@@ -145,17 +290,54 @@ pub struct ProducerOptions {
     pub schema: Option<Schema>,
 }
 
+pub(crate) struct PartitionProducer {
+    name: String,
+    topic: String,
+    partition: TopicPartition,
+    connection: ConnectionHandle,
+    sequence_id: SerialId,
+}
+
+impl PartitionProducer {
+    pub async fn send(&self, msg: SendMessage) -> Result<(), Error> {
+        self.connection.s
+    }
+}
+
+
 pub(crate) struct ProducerEngine {
-    id: u64,
     name: String,
     topic: String,
     options: ProducerOptions,
     message_routing_mode: Box<dyn RouteMessage>,
     partitions: Vec<TopicPartition>,
     connections: BTreeMap<u64, ConnectionHandle>,
-    messages: mpsc::Receiver<ProducerMessage>,
+    messages: mpsc::UnboundedReceiver<SendMessage>,
+    handle: ProducerHandle,
     sequence_id: SerialId,
     shutdown: Option<Box<dyn Future<Output=()>>>,
+}
+
+impl ProducerEngine {
+    fn new(
+        id: u64,
+        name: String,
+        topic: String,
+        options: ProducerOptions,
+        routing_mode: Box<dyn RouteMessage>,
+    )
+
+    fn shutdown(&mut self) {
+        self.shutdown = Some(future::join_all(
+            self.connections.values()
+                .map(|conn| conn.close_producer(self.id))
+                .then(|_| Ok(()))
+        ));
+    }
+
+    fn handle(&self) -> ProducerHandle {
+        self.handle.clone()
+    }
 }
 
 impl Future for ProducerEngine {
@@ -168,44 +350,57 @@ impl Future for ProducerEngine {
         let partitions: Vec<_> = self.connections.keys().collect();
         while let Poll::Ready(msg) = self.messages.poll_next(cx) {
             match ready!(self.messages.poll(cx)) {
-                Some(message) => {
-                    match message {
-                        ProducerMessage::Send { message, resolver } => {
-                            let next_partition = self.message_routing_mode.select_partition(&message, &self.partitions);
-                            let conn = self.connections.get(&next_partition.partition_number).unwrap();
-                            let _ = resolver.send(Box::new(conn.send(Send {
-                                producer_id: self.id,
-                                producer_name: self.name.clone(),
-                                sequence_id: self.sequence_id.next(),
-                                num_messages: message.num_messages_in_batch, //Is this correct?
-                                message
-                            })));
-                        }
-                        ProducerMessage::Close => {
-                            self.shutdown();
-                            break;
-                        }
-                    }
+                Some(SendMessage { message, resolver }) => {
+                    let next_partition = self.message_routing_mode.select_partition(&message, &self.partitions);
+                    let conn = self.connections.get(&next_partition.partition_number).unwrap();
+                    let _ = resolver.resolve(Ok(Box::new(conn.send(Send {
+                        producer_id: self.id,
+                        producer_name: self.name.clone(),
+                        sequence_id: self.sequence_id.next(),
+                        num_messages: message.num_messages_in_batch, //Is this correct?
+                        message
+                    }))));
                 },
                 None => self.shutdown(),
             }
         }
         Poll::Pending
     }
+}
 
-    fn shutdown(&mut self) {
-        self.shutdown = Some(future::join_all(
-            self.connections.values()
-                .map(|conn| conn.close_producer(self.id))
-                .then(|_| Ok(()))
-        ));
+#[derive(Clone)]
+pub(crate) struct ProducerHandle {
+    sender: mpsc::UnboundedSender<SendMessage>,
+}
+
+impl ProducerHandle {
+    pub async fn send(&self, message: Message) -> Result<(), Error> {
+        let (resolver, f) = Resolver::new();
+        self.sender.unbounded_send(SendMessage::Send { message, resolver })
+            .map_err(|e| Error::unexpected("pulsar engine is not running"))?;
+        f.await?;
+        Ok(())
+    }
+
+    pub fn close(&self) -> Result<(), Error> {
+        self.sender.unbounded_send(SendMessage::Close)
+            .map_err(|e| Error::unexpected("pulsar engine is not running"))?;
+        Ok(())
     }
 }
 
+#[derive(Clone)]
 pub struct Producer {
     inner: ProducerHandle,
-
 }
+
+impl Producer {
+    pub async fn send<T: SerializeMessage>(&self, msg: T) -> Result<(), Error> {
+        let msg = T::serialize_message(msg)?;
+        self.inner.send(msg)
+    }
+}
+
 //
 //#[derive(Clone)]
 //pub struct Producer {

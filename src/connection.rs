@@ -24,6 +24,9 @@ use crate::producer::{self, ProducerOptions};
 use crate::message::*;
 use crate::proto::proto::get_topics::Mode;
 use crate::message;
+use crate::engine::ConsumerMessage;
+use crate::message::ConsumerMessage;
+use std::time::{Instant, Duration};
 
 pub const CLIENT_VERSION: &'static str = "2.0.1-incubating";
 
@@ -57,9 +60,73 @@ impl ConnectionBuilder {
     }
 }
 
-pub(crate) struct ConnectionMessage {
-    message: Command,
-    resolver: Option<Resolver<proto::Message>>,
+pub enum ConnectionMessage {
+    RegisterStream {
+        key: RequestKey,
+        stream: mpsc::UnboundedSender<proto::Message>,
+    },
+    CloseStream {
+        key: RequestKey,
+    },
+    SendMessage {
+        message: Box<dyn IntoProto>,
+        resolver: Option<Resolver<proto::Message>>,
+    },
+    CheckConnection {
+        resolver: Resolver<bool>,
+    }
+}
+
+//pub enum ConnectionMessage2 {
+//    CreateProducer { message: message::CreateProducer, resolver: Resolver<proto::Message> },
+//    GetTopicsOfNamespace { message: message::GetTopicsOfNamespace, resolver: Resolver<proto::Message> },
+//    Send { message: message::Send, resolver: Resolver<proto::Message> },
+//    LookupTopic { message: message::LookupTopic, resolver: Resolver<proto::Message> },
+//    LookupPartitionedTopic { message: message::LookupPartitionedTopic, resolver: Resolver<proto::Message> },
+//    CloseProducer { message: message::CloseProducer, resolver: Resolver<proto::Message> },
+//    CreateConsumer { consumer_id: u64, stream: mpsc::UnboundedSender<Message> },
+//    Subscribe { message: message::Subscribe, resolver: Resolver<proto::Message> },
+//    Flow (message::Flow),
+//    Ack(message::Ack),
+//    RedeliverUnacknowlegedMessages(message::RedeliverUnacknowlegedMessages),
+//    CloseConsumer { message: message::CloseConsumer, resolver: Resolver<proto::Message> },
+//}
+
+
+#[derive(Default)]
+struct MessageHandlers {
+    requests: BTreeMap<RequestKey, Resolver<proto::Message>>,
+    streams: BTreeMap<RequestKey, mpsc::UnboundedSender<proto::Message>>,
+}
+
+impl MessageHandlers {
+    pub fn register_request(&mut self, key: RequestKey, resolver: Resolver<proto::Message>) {
+        self.requests.insert(key, resolver);
+    }
+
+
+    pub fn register_stream(&mut self, key: RequestKey, stream: mpsc::UnboundedSender<proto::Message>) {
+        self.streams.insert(key, stream);
+    }
+
+    pub fn close_straem(&mut self, key: &RequestKey) {
+        self.streams.remove(key);
+    }
+
+    pub fn resolve(&mut self, message: proto::Message) {
+        if let Some(key) = message.request_key() {
+            if let Some(resolver) = self.requests.remove(&key) {
+                resolver.resolve(Ok(message));
+            } else {
+                let stream_disconnected = self.streams.get_mut(&key)
+                    .map(move |s| s.unbounded_send(message).is_err())
+                    .unwrap_or(false);
+                if stream_disconnected {
+                    self.close_stream(&key);
+                }
+            }
+        }
+    }
 }
 
 pub(crate) struct Connection {
@@ -68,16 +135,17 @@ pub(crate) struct Connection {
     protocol_version: Option<i32>,
     sender: mpsc::UnboundedSender<ConnectionMessage>,
     pending: mpsc::UnboundedReceiver<ConnectionMessage>,
-    resolvers: BTreeMap<RequestKey, Resolver<proto::Message>>,
+    resolvers: MessageHandlers,
     request_id: SerialId,
     ping_timer: Interval,
+    last_response: Instant,
 }
 
 impl Connection {
     pub async fn connect<A: ToSocketAddrs>(address: A, options: Option<ConnectionOptions>) -> Result<Connection, Error> {
         let stream = TcpStream::connect(address).await?;
         let mut conn = tokio_util::codec::Framed::new(stream, Codec);
-        let connect = messages::connect(options);
+        let connect = message::connect(options);
         trace!("sending connect message: {:?}", connect);
         conn.send(connect).await?;
         let connection_success = conn.next().await
@@ -104,13 +172,24 @@ impl Connection {
         ConnectionHandle { sender: self.sender.clone() }
     }
 
+    pub fn is_active(&self) -> bool {
+        self.last_response() > (Instant::now() - Duration::from_secs(90))
+    }
+
     fn resolve_err(&mut self, error: Error) {
         for (_, resolver) in mem::take(&mut self.resolvers) {
             resolve(Err(error.clone()));
         }
-        for message in mem::take(&mut self.pending) {
-            if let Some(resolver) = message.resolver {
-                resolver.resolve(Err(error.clone()));
+        self.pending.close();
+        while let Ok(Some(message)) = self.pending.try_next() {
+            match message {
+                ConnectionMessage::CheckConnection { resolver } => {
+                    resolver.resolve(Ok(false))
+                }
+                ConnectionMessage::SendMessage { resolver, .. } => {
+                    resolver.resolver(Err(error.clone()))
+                }
+                _ => {}
             }
         }
     }
@@ -123,26 +202,34 @@ impl Connection {
                 Poll::Ready(Ok(())) => {
                     match self.pending.pop_front() {
                         Some(message) => {
-                            let request_key = message.message.request_key();
-                            let send = self.inner.start_send(message.message);
-                            match (request_key, message.resolver) {
-                                (Some(key), Some(resolver)) => {
-                                    match send {
-                                        Ok(()) => {
-                                            self.resolvers.insert(resolver.request_key, resolver.resolver);
+                            match message {
+                                ConnectionMessage::RegisterStream { key, stream } => {
+                                    self.resolvers.register_stream(key, stream);
+                                }
+                                ConnectionMessage::CloseStream { key } => {
+                                    self.resolvers.close_straem(&key);
+                                }
+                                ConnectionMessage::SendMessage { message, resolver } => {
+                                    let message = message.into_proto(&mut self.request_id);
+                                    match (resolver, message.request_key()) {
+                                        (Some(resolver), Some(key)) => {
+                                            self.resolvers.register_request(key, resolver)
                                         },
-                                        Err(e) => {
-                                            resolver.resolver.resolve(Err(e));
+                                        (Some(resolver), None) => {
+                                            resolver.resolve(Err(Error::unexpected("BUG! connection received resolver, but message has no key")));
                                         },
+                                        _ => {}
+                                    }
+                                    if let (Some(resolver), Some(key)) = (resolver, message.request_key()) {
+                                        self.resolvers.register_request(key, resolver);
+                                    }
+                                    if let Err(e) = self.inner.start_send(message) {
+                                        break Poll::Ready(Err(e))
                                     }
                                 }
-                                (None, Some(resolver)) => {
-                                    resolver.resolve(Err(Error::unexpected("BUG! connection received resolver, but message has no key")));
+                                ConnectionMessage::CheckConnection { resolver } => {
+                                    resolver.resolve(Ok(self.is_active()));
                                 }
-                                _ => {}
-                            }
-                            if let Some(resolver) = message.resolver {
-
                             }
                         },
                         None => break Poll::Ready(Ok(()))
@@ -163,21 +250,18 @@ impl Connection {
     /// fails, and Pending so long as the connection is open
     fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
         while let Poll::Ready(next) = self.connection.poll_next(cx) {
+            self.last_response = Some(Instant::now());
             match next {
                 Some(Ok(message)) => {
-                    let message: Message = message;
+                    let message: proto::Message = message;
                     if message.command.ping.is_some() {
-                        self.pending.push_front(ConnectionMessage {
-                            message: messages::pong(),
+                        self.pending.push_front(ConnectionMessage::SendMessage {
+                            message: Box::new(Pong),
                             resolver: None,
                         });
                         continue;
                     }
-                    if let Some(key) = message.request_key() {
-                        if let Some(resolver) = self.resolvers.remove(&key) {
-                            resolver.resolve(Ok(message))
-                        }
-                    }
+                    self.resolvers.resolve(message);
                 },
                 Some(Err(error)) => return Poll::Ready(Err(error)),
                 None => return Poll::Ready(Ok(())),
@@ -196,8 +280,8 @@ impl Future for Connection {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         while let Poll::Ready(_) = self.ping_timer.poll(cx) {
-            self.pending.push_front(ConnectionMessage {
-                message: messages::ping(),
+            self.pending.push_front(ConnectionMessage::SendMessage {
+                message: Box::new(Ping),
                 resolver: None
             });
         }
@@ -234,59 +318,123 @@ pub struct ConnectionHandle {
 }
 
 impl ConnectionHandle {
-    async fn make_request<T: FromProto>(&self, cmd: Command) -> Result<T, Error> {
+    async fn make_request<T: FromProto>(&self, msg: I) -> Result<T, Error> {
         let (resolver, f) = Resolver::new();
         self.send_command(cmd, Some(resolver))?;
         T::from_proto(f.await?)
     }
 
-    fn send_command(&self, message: Command, resolver: Option<Resolver<proto::Message>>) -> Result<(), Error> {
+    fn send_message(&self, message: ConnectionMessage) -> Result<(), Error> {
         self.sender.unbounded_send(ConnectionMessage { message, resolver })
             .map_err(|e| Error::disconnected("Connection unexpectedly dropped"))
     }
 
-    pub async fn create_producer(&self, topic: String, producer_id: u64, options: Option<ProducerOptions>) -> Result<CreateProducerSuccess, Error> {
-        self.make_request(Command::CreateProducer(CreateProducer {
-            topic,
-            producer_id,
-            options
-        })).await
+    pub async fn create_producer(&self, topic: String, producer_id: u64, options: ProducerOptions) -> Result<CreateProducerSuccess, Error> {
+        let (resolver, f) = Resolver::new();
+        let message = ConnectionMessage::SendMessage {
+            message: Box::new((CreateProducer {
+                topic,
+                producer_id,
+                options
+            })),
+            resolver: Some(resolver)
+        };
+        self.send_message(message)?;
+        CreateProducerSuccess::from_proto(f.await?)
     }
 
     pub async fn get_topics_of_namespace(&self, namespace: String, mode: Mode) -> Result<NamespaceTopics, Error> {
-        self.make_request(Command::GetTopicsOfNamespace(GetTopicsOfNamespace {
-            namespace,
-            mode
-        })).await
+        let (resolver, f) = Resolver::new();
+        let message = ConnectionMessage::SendMessage {
+            message: Box::new(GetTopicsOfNamespace {
+                namespace,
+                mode
+            }),
+            resolver: Some(resolver)
+        };
+        self.send_message(message)?;
+        NamespaceTopics::from_proto(f.await?)
     }
 
-    pub async fn send(&self, cmd: Send) -> Result<SendReceipt, Error> {
-        self.make_request(Command::Send(cmd)).await
+    pub async fn send(&self, message: Send) -> Result<SendReceipt, Error> {
+        let (resolver, f) = Resolver::new();
+        let message = ConnectionMessage::SendMessage {
+            message: Box::new(message),
+            resolver: Some(resolver)
+        };
+        self.send_message(message)?;
+        SendReceipt::from_proto(f.await?)
     }
 
     pub async fn lookup_topic(&self, topic: String, authoritative: Option<bool>) -> Result<LookupTopicResponse, Error> {
-        self.make_request(Command::LookupTopic(LookupTopic {
-            topic,
-            authoritative
-        })).await
+        let (resolver, f) = Resolver::new();
+        let message = ConnectionMessage::SendMessage {
+            message: Box::new(LookupTopic {
+                topic,
+                authoritative
+            }),
+            resolver: Some(resolver)
+        };
+        self.send_message(message)?;
+        LookupTopicResponse::from_proto(f.await?)
     }
 
     pub async fn lookup_partitioned_topic(&self, topic: String) -> Result<PartitionedTopicMetadata, Error> {
-        self.make_request(Command::LookupPartitionedTopic(LookupPartitionedTopic {
-            topic
-        })).await
+        let (resolver, f) = Resolver::new();
+        let message = ConnectionMessage::SendMessage {
+            message: Box::new(LookupPartitionedTopic {
+                topic
+            }),
+            resolver: Some(resolver)
+        };
+        self.send_message(message)?;
+        PartitionedTopicMetadata::from_proto(f.await?)
     }
 
     pub async fn close_producer(&self, producer_id: u64) -> Result<CommandSuccess, Error> {
-        self.make_request(Command::CloseProducer(CloseProducer { producer_id })).await
+        let (resolver, f) = Resolver::new();
+        let message = ConnectionMessage::SendMessage {
+            message: Box::new(CloseProducer { producer_id }),
+            resolver: Some(resolver)
+        };
+        self.send_message(message)?;
+        CommandSuccess::from_proto(f.await?)
+    }
+
+    pub fn create_consumer(&self, consumer_id: u64) -> Result<impl Stream<Item=Result<ConsumerMessage, Error>>, Error> {
+        let (tx, rx) = mpsc::unbounded();
+        let message = ConnectionMessage::RegisterStream {
+            key: RequestKey::Consumer { consumer_id },
+            stream: tx
+        };
+        self.send_message(message)?;
+        Ok(rx.filter_map(|msg| match ConsumerMessage::from_proto(msg) {
+            Ok(msg) => Some(msg),
+            Err(e) => {
+                warn!("Received unexpected message for consumer. This may be a bug. Err: {}", e);
+                None
+            }
+        }))
     }
 
     pub async fn subscribe(&self, cmd: Subscribe) -> Result<CommandSuccess, Error> {
-        self.make_request(Command::Subscribe(cmd)).await
+        let (resolver, f) = Resolver::new();
+        let message = ConnectionMessage::SendMessage {
+            message: Box::new((cmd)),
+            resolver: Some(resolver)
+        };
+        self.send_message(message)?;
+        CommandSuccess::from_proto(f.await?)
     }
 
     pub fn flow(&self, consumer_id: u64, message_permits: u32) -> Result<(), Error> {
-        self.send_command(Command::Flow(Flow { consumer_id, message_permits }), None)
+        self.send_message(ConnectionMessage::SendMessage {
+            message: Box::new(Flow {
+                consumer_id,
+                message_permits
+            }),
+            resolver: None,
+        })
     }
 
     pub fn ack(&self, ack: Ack) -> Result<(), Error> {
@@ -300,8 +448,26 @@ impl ConnectionHandle {
         }), None)
     }
 
-    pub async fn close_consumer(&self, consumer_id: u64) -> Result<proto::CommandSuccess, Error> {
-        self.make_request(Command::CloseConsumer(CloseConsumer { consumer_id })).await
+    pub async fn close_consumer(&self, consumer_id: u64) -> Result<CommandSuccess, Error> {
+        let (resolver, f) = Resolver::new();
+        let message = ConnectionMessage::SendMessage {
+            message: Box::new(CloseConsumer { consumer_id }),
+            resolver: Some(resolver)
+        };
+        self.make_request(message)?;
+        let success = CommandSuccess::from_proto(f.await?)?;
+        self.send_message(ConnectionMessage::CloseStream {
+            key: RequestKey::Consumer { consumer_id }
+        })?;
+        Ok(success)
+    }
+
+    pub async fn check_connection(&self) -> bool {
+        let (resolver, f) = Resolver::new();
+        if self.sender.unbounded_send(ConnectionMessage::CheckConnection { resolver }).is_err() {
+            return false;
+        }
+        f.await.unwrap_or(false)
     }
 }
 //
@@ -921,17 +1087,3 @@ pub struct Authentication {
 //    }
 //}
 //
-
-pub enum Command {
-    CreateProducer(message::CreateProducer),
-    GetTopicsOfNamespace(message::GetTopicsOfNamespace),
-    Send(message::Send),
-    LookupTopic(message::LookupTopic),
-    LookupPartitionedTopic(message::LookupPartitionedTopic),
-    CloseProducer(message::CloseProducer),
-    Subscribe(message::Subscribe),
-    Flow(message::Flow),
-    Ack(message::Ack),
-    RedeliverUnacknowlegedMessages(message::RedeliverUnacknowlegedMessages),
-    CloseConsumer(message::CloseConsumer),
-}
