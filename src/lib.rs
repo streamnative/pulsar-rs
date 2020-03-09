@@ -18,11 +18,11 @@ pub use consumer::{
     Ack, Consumer, ConsumerBuilder, ConsumerOptions, ConsumerState, Message, MultiTopicConsumer,
 };
 pub use error::{ConnectionError, ConsumerError, Error, ProducerError, ServiceDiscoveryError};
+pub use executor::{PulsarExecutor, TaskExecutor};
 pub use message::proto;
 pub use message::proto::command_subscribe::SubType;
 pub use producer::{Producer, ProducerOptions, TopicProducer};
 pub use service_discovery::ServiceDiscovery;
-pub use executor::{PulsarExecutor, TaskExecutor};
 
 mod client;
 mod connection;
@@ -199,11 +199,10 @@ mod tests {
                 .wait()
                 .unwrap();
 
-            producer.send(topic, send_data)
-                .wait()
-                .unwrap();
+            producer.send(topic, send_data).wait().unwrap();
 
-            consumer.take(1)
+            consumer
+                .take(1)
                 .map_err(|e| e.into())
                 .for_each(move |Message { payload, ack, .. }| {
                     ack.ack();
@@ -225,7 +224,7 @@ mod tests {
         // test &[u8]
         {
             let topic = "test_unsized_data_bytes";
-            let send_data: &[u8] = &[0,1,2,3];
+            let send_data: &[u8] = &[0, 1, 2, 3];
 
             let consumer = pulsar
                 .consumer()
@@ -236,11 +235,10 @@ mod tests {
                 .wait()
                 .unwrap();
 
-            producer.send(topic, send_data)
-                .wait()
-                .unwrap();
+            producer.send(topic, send_data).wait().unwrap();
 
-            consumer.take(1)
+            consumer
+                .take(1)
                 .map_err(|e| e.into())
                 .for_each(move |Message { payload, ack, .. }| {
                     ack.ack();
