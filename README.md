@@ -13,89 +13,89 @@ tokio = "0.1.11"
 ```
 #### Producing
 ```rust
-use pulsar::{Pulsar, SerializeMessage, ProducerError, producer};
-use tokio::prelude::*;
+    use pulsar::{self, Pulsar, SerializeMessage, ProducerError, producer};
+    use tokio::prelude::*;
 
-#[derive(Debug)]
-pub struct SomeData {
+    #[derive(Debug)]
+    pub struct SomeData {
 
-}
-
-impl SerializeMessage for SomeData {
-    fn serialize_message(input: &Self) -> Result<producer::Message, ProducerError> {
-        unimplemented!()
     }
-}
 
-fn run() {
-    let addr = "127.0.0.1:6650".parse().unwrap();
-    let runtime = tokio::runtime::Runtime::new().unwrap();
+    impl SerializeMessage for SomeData {
+        fn serialize_message(input: &Self) -> Result<producer::Message, pulsar::Error> {
+            unimplemented!()
+        }
+    }
 
-    let pulsar: Pulsar = Pulsar::new(addr, None, runtime.executor())
-        .wait().unwrap();
+    fn run() {
+        let addr = "127.0.0.1:6650".parse().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
 
-    let producer = pulsar.producer();
+        let pulsar: Pulsar = Pulsar::new(addr, None, runtime.executor())
+            .wait().unwrap();
 
-    let message = SomeData {};
+        let producer = pulsar.producer(None);
 
-    runtime.executor().spawn({
-        producer.send("some_topic", &message)
-            .map(drop)
-            .map_err(|e| eprintln!("Error handling! {}", e))
-    });
-}
+        let message = SomeData {};
+
+        runtime.executor().spawn({
+            producer.send("some_topic", &message)
+                .map(drop)
+                .map_err(|e| eprintln!("Error handling! {}", e))
+        });
+    }
 ```
 #### Consuming
 ```rust
-use pulsar::{Pulsar, Consumer, SubType, DeserializeMessage, consumer, message};
-use tokio::prelude::*;
+    use pulsar::{Pulsar, Consumer, SubType, DeserializeMessage, consumer, message};
+    use tokio::prelude::*;
 
-#[derive(Debug)]
-pub struct SomeData {
+    #[derive(Debug)]
+    pub struct SomeData {
 
-}
-
-impl DeserializeMessage for SomeData {
-    type Output = Result<Self, ()>;
-
-    fn deserialize_message(payload: message::Payload) -> Self::Output {
-        unimplemented!()
     }
-}
 
-fn run() {
-    let addr = "127.0.0.1:6650".parse().unwrap();
-    let runtime = tokio::runtime::Runtime::new().unwrap();
+    impl DeserializeMessage for SomeData {
+        type Output = Result<Self, ()>;
 
-    let pulsar: Pulsar = Pulsar::new(addr, None, runtime.executor())
-        .wait().unwrap();
+        fn deserialize_message(payload: message::Payload) -> Self::Output {
+            unimplemented!()
+        }
+    }
 
-    let consumer: Consumer<SomeData> = pulsar.consumer()
-        .with_topic("some_topic")
-        .with_consumer_name("some_consumer_name")
-        .with_subscription_type(SubType::Exclusive)
-        .with_subscription("some_subscription")
-        .build()
-        .wait()
-        .unwrap();
+    fn run() {
+        let addr = "127.0.0.1:6650".parse().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
 
-    runtime.executor().spawn({
-        consumer
-            .for_each(move |consumer::Message { payload, ack, .. }| {
-                ack.ack(); // or maybe not ack unless Ok - whatever makes sense in your use case
-                match payload {
-                    Ok(data) => {
-                        //process data
-                    },
-                    Err(e) => {
-                        // handle error
+        let pulsar: Pulsar = Pulsar::new(addr, None, runtime.executor())
+            .wait().unwrap();
+
+        let consumer: Consumer<SomeData> = pulsar.consumer()
+            .with_topic("some_topic")
+            .with_consumer_name("some_consumer_name")
+            .with_subscription_type(SubType::Exclusive)
+            .with_subscription("some_subscription")
+            .build()
+            .wait()
+            .unwrap();
+
+        runtime.executor().spawn({
+            consumer
+                .for_each(move |consumer::Message { payload, ack, .. }| {
+                    ack.ack(); // or maybe not ack unless Ok - whatever makes sense in your use case
+                    match payload {
+                        Ok(data) => {
+                            //process data
+                        },
+                        Err(e) => {
+                            // handle error
+                        }
                     }
-                }
-                Ok(()) // or Err if you want the consumer to shutdown
-            })
-            .map_err(|_| { /* handle connection errors, etc */ })
-    })
-}
+                    Ok(()) // or Err if you want the consumer to shutdown
+                })
+                .map_err(|_| { /* handle connection errors, etc */ })
+        })
+    }
 ```
 
 ### License

@@ -14,7 +14,7 @@ use tokio::prelude::*;
 use crate::client::SerializeMessage;
 use crate::connection::{Authentication, Connection, SerialId};
 use crate::error::ProducerError;
-use crate::executor::{PulsarExecutor, TaskExecutor};
+use crate::executor::PulsarExecutor;
 use crate::message::proto::{self, EncryptionKeys, Schema};
 use crate::{Error, Pulsar};
 
