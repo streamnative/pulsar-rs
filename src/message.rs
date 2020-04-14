@@ -1,11 +1,11 @@
 use crate::connection::RequestKey;
 use crate::error::ConnectionError;
-use bytes::{Buf, BufMut, BytesMut, IntoBuf};
+use bytes::{Buf, BufMut, BytesMut};
 use crc::crc32;
 use nom::number::streaming::{be_u16, be_u32};
 use prost::{self, Message as ImplProtobuf};
 use std::io::Cursor;
-use tokio_codec::{Decoder, Encoder};
+use tokio_util::codec::{Decoder, Encoder};
 
 pub use self::proto::BaseCommand;
 pub use self::proto::MessageMetadata as Metadata;
@@ -79,8 +79,7 @@ impl Message {
 
 pub struct Codec;
 
-impl Encoder for Codec {
-    type Item = Message;
+impl Encoder<Message> for Codec {
     type Error = ConnectionError;
 
     fn encode(&mut self, item: Message, dst: &mut BytesMut) -> Result<(), ConnectionError> {
@@ -97,25 +96,25 @@ impl Encoder for Codec {
         let mut buf = Vec::with_capacity(total_size + 4);
 
         // Simple command frame
-        buf.put_u32_be(total_size as u32);
-        buf.put_u32_be(command_size as u32);
+        buf.put_u32(total_size as u32);
+        buf.put_u32(command_size as u32);
         item.command.encode(&mut buf)?;
 
         // Payload command frame
         if let Some(payload) = &item.payload {
-            buf.put_u16_be(0x0e01);
+            buf.put_u16(0x0e01);
 
             let crc_offset = buf.len();
-            buf.put_u32_be(0); // NOTE: Checksum (CRC32c). Overrwritten later to avoid copying.
+            buf.put_u32(0); // NOTE: Checksum (CRC32c). Overrwritten later to avoid copying.
 
             let metdata_offset = buf.len();
-            buf.put_u32_be(metadata_size as u32);
+            buf.put_u32(metadata_size as u32);
             payload.metadata.encode(&mut buf)?;
-            buf.put(&payload.data);
+            buf.put(&payload.data[..]);
 
             let crc = crc32::checksum_castagnoli(&buf[metdata_offset..]);
             let crc_buf: &mut [u8] = &mut buf[crc_offset..metdata_offset];
-            crc_buf.into_buf().put_u32_be(crc);
+            crc_buf.put_u32(crc);
         }
         if dst.remaining_mut() < buf.len() {
             dst.reserve(buf.len());
@@ -136,7 +135,7 @@ impl Decoder for Codec {
         if src.len() >= 4 {
             let mut buf = Cursor::new(src);
             // `messageSize` refers only to _remaining_ message size, so we add 4 to get total frame size
-            let message_size = buf.get_u32_be() as usize + 4;
+            let message_size = buf.get_u32() as usize + 4;
             let src = buf.into_inner();
             if src.len() >= message_size {
                 let msg = {
@@ -1091,7 +1090,7 @@ impl From<prost::DecodeError> for ConnectionError {
 mod tests {
     use crate::message::Codec;
     use bytes::BytesMut;
-    use tokio_codec::{Decoder, Encoder};
+    use tokio_util::codec::{Decoder, Encoder};
 
     #[test]
     fn parse_simple_command() {
