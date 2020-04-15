@@ -1050,15 +1050,16 @@ impl<T: 'static + DeserializeMessage> Stream for MultiTopicConsumer<T> {
         if let Poll::Ready(Some(_)) = self.refresh.poll_next_unpin(cx) {
             let regex = self.topic_regex.clone();
             let pulsar = self.pulsar.clone();
+            let namespace = self.namespace.clone();
             let subscription = self.subscription.clone();
             let sub_type = self.sub_type;
             let existing_topics: BTreeSet<String> = self.consumers.keys().cloned().collect();
             let options = self.options.clone();
             let unacked_message_resend_delay = self.unacked_message_resend_delay;
 
-            let new_consumers = Box::pin(async {
-                let topics: Vec<String> = self.pulsar
-                    .get_topics_of_namespace(self.namespace.clone(), proto::get_topics::Mode::All).await?;
+            let new_consumers = Box::pin(async move {
+                let topics: Vec<String> = pulsar
+                    .get_topics_of_namespace(namespace.clone(), proto::get_topics::Mode::All).await?;
                 trace!("fetched topics: {:?}", &topics);
 
                 try_join_all(topics
