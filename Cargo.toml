@@ -29,7 +29,7 @@ tokio = "0.2"
 tokio-util = {version = "0.3", features = ["codec"] }
 rand = "0.7"
 chrono = "0.4.6"
-futures-timer = "0.1.1"
+futures-timer = "3.0"
 log = "0.4.6"
 trust-dns-resolver = "0.19"
 url = "2.1"

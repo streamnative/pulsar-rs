@@ -46,9 +46,9 @@ mod service_discovery;
 mod tests {
     use std::time::{Duration, Instant};
 
-    use futures::{future, Future, Stream};
-    use futures_timer::ext::FutureExt;
+    use futures::{future, Future, Stream, StreamExt, TryStreamExt};
     use tokio;
+    use tokio::runtime::Runtime;
 
     use message::proto::command_subscribe::SubType;
 
@@ -56,6 +56,7 @@ mod tests {
     use crate::consumer::Message;
     use crate::message::Payload;
     use crate::Error as PulsarError;
+    use crate::executor::TokioExecutor;
 
     use super::*;
     use nom::lib::std::collections::BTreeSet;
@@ -135,203 +136,187 @@ mod tests {
     #[test]
     #[ignore]
     fn round_trip() {
-        let addr = "127.0.0.1:6650".parse().unwrap();
-        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let runtime = Runtime::new().unwrap();
 
-        let pulsar: Pulsar = Pulsar::new(addr, None, runtime.executor()).wait().unwrap();
+        let f = async {
+            let addr = "127.0.0.1:6650".parse().unwrap();
+            let executor = TokioExecutor(tokio::runtime::Handle::current());
+            let pulsar: Pulsar = Pulsar::new(addr, None, executor).await.unwrap();
+            let producer = pulsar.producer(None);
 
-        let producer = pulsar.producer(None);
+            for i in 0u16..5000 {
+                producer.send(
+                    "test",
+                    &TestData {
+                        data: "data".to_string(),
+                    },
+                ).await.unwrap();
+            }
 
-        future::join_all((0..5000).map(|_| {
-            producer.send(
-                "test",
-                &TestData {
-                    data: "data".to_string(),
-                },
-            )
-        }))
-        .map_err(|e| Error::from(e))
-        .timeout(Duration::from_secs(5))
-        .wait()
-        .unwrap();
+            let consumer: Consumer<TestData> = pulsar
+                .consumer()
+                .with_topic("test")
+                .with_consumer_name("test_consumer")
+                .with_subscription_type(SubType::Exclusive)
+                .with_subscription("test_subscription")
+                .build()
+                .await
+                .unwrap();
 
-        let consumer: Consumer<TestData> = pulsar
-            .consumer()
-            .with_topic("test")
-            .with_consumer_name("test_consumer")
-            .with_subscription_type(SubType::Exclusive)
-            .with_subscription("test_subscription")
-            .build()
-            .wait()
-            .unwrap();
-
-        consumer
-            .take(5000)
-            .map_err(|e| e.into())
-            .for_each(move |Message { payload, ack, .. }| {
-                ack.ack();
-                let data = payload?;
-                if data.data.as_str() == "data" {
-                    Ok(())
-                } else {
-                    Err(Error::Message(format!(
-                        "Unexpected payload: {}",
-                        &data.data
-                    )))
+            let mut stream = consumer.take(5000);
+            while let Some(res) = stream.next().await {
+                    let Message { payload, ack, .. } = res.unwrap();
+                    ack.ack();
+                    let data = payload.unwrap();
+                    if data.data.as_str() != "data" {
+                        panic!("Unexpected payload: {}", &data.data);
+                    }
                 }
-            })
-            .timeout(Duration::from_secs(5))
-            .wait()
-            .unwrap();
+            // FIXME .timeout(Duration::from_secs(5))
+        };
+
+        runtime.spawn(Box::pin(f));
     }
 
     #[test]
     #[ignore]
     fn unsized_data() {
-        let addr = "127.0.0.1:6650".parse().unwrap();
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let pulsar: Pulsar = Pulsar::new(addr, None, runtime.executor()).wait().unwrap();
-        let producer = pulsar.producer(None);
+        let runtime = Runtime::new().unwrap();
 
-        // test &str
-        {
-            let topic = "test_unsized_data_str";
-            let send_data = "some unsized data";
+        let f = async {
+            let executor = TokioExecutor(tokio::runtime::Handle::current());
+            let addr = "127.0.0.1:6650".parse().unwrap();
+            let pulsar: Pulsar = Pulsar::new(addr, None, executor).await.unwrap();
+            let producer = pulsar.producer(None);
 
-            let consumer = pulsar
-                .consumer()
-                .with_topic(topic)
-                .with_subscription_type(SubType::Exclusive)
-                .with_subscription("test_subscription")
-                .build::<String>()
-                .wait()
-                .unwrap();
+            // test &str
+            {
+                let topic = "test_unsized_data_str";
+                let send_data = "some unsized data";
 
-            producer.send(topic, send_data).wait().unwrap();
+                let consumer = pulsar
+                    .consumer()
+                    .with_topic(topic)
+                    .with_subscription_type(SubType::Exclusive)
+                    .with_subscription("test_subscription")
+                    .build::<String>()
+                    .await
+                    .unwrap();
 
-            consumer
-                .take(1)
-                .map_err(|e| e.into())
-                .for_each(move |Message { payload, ack, .. }| {
+                producer.send(topic, send_data).await.unwrap();
+
+                let mut stream = consumer.take(1);
+                while let Some(res) = stream.next().await {
+
+                    let Message { payload, ack, .. } = res.unwrap();
+
                     ack.ack();
-                    let data = payload?;
-                    if data.as_str() == send_data {
-                        Ok(())
-                    } else {
-                        Err(Error::Message(format!(
-                            "Unexpected payload in &str test: {}",
-                            &data
-                        )))
+                    let data = payload.unwrap();
+                    if data.as_str() != send_data {
+                        panic!("Unexpected payload in &str test: {}", &data);
                     }
-                })
-                .timeout(Duration::from_secs(1))
-                .wait()
-                .unwrap();
-        }
+                }
+                //FIXME .timeout(Duration::from_secs(1))
+            }
 
-        // test &[u8]
-        {
-            let topic = "test_unsized_data_bytes";
-            let send_data: &[u8] = &[0, 1, 2, 3];
+            // test &[u8]
+            {
+                let topic = "test_unsized_data_bytes";
+                let send_data: &[u8] = &[0, 1, 2, 3];
 
-            let consumer = pulsar
-                .consumer()
-                .with_topic(topic)
-                .with_subscription_type(SubType::Exclusive)
-                .with_subscription("test_subscription")
-                .build::<Vec<u8>>()
-                .wait()
-                .unwrap();
+                let consumer = pulsar
+                    .consumer()
+                    .with_topic(topic)
+                    .with_subscription_type(SubType::Exclusive)
+                    .with_subscription("test_subscription")
+                    .build::<Vec<u8>>()
+                    .await
+                    .unwrap();
 
-            producer.send(topic, send_data).wait().unwrap();
+                producer.send(topic, send_data).await.unwrap();
 
-            consumer
-                .take(1)
-                .map_err(|e| e.into())
-                .for_each(move |Message { payload, ack, .. }| {
-                    ack.ack();
-                    let data = payload;
-                    if data.as_slice() == send_data {
-                        Ok(())
-                    } else {
-                        Err(Error::Message(format!(
-                            "Unexpected payload in &[u8] test: {:?}",
-                            &data
-                        )))
+
+                let mut stream = consumer.take(1);
+                while let Some(res) = stream.next().await {
+                        let Message { payload, ack, .. } = res.unwrap();
+                        ack.ack();
+                        let data = payload;
+                        if data.as_slice() != send_data {
+                            panic!("Unexpected payload in &[u8] test: {:?}", &data);
+                        }
                     }
-                })
-                .timeout(Duration::from_secs(1))
-                .wait()
-                .unwrap();
-        }
+                //FIXME .timeout(Duration::from_secs(1))
+            }
+        };
+
+        runtime.spawn(Box::pin(f));
     }
 
     #[test]
     #[ignore]
     fn redelivery() {
+        let runtime = Runtime::new().unwrap();
+
         let addr = "127.0.0.1:6650".parse().unwrap();
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-
-        let pulsar: Pulsar = Pulsar::new(addr, None, runtime.executor()).wait().unwrap();
-
-        let producer = pulsar.producer(None);
-
-        let topic: String = std::iter::repeat(())
-            .map(|()| rand::thread_rng().sample(Alphanumeric))
-            .take(7)
-            .collect();
-
-        let resend_delay = Duration::from_secs(4);
-
-        let consumer: Consumer<TestData> = pulsar
-            .consumer()
-            .with_topic(&topic)
-            .with_consumer_name("test_consumer")
-            .with_subscription_type(SubType::Exclusive)
-            .with_subscription("test_subscription")
-            .with_unacked_message_resend_delay(Some(resend_delay))
-            .build()
-            .wait()
-            .unwrap();
-
-        let message_count = 10;
-
-        future::join_all((0..message_count).map(|i| {
-            producer.send(
-                topic.clone(),
-                &TestData {
-                    data: i.to_string(),
-                },
-            )
-        }))
-        .map_err(|e| Error::from(e))
-        .timeout(Duration::from_secs(5))
-        .wait()
-        .unwrap();
-
         let (tx, rx) = std::sync::mpsc::channel();
 
         let mut seen = BTreeSet::new();
         let start = Instant::now();
-        runtime.executor().spawn(
-            consumer
-                .take(message_count * 2)
-                .map_err(|e| Error::from(e))
-                .for_each(move |Message { payload, ack, .. }| {
-                    let data = payload?;
-                    tx.send(data.data.clone()).unwrap();
-                    if !seen.contains(&data.data) {
-                        seen.insert(data.data);
-                    } else {
-                        //ack the second time around
-                        ack.ack();
-                    }
-                    Ok(())
-                    // no ack
-                })
-                .timeout(Duration::from_secs(15))
-                .map_err(|e| panic!("{}", e)),
-        );
+        let resend_delay = Duration::from_secs(4);
+
+        let message_count = 10;
+        let f = async move {
+            let executor = TokioExecutor(tokio::runtime::Handle::current());
+            let pulsar: Pulsar = Pulsar::new(addr, None, executor).await.unwrap();
+
+            let producer = pulsar.producer(None);
+
+            let topic: String = std::iter::repeat(())
+                .map(|()| rand::thread_rng().sample(Alphanumeric))
+                .take(7)
+                .collect();
+
+            let consumer: Consumer<TestData> = pulsar
+                .consumer()
+                .with_topic(&topic)
+                .with_consumer_name("test_consumer")
+                .with_subscription_type(SubType::Exclusive)
+                .with_subscription("test_subscription")
+                .with_unacked_message_resend_delay(Some(resend_delay))
+                .build()
+                .await
+                .unwrap();
+
+
+            for i in 0u8..message_count {
+                producer.send(
+                    topic.clone(),
+                    &TestData {
+                        data: i.to_string(),
+                    },
+                    ).await.unwrap();
+            }
+
+            let mut stream = consumer
+                .take(message_count as usize * 2)
+                .map_err(|e| Error::from(e));
+            while let Some(res) = stream.next().await {
+
+                let Message { payload, ack, .. } = res.unwrap();
+                let data = payload.unwrap();
+                tx.send(data.data.clone()).unwrap();
+                if !seen.contains(&data.data) {
+                    seen.insert(data.data);
+                } else {
+                    //ack the second time around
+                    ack.ack();
+                }
+            }
+                //FIXME .timeout(Duration::from_secs(15))
+        };
+
+
+        runtime.spawn(Box::pin(f));
 
         let mut counts = BTreeMap::new();
 
@@ -349,6 +334,7 @@ mod tests {
                 panic!("timed out waiting for messages to be read");
             }
         }
+
         //check all messages we received are correct
         (0..message_count).for_each(|i| {
             let count = counts.get(&i.to_string());
@@ -362,6 +348,7 @@ mod tests {
             }
         });
         let mut redelivery_start = None;
+
         let timeout = Instant::now() + resend_delay + Duration::from_secs(4);
         while read_count < 2 * message_count {
             if let Ok(data) = rx.try_recv() {
@@ -388,7 +375,7 @@ mod tests {
         );
         assert!(redelivery_start > expected_redelivery_start - Duration::from_secs(1));
         assert!(redelivery_start < expected_redelivery_start + Duration::from_secs(1));
-        (0..message_count).for_each(|i| {
+        (0u8..message_count).for_each(|i| {
             let count = counts.get(&i.to_string());
             if count != Some(&2) {
                 println!(

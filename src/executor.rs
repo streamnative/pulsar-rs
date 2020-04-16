@@ -2,6 +2,7 @@ use futures::future::{/*ExecuteError, Executor,*/ Future, FutureExt};
 use std::sync::Arc;
 use std::pin::Pin;
 use std::ops::Deref;
+use tokio::runtime::Handle;
 
 /*
 trait Executor<F: Future<Output = Result<(), ()>>> {
@@ -65,5 +66,15 @@ impl Executor for TaskExecutor
 {
     fn spawn(&self, f: Pin<Box<dyn Future<Output = ()> + Send>>) -> Result<(), ()> {
         self.inner.deref().spawn(f)
+    }
+}
+
+#[derive(Clone,Debug)]
+pub struct TokioExecutor(pub Handle);
+
+impl Executor for TokioExecutor {
+    fn spawn(&self, f: Pin<Box<dyn Future<Output = ()> + Send>>) -> Result<(), ()> {
+        self.0.spawn(f);
+        Ok(())
     }
 }

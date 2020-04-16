@@ -1139,7 +1139,7 @@ mod tests {
     use tokio::prelude::*;
     use tokio::runtime::Runtime;
 
-    use crate::{producer, Pulsar, SerializeMessage};
+    use crate::{producer, Pulsar, SerializeMessage, executor::TokioExecutor};
 
     use super::*;
 
@@ -1194,53 +1194,64 @@ mod tests {
             msg: 2,
         };
 
-        let client: Pulsar = Pulsar::new(addr, None, rt.executor()).wait().unwrap();
-        let producer = client.producer(None);
-
-        let send_start = Utc::now();
-        producer.send(topic1, &data1).wait().unwrap();
-        producer.send(topic1, &data2).wait().unwrap();
-        producer.send(topic2, &data3).wait().unwrap();
-        producer.send(topic2, &data4).wait().unwrap();
-
-        let data = vec![data1, data2, data3, data4];
-
-        let mut consumer: MultiTopicConsumer<TestData> = client
-            .consumer()
-            .multi_topic(Regex::new("mt_test_[ab]").unwrap())
-            .with_namespace(namespace)
-            .with_subscription("test_sub")
-            .with_subscription_type(SubType::Shared)
-            .with_topic_refresh(Duration::from_secs(1))
-            .build();
-
-        let consumer_state = consumer.start_state_stream();
-
         let error: Arc<Mutex<Option<Error>>> = Arc::new(Mutex::new(None));
         let successes = Arc::new(AtomicUsize::new(0));
+        let err = error.clone();
 
-        rt.executor().spawn({
-            let successes = successes.clone();
-            consumer
-                .take(4)
-                .for_each(move |Message { payload, ack, .. }| {
-                    ack.ack();
-                    let msg = payload.unwrap();
-                    if !data.contains(&msg) {
-                        Err(Error::Custom(format!("Unexpected message: {:?}", &msg)))
-                    } else {
-                        successes.fetch_add(1, Ordering::Relaxed);
-                        Ok(())
-                    }
-                })
-                .map_err({
-                    let error = error.clone();
-                    move |e| {
-                        let mut error = error.lock().unwrap();
+        let succ = successes.clone();
+
+        let f  = async move {
+            let executor = TokioExecutor(tokio::runtime::Handle::current());
+            let client: Pulsar = Pulsar::new(addr, None, executor).await.unwrap();
+            let producer = client.producer(None);
+
+            let send_start = Utc::now();
+            producer.send(topic1, &data1).await.unwrap();
+            producer.send(topic1, &data2).await.unwrap();
+            producer.send(topic2, &data3).await.unwrap();
+            producer.send(topic2, &data4).await.unwrap();
+
+            let data = vec![data1, data2, data3, data4];
+
+            let mut consumer: MultiTopicConsumer<TestData> = client
+                .consumer()
+                .multi_topic(Regex::new("mt_test_[ab]").unwrap())
+                .with_namespace(namespace)
+                .with_subscription("test_sub")
+                .with_subscription_type(SubType::Shared)
+                .with_topic_refresh(Duration::from_secs(1))
+                .build();
+
+            let consumer_state = consumer.start_state_stream();
+
+            let mut stream = consumer.take(4);
+            while let Some(res) = stream.next().await {
+                match res {
+                    Ok(Message { payload, ack, .. }) => {
+                        ack.ack();
+                        let msg = payload.unwrap();
+                        if !data.contains(&msg) {
+                            panic!("Unexpected message: {:?}", &msg);
+                        } else {
+                            succ.fetch_add(1, Ordering::Relaxed);
+                        }
+                    },
+                    Err(e) => {
+                        let err = err.clone();
+                        let mut error = err.lock().unwrap();
                         *error = Some(e);
-                    }
-                })
-        });
+                    },
+                }
+            }
+
+            let consumer_state: Vec<ConsumerState> = consumer_state.collect::<Vec<ConsumerState>>().await;
+            let latest_state = consumer_state.last().unwrap();
+            assert!(latest_state.messages_received >= 4);
+            assert!(latest_state.connected_topics.len() >= 2);
+            assert!(latest_state.last_message_received.unwrap() >= send_start);
+        };
+
+        rt.spawn(Box::pin(f));
 
         let start = Instant::now();
         loop {
@@ -1252,11 +1263,5 @@ mod tests {
             }
             thread::sleep(Duration::from_millis(100));
         }
-
-        let consumer_state: Vec<ConsumerState> = consumer_state.collect().wait().unwrap();
-        let latest_state = consumer_state.last().unwrap();
-        assert!(latest_state.messages_received >= 4);
-        assert!(latest_state.connected_topics.len() >= 2);
-        assert!(latest_state.last_message_received.unwrap() >= send_start);
     }
 }
