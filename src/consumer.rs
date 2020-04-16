@@ -415,7 +415,7 @@ impl AckHandler {
 impl Future for AckHandler {
     type Output = Result<(), ()>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut acks: BTreeMap<(u64, bool), Vec<MessageIdData>> = BTreeMap::new();
         while let Some(msg) = self.next_inbound(cx) {
             match msg {
@@ -562,7 +562,7 @@ impl Iterator for BatchedMessageIterator {
 impl<T: DeserializeMessage> Stream for Consumer<T> {
     type Item = Result<Message<T::Output>, Error>;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if let Poll::Ready(Ok(Some(message))) = self.poll_current_message() {
             return Poll::Ready(Some(Ok(message)));
         }
@@ -1047,7 +1047,7 @@ impl<T: 'static + DeserializeMessage> Stream for MultiTopicConsumer<T> {
             }
         }
 
-        if let Poll::Ready(Some(_)) = self.refresh.poll_next_unpin(cx) {
+        if let Poll::Ready(Some(_)) = self.refresh.as_mut().poll_next(cx) {
             let regex = self.topic_regex.clone();
             let pulsar = self.pulsar.clone();
             let namespace = self.namespace.clone();
@@ -1062,27 +1062,29 @@ impl<T: 'static + DeserializeMessage> Stream for MultiTopicConsumer<T> {
                     .get_topics_of_namespace(namespace.clone(), proto::get_topics::Mode::All).await?;
                 trace!("fetched topics: {:?}", &topics);
 
-                try_join_all(topics
+                let mut v = vec![];
+                for topic in topics
                              .into_iter()
                              .filter(move |topic| {
                                  !existing_topics.contains(topic)
                                      && regex.is_match(topic.as_str())
-                             })
-                             .map(move |topic| {
-                                 trace!("creating consumer for topic {}", topic);
-                                 let pulsar = pulsar.clone();
-                                 let subscription = subscription.clone();
-                                 pulsar.create_consumer(
-                                     topic,
-                                     subscription,
-                                     sub_type,
-                                     None,
-                                     None,
-                                     None,
-                                     unacked_message_resend_delay,
-                                     options.clone(),
-                                     )
-                             })).await
+                             }) {
+                    trace!("creating consumer for topic {}", topic);
+                    //let pulsar = pulsar.clone();
+                    let subscription = subscription.clone();
+                    v.push(pulsar.create_consumer(
+                        topic,
+                        subscription,
+                        sub_type,
+                        None,
+                        None,
+                        None,
+                        unacked_message_resend_delay,
+                        options.clone(),
+                    ));
+                }
+
+                try_join_all(v).await
             });
             self.new_consumers = Some(new_consumers);
             return self.poll_next(cx);

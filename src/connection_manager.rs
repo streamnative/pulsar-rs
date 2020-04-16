@@ -142,7 +142,7 @@ fn engine(
     auth: Option<Authentication>,
     executor: TaskExecutor,
 ) -> mpsc::UnboundedSender<Query> {
-    let (tx, rx) = mpsc::unbounded();
+    let (tx, mut rx) = mpsc::unbounded();
     let mut connections: HashMap<BrokerAddress, Arc<Connection>> = HashMap::new();
     let executor2 = executor.clone();
     let tx2 = tx.clone();

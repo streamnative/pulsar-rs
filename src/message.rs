@@ -113,7 +113,7 @@ impl Encoder<Message> for Codec {
             buf.put(&payload.data[..]);
 
             let crc = crc32::checksum_castagnoli(&buf[metdata_offset..]);
-            let crc_buf: &mut [u8] = &mut buf[crc_offset..metdata_offset];
+            let mut crc_buf: &mut [u8] = &mut buf[crc_offset..metdata_offset];
             crc_buf.put_u32(crc);
         }
         if dst.remaining_mut() < buf.len() {

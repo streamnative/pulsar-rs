@@ -84,7 +84,7 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Receiver<S> {
 impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> {
     type Output = Result<(), ()>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match self.shutdown.as_mut().poll(cx) {
             Poll::Ready(Ok(())) | Poll::Ready(Err(futures::channel::oneshot::Canceled)) => return Poll::Ready(Err(())),
             Poll::Pending => {}
@@ -202,7 +202,7 @@ impl<S: Sink<Message, Error = ConnectionError>> Sender<S> {
 impl<S: Sink<Message, Error = ConnectionError>> Future for Sender<S> {
     type Output = Result<(), ()>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match self.shutdown.as_mut().poll(cx) {
             Poll::Ready(Ok(())) | Poll::Ready(Err(futures::channel::oneshot::Canceled)) => return Poll::Ready(Err(())),
             Poll::Pending => {}

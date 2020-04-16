@@ -7,7 +7,7 @@ use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use futures::channel::oneshot;
 use futures::{
     future::try_join_all,
-    Future, FutureExt, TryFutureExt, StreamExt,
+    Future, FutureExt, TryFutureExt, Stream,
     task::{Context, Poll},
 };
 use rand;
@@ -68,7 +68,7 @@ impl Producer {
         let executor = pulsar.executor().clone();
         executor.spawn(Box::pin(ProducerEngine {
             pulsar,
-            inbound: rx,
+            inbound: Box::pin(rx),
             producers: BTreeMap::new(),
             new_producers: BTreeMap::new(),
             producer_options: options,
@@ -152,27 +152,32 @@ impl Producer {
 
 struct ProducerEngine {
     pulsar: Pulsar,
-    inbound: UnboundedReceiver<ProducerMessage>,
+    inbound: Pin<Box<UnboundedReceiver<ProducerMessage>>>,
     producers: BTreeMap<String, Arc<TopicProducer>>,
-    new_producers: BTreeMap<String, oneshot::Receiver<Result<Arc<TopicProducer>, Error>>>,
+    new_producers: BTreeMap<String, Pin<Box<oneshot::Receiver<Result<Arc<TopicProducer>, Error>>>>>,
     producer_options: ProducerOptions,
 }
 
 impl Future for ProducerEngine {
     type Output = Result<(), ()>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), ()>> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), ()>> {
         if !self.new_producers.is_empty() {
             let mut resolved_topics = Vec::new();
+            let mut received_producers = vec![];
             for (topic, producer) in self.new_producers.iter_mut() {
-                match producer.poll_unpin(cx) {
+                match producer.as_mut().poll(cx) {
                     Poll::Ready(Ok(Ok(producer))) => {
-                        self.producers.insert(producer.topic().to_owned(), producer);
+                        received_producers.push(producer);
                         resolved_topics.push(topic.clone());
                     }
                     Poll::Ready(Ok(Err(_))) | Poll::Ready(Err(_)) => resolved_topics.push(topic.clone()),
                     Poll::Pending => {}
                 }
+            }
+
+            for producer in received_producers.drain(..) {
+                self.producers.insert(producer.topic().to_owned(), producer);
             }
             for topic in resolved_topics {
                 self.new_producers.remove(&topic);
@@ -180,7 +185,7 @@ impl Future for ProducerEngine {
         }
 
         loop {
-            let r = match self.inbound.poll_next_unpin(cx) {
+            let r = match self.inbound.as_mut().poll_next(cx) {
               Poll::Pending => return Poll::Pending,
               Poll::Ready(t) => t,
             };
@@ -193,23 +198,31 @@ impl Future for ProducerEngine {
                 }) => {
                     match self.producers.get(&topic) {
                         Some(producer) => {
-                            let f = producer.clone()
+                            let p = producer.clone();
+                            let f = async move {
+                                p
                                     .send_message(message, None)
                                     .map(|r| resolver.send(r).expect("FIXME"));//.map_err(drop)),
-                            tokio::spawn(f);
+                            };
+                            self.pulsar.executor().spawn(Box::pin(f));
                         }
                         None => {
                             let pending = self.new_producers.remove(&topic).unwrap_or_else(|| {
                                 let (tx, rx) = oneshot::channel::<Result<Arc<TopicProducer>, Error>>();
-                                let f = self.pulsar.clone()
+                                let pulsar = self.pulsar.clone();
+                                let topic = topic.clone();
+                                let producer_options = self.producer_options.clone();
+                                let f = async move {
+                                   pulsar
                                         .create_producer(
-                                            topic.clone(),
+                                            topic,
                                             None,
-                                            self.producer_options.clone(),
+                                            producer_options,
                                         )
                                         .map(|r| tx.send(r.map(Arc::new)).map_err(drop).expect("FIXME"));
-                                tokio::spawn(f);
-                                rx
+                                };
+                                self.pulsar.executor().spawn(Box::pin(f));
+                                Box::pin(rx)
                             });
                             let (tx, rx) = oneshot::channel::<Result<Arc<TopicProducer>, Error>>();
                             let f = async {
@@ -251,7 +264,7 @@ impl Future for ProducerEngine {
                                 }
                             };
                             tokio::spawn(f);
-                            self.new_producers.insert(topic, rx);
+                            self.new_producers.insert(topic, Box::pin(rx));
                         }
                     }
                 }
