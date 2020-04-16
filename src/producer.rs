@@ -202,7 +202,9 @@ impl Future for ProducerEngine {
                             let f = async move {
                                 p
                                     .send_message(message, None)
-                                    .map(|r| resolver.send(r).expect("FIXME"));//.map_err(drop)),
+                                    .map(|r| {
+                                        resolver.send(r).expect("FIXME")
+                                    }).await;//.map_err(drop)),
                             };
                             self.pulsar.executor().spawn(Box::pin(f));
                         }
@@ -219,7 +221,9 @@ impl Future for ProducerEngine {
                                             None,
                                             producer_options,
                                         )
-                                        .map(|r| tx.send(r.map(Arc::new)).map_err(drop).expect("FIXME"));
+                                        .map(|r| {
+                                            tx.send(r.map(Arc::new)).map_err(drop).expect("FIXME")
+                                        }).await;
                                 };
                                 self.pulsar.executor().spawn(Box::pin(f));
                                 Box::pin(rx)

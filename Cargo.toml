@@ -25,7 +25,7 @@ futures = "0.3"
 nom = "5.0.0"
 prost = "0.6.0"
 prost-derive = "0.6.0"
-tokio = "0.2"
+tokio = {version = "0.2", features = ["rt-threaded"]}
 tokio-util = {version = "0.3", features = ["codec"] }
 rand = "0.7"
 chrono = "0.4.6"

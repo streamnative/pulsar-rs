@@ -451,21 +451,24 @@ impl ConnectionSender {
         trace!("sending message(key = {:?}): {:?}", key, msg);
 
         let k = key.clone();
-        let response = response.await
+        let response = async {
+            response.await
             .map_err(|oneshot::Canceled| ConnectionError::Disconnected)
             .map(move |message: Message| {
                 trace!("received message(key = {:?}): {:?}", k, message);
                 extract_message(message, extract)
-            })?;
+            })?
+        };
 
-        match (
+        let res = match (
             self.registrations
                 .unbounded_send(Register::Request { key, resolver }),
             self.tx.unbounded_send(msg),
         ) {
-            (Ok(_), Ok(_)) => response,
+            (Ok(_), Ok(_)) => response.await,
             _ => Err(ConnectionError::Disconnected),
-        }
+        };
+        res
     }
 }
 

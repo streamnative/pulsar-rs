@@ -1171,7 +1171,7 @@ mod tests {
     #[ignore]
     fn multi_consumer() {
         let addr = "127.0.0.1:6650".parse().unwrap();
-        let rt = Runtime::new().unwrap();
+        let mut rt = Runtime::new().unwrap();
 
         let namespace = "public/default";
         let topic1 = "mt_test_a";
@@ -1251,7 +1251,7 @@ mod tests {
             assert!(latest_state.last_message_received.unwrap() >= send_start);
         };
 
-        rt.spawn(Box::pin(f));
+        rt.spawn(f);
 
         let start = Instant::now();
         loop {
