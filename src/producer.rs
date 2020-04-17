@@ -66,13 +66,15 @@ impl Producer {
     pub fn new(pulsar: Pulsar, options: ProducerOptions) -> Producer {
         let (tx, rx) = unbounded();
         let executor = pulsar.executor().clone();
-        executor.spawn(Box::pin(ProducerEngine {
+        if let Err(_) = executor.spawn(Box::pin(ProducerEngine {
             pulsar,
             inbound: Box::pin(rx),
             producers: BTreeMap::new(),
             new_producers: BTreeMap::new(),
             producer_options: options,
-        }.map(|res| info!("FIXME: ProducerEngine returned {:?}", res))));
+        }.map(|res| trace!("ProducerEngine returned {:?}", res)))) {
+            error!("the executor could not spawn the Producer engine future");
+        }
         Producer { message_sender: tx }
     }
 
@@ -203,10 +205,14 @@ impl Future for ProducerEngine {
                                 p
                                     .send_message(message, None)
                                     .map(|r| {
-                                        resolver.send(r).expect("FIXME")
-                                    }).await;//.map_err(drop)),
+                                        if let Err(res) = resolver.send(r) {
+                                          error!("send_message result receiver was dropped before getting the receipt: {:?}", res);
+                                        }
+                                    }).await;
                             };
-                            self.pulsar.executor().spawn(Box::pin(f));
+                            if let Err(_) = self.pulsar.executor().spawn(Box::pin(f)) {
+                                error!("the executor could not spawn the message sending future");
+                            }
                         }
                         None => {
                             let pending = self.new_producers.remove(&topic).unwrap_or_else(|| {
@@ -215,53 +221,52 @@ impl Future for ProducerEngine {
                                 let topic = topic.clone();
                                 let producer_options = self.producer_options.clone();
                                 let f = async move {
-                                   pulsar
+                                   let r = pulsar
                                         .create_producer(
                                             topic,
                                             None,
                                             producer_options,
-                                        )
-                                        .map(|r| {
-                                            tx.send(r.map(Arc::new)).map_err(drop).expect("FIXME")
-                                        }).await;
+                                        ).await;
+
+                                   if let Err(_) = tx.send(r.map(Arc::new)) {
+                                       error!("create_producer result receiver was dropped before getting the prducer");
+                                   }
                                 };
-                                self.pulsar.executor().spawn(Box::pin(f));
+                                if let Err(_) = self.pulsar.executor().spawn(Box::pin(f)) {
+                                    error!("the executor could not spawn the producer creation future");
+                                }
                                 Box::pin(rx)
                             });
                             let (tx, rx) = oneshot::channel::<Result<Arc<TopicProducer>, Error>>();
                             let f = async {
-                                match pending//.map_err(drop)
+                                match pending
                                     .await {
                                     Ok(Ok(producer)) => {
                                         let _ = tx.send(Ok(producer.clone()));
-                                            producer
-                                            .send_message(message, None)
-                                            .map(|r| resolver.send(r).expect("FIXME")).await
-                                            //.map_err(drop),
+                                        let r = producer
+                                            .send_message(message, None).await;
+
+                                        if let Err(res) = resolver.send(r) {
+                                          error!("send_message result receiver was dropped before getting the receipt: {:?}", res);
+                                        }
                                     },
                                     Ok(Err(e)) => {
+                                        let _ = resolver.send(Err(e));
                                         // TODO find better error propagation here
-                                        let _ = resolver.send(Err(Error::Producer(
-                                                    //FIXME
-                                                    //ProducerError::Custom(e.to_string()),
-                                                    ProducerError::Custom("()".to_string()),
-                                                    )));
+                                        // we send an error to tx to signal that the new producer
+                                        // failed, since tx is added to new_producers in all cases
                                         let _ = tx.send(Err(Error::Producer(
-                                                    //FIXME
-                                                    //ProducerError::Custom(e.to_string()),
-                                                    ProducerError::Custom("()".to_string()),
+                                                    ProducerError::Custom("producer creation failed".to_string()),
                                                     )));
                                     }
-                                    Err(e) => {
-                                        // TODO find better error propagation here
+                                    Err(_) => {
                                         let _ = resolver.send(Err(Error::Producer(
-                                                    //FIXME
-                                                    //ProducerError::Custom(e.to_string()),
-                                                    ProducerError::Custom("()".to_string()),
+                                                    ProducerError::Custom("producer creation failed".to_string()),
                                                     )));
+                                        // TODO find better error propagation here
+                                        // we send an error to tx to signal that the new producer
+                                        // failed, since tx is added to new_producers in all cases
                                         let _ = tx.send(Err(Error::Producer(
-                                                    //FIXME
-                                                    //ProducerError::Custom(e.to_string()),
                                                     ProducerError::Custom("()".to_string()),
                                                     )));
                                     }

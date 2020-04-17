@@ -2,9 +2,8 @@ use crate::connection::{Authentication, Connection};
 use crate::error::ConnectionError;
 use crate::executor::{Executor, TaskExecutor};
 use futures::{
-    future,
     channel::{mpsc, oneshot},
-    Future, FutureExt, StreamExt,
+    StreamExt,
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -133,9 +132,9 @@ enum Query {
     ),
 }
 
-/// core of the service discovery
+/// core of the connection manager
 ///
-/// this function loops over the query channel and launches lookups.
+/// this function loops over the query channel and creates connections on demand
 /// It can send a message to itself for further queries if necessary.
 fn engine(
     connection: Arc<Connection>,
@@ -156,19 +155,18 @@ fn engine(
                 Query::Connect(broker, tx) => match connections.get(&broker) {
                     Some(conn) => {
                         let _ = tx.send(Ok(conn.clone()));
-                        Ok(())
                     }
-                    None => connect(broker, auth.clone(), tx, self_tx, exe).await,
+                    None => {
+                        connect(broker, auth.clone(), tx, self_tx, exe).await;
+                    },
                 },
                 Query::Base(tx) => {
                     let _ = tx.send(Ok(connection.clone()));
-                    Ok(())
                 }
                 Query::Connected(broker, conn, tx) => {
                     let c = Arc::new(conn);
                     connections.insert(broker, c.clone());
                     let _ = tx.send(Ok(c));
-                    Ok(())
                 }
                 Query::Get(url_opt, tx) => {
                     let res = match url_opt {
@@ -191,45 +189,43 @@ fn engine(
                         }
                     };
                     let _ = tx.send(Ok(res));
-                    Ok(())
                 }
-            }.expect("FIXME")
+            }
         }
     };
 
-    executor.spawn(Box::pin(f));
+    if let Err(_) = executor.spawn(Box::pin(f)) {
+        error!("the executor could not spawn the Connection Manager engine future");
+    }
 
     tx
 }
 
-fn connect(
+async fn connect(
     broker: BrokerAddress,
     auth: Option<Authentication>,
     tx: oneshot::Sender<Result<Arc<Connection>, ConnectionError>>,
     self_tx: mpsc::UnboundedSender<Query>,
     exe: TaskExecutor,
-) -> impl Future<Output = Result<(), ()>> {
+) {
     let proxy_url = if broker.proxy {
         Some(broker.broker_url.clone())
     } else {
         None
     };
 
-    Connection::new(broker.address.to_string(), auth, proxy_url, exe).then(move |res| {
-        match res {
-            Ok(conn) => match self_tx.unbounded_send(Query::Connected(broker, conn, tx)) {
-                Err(e) => match e.into_inner() {
-                    Query::Connected(_, _, tx) => {
-                        let _ = tx.send(Err(ConnectionError::Shutdown));
-                    }
-                    _ => {}
-                },
-                Ok(_) => {}
+    match Connection::new(broker.address.to_string(), auth, proxy_url, exe).await {
+        Ok(conn) => match self_tx.unbounded_send(Query::Connected(broker, conn, tx)) {
+            Err(e) => match e.into_inner() {
+                Query::Connected(_, _, tx) => {
+                    let _ = tx.send(Err(ConnectionError::Shutdown));
+                }
+                _ => {}
             },
-            Err(e) => {
-                let _ = tx.send(Err(e));
-            }
-        };
-        future::ok(())
-    })
+            Ok(_) => {}
+        },
+        Err(e) => {
+            let _ = tx.send(Err(e));
+        }
+    }
 }

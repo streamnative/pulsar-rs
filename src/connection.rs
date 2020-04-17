@@ -183,19 +183,15 @@ impl<S: Sink<Message, Error = ConnectionError>> Sender<S> {
 
     fn try_start_send(&mut self, cx: &mut Context<'_>, item: Message) -> futures::task::Poll<Result<(), ConnectionError>> {
         match self.sink.as_mut().poll_ready(cx) {
-            Poll::Pending => panic!("FIXME: we tried to buffer before"),
+            Poll::Pending => {
+                self.buffered = Some(item);
+                Poll::Pending
+            },
             Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
             Poll::Ready(Ok(())) => {
                 Poll::Ready(self.sink.as_mut().start_send(item))
             }
         }
-
-        /*if let AsyncSink::NotReady(item) = self.sink.start_send(item)? {
-            self.buffered = Some(item);
-            return Poll::Pending;
-        }
-        Poll::Ready(Ok(()))
-        */
     }
 }
 
@@ -521,7 +517,7 @@ impl Connection {
                                 ))
                     })
             }
-            Some(Err(e)) => Err(ConnectionError::Disconnected),
+            Some(Err(e)) => Err(e),
             None => Err(ConnectionError::Disconnected),
         }?;
 
@@ -533,15 +529,22 @@ impl Connection {
         let (sender_shutdown_tx, sender_shutdown_rx) = oneshot::channel();
         let executor = TaskExecutor::new(executor);
 
-        executor.spawn(Box::pin(Receiver::new(
+        if let Err(_) = executor.spawn(Box::pin(Receiver::new(
                     stream,
                     tx.clone(),
                     error.clone(),
                     registrations_rx,
                     receiver_shutdown_rx,
-                    ).map(|_| ())));
+                    ).map(|_| ()))) {
+            error!("the executor could not spawn the Receiver future");
+            return Err(ConnectionError::Shutdown);
+        }
 
-        executor.spawn(Box::pin(Sender::new(sink, rx, error.clone(), sender_shutdown_rx).map(|_| ())));
+        if let Err(_) = executor.spawn(Box::pin(Sender::new(sink, rx, error.clone(), sender_shutdown_rx)
+                                                .map(|_| ()))) {
+            error!("the executor could not spawn the Receiver future");
+            return Err(ConnectionError::Shutdown);
+        }
 
         let sender = ConnectionSender::new(tx, registrations_tx, SerialId::new(), error);
 

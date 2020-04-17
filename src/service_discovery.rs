@@ -237,7 +237,9 @@ fn engine(manager: Arc<ConnectionManager>, executor: TaskExecutor) -> mpsc::Unbo
         Ok(())
     };
 
-    executor.spawn(Box::pin(f.map(|_: Result<(), ()>| ())));
+    if let Err(_) = executor.spawn(Box::pin(f.map(|_: Result<(), ()>| ()))) {
+        error!("the executor could not spawn the Service Discovery engine future");
+    }
 
     tx
 }
@@ -372,7 +374,7 @@ async fn lookup(
     // to the target broker
     let broker_address: BrokerAddress = if redirect {
         let (tx2, rx2) = oneshot::channel();
-        let res = self_tx.unbounded_send(Query::Topic(
+        let _ = self_tx.unbounded_send(Query::Topic(
                 topic,
                 Some(b.broker_url),
                 authoritative,
@@ -387,9 +389,15 @@ async fn lookup(
             });
 
         match rx2.await.map_err(|_| ServiceDiscoveryError::Canceled) {
-          //FIXME
           Ok(Ok(b)) => b,
-          _ => return,
+          Ok(Err(e)) => {
+              let _ = tx.send(Err(e));
+              return;
+          },
+          Err(e) => {
+              let _ = tx.send(Err(e));
+              return;
+          }
         }
     } else {
         b

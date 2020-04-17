@@ -1,30 +1,12 @@
-use futures::future::{/*ExecuteError, Executor,*/ Future, FutureExt};
+use futures::future::{Future, FutureExt};
 use std::sync::Arc;
 use std::pin::Pin;
 use std::ops::Deref;
 use tokio::runtime::Handle;
 
-/*
-trait Executor<F: Future<Output = Result<(), ()>>> {
-    fn execute(&self, future: Pin<Box<F>>) -> Result<(), ExecuteError<F>>;
-}
-
-struct ExecuteError<F> {
-    f: F,
-}
-*/
-pub trait Executor: /*std::fmt::Debug +*/ Send + Sync {
+pub trait Executor: Send + Sync {
     fn spawn(&self, f: Pin<Box<dyn Future<Output = ()> + Send>>) -> Result<(), ()>;
 }
-
-
-/*
-pub trait PulsarExecutor: Executor<BoxSendFuture> + Send + Sync + 'static {}
-
-impl<T: Executor<BoxSendFuture> + Send + Sync + 'static> PulsarExecutor for T {}
-
-type BoxSendFuture = Box<dyn Future<Output = Result<(), ()>> + Send + 'static>;
-*/
 
 #[derive(Clone)]
 pub struct TaskExecutor {
@@ -50,19 +32,9 @@ impl TaskExecutor {
             Err(_) => panic!("no executor available"),
         }
     }
-    /*pub fn spawn<F>(&self, f: F)
-    where
-        F: Future<Output = Result<(), ()>> + Send + 'static,
-    {
-        if self.execute(f).is_err() {
-            panic!("no executor available")
-        }
-    }*/
 }
 
 impl Executor for TaskExecutor
-// where
-//    F: Future<Output = Result<(), ()>> + Send + 'static,
 {
     fn spawn(&self, f: Pin<Box<dyn Future<Output = ()> + Send>>) -> Result<(), ()> {
         self.inner.deref().spawn(f)

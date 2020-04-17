@@ -1,4 +1,3 @@
-#[macro_use]
 extern crate futures;
 #[macro_use]
 extern crate log;
@@ -46,7 +45,7 @@ mod service_discovery;
 mod tests {
     use std::time::{Duration, Instant};
 
-    use futures::{future, Future, Stream, StreamExt, TryStreamExt};
+    use futures::{StreamExt, TryStreamExt};
     use tokio;
     use tokio::runtime::Runtime;
 
@@ -133,10 +132,31 @@ mod tests {
         }
     }
 
+    use log::{Record, Metadata, LevelFilter};
+    pub struct SimpleLogger;
+    impl log::Log for SimpleLogger {
+        fn enabled(&self, _metadata: &Metadata) -> bool {
+            //metadata.level() <= Level::Info
+            true
+        }
+
+        fn log(&self, record: &Record) {
+            if self.enabled(record.metadata()) {
+                println!("{} {}\t{}\t{}", chrono::Utc::now(),
+                  record.level(), record.module_path().unwrap(), record.args());
+            }
+        }
+        fn flush(&self) {}
+    }
+
+    pub static TEST_LOGGER: SimpleLogger = SimpleLogger;
+
     #[test]
     #[ignore]
     fn round_trip() {
-        let runtime = Runtime::new().unwrap();
+        let mut runtime = Runtime::new().unwrap();
+        let _ = log::set_logger(&TEST_LOGGER);
+        let _ = log::set_max_level(LevelFilter::Debug);
 
         let f = async {
             let addr = "127.0.0.1:6650".parse().unwrap();
@@ -144,7 +164,7 @@ mod tests {
             let pulsar: Pulsar = Pulsar::new(addr, None, executor).await.unwrap();
             let producer = pulsar.producer(None);
 
-            for i in 0u16..5000 {
+            for _ in 0u16..5000 {
                 producer.send(
                     "test",
                     &TestData {
@@ -175,13 +195,15 @@ mod tests {
             // FIXME .timeout(Duration::from_secs(5))
         };
 
-        runtime.spawn(Box::pin(f));
+        runtime.block_on(Box::pin(f));
     }
 
     #[test]
     #[ignore]
     fn unsized_data() {
-        let runtime = Runtime::new().unwrap();
+        let _ = log::set_logger(&TEST_LOGGER);
+        let _ = log::set_max_level(LevelFilter::Debug);
+        let mut runtime = Runtime::new().unwrap();
 
         let f = async {
             let executor = TokioExecutor(tokio::runtime::Handle::current());
@@ -249,12 +271,14 @@ mod tests {
             }
         };
 
-        runtime.spawn(Box::pin(f));
+        runtime.block_on(Box::pin(f));
     }
 
     #[test]
     #[ignore]
     fn redelivery() {
+        let _ = log::set_logger(&TEST_LOGGER);
+        let _ = log::set_max_level(LevelFilter::Debug);
         let runtime = Runtime::new().unwrap();
 
         let addr = "127.0.0.1:6650".parse().unwrap();
