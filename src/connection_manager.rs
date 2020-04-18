@@ -53,6 +53,24 @@ impl ConnectionManager {
         Ok(ConnectionManager { tx, address })
     }
 
+    /// stops the connection manager engine
+    pub async fn close(&self) -> Result<(), ConnectionError> {
+        if self.tx.is_closed() {
+            return Err(ConnectionError::Shutdown);
+        }
+
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx
+            .unbounded_send(Query::Close(tx))
+            .is_err()
+        {
+            return Err(ConnectionError::Shutdown);
+        }
+
+        rx.await.map_err(|_| ConnectionError::Canceled)
+    }
+
     /// get an active Connection from a broker address
     ///
     /// creates a connection if not available
@@ -130,6 +148,7 @@ enum Query {
         /// channel to send back the response
         oneshot::Sender<Result<Arc<Connection>, ConnectionError>>,
     ),
+    Close(oneshot::Sender<()>),
 }
 
 /// core of the connection manager
@@ -190,8 +209,13 @@ fn engine(
                     };
                     let _ = tx.send(Ok(res));
                 }
+                Query::Close(tx) => {
+                    let _ = tx.send(());
+                    break;
+                }
             }
         }
+        debug!("connection manager engine closed");
     };
 
     if let Err(_) = executor.spawn(Box::pin(f)) {

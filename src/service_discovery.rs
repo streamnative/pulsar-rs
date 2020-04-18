@@ -41,6 +41,24 @@ impl ServiceDiscovery {
         ServiceDiscovery { tx }
     }
 
+    /// stops the service discovery engine
+    pub async fn close(&self) -> Result<(), ServiceDiscoveryError> {
+        if self.tx.is_closed() {
+            return Err(ServiceDiscoveryError::Shutdown);
+        }
+
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx
+            .unbounded_send(Query::Close(tx))
+            .is_err()
+        {
+            return Err(ServiceDiscoveryError::Shutdown);
+        }
+
+        rx.await.map_err(|_| ServiceDiscoveryError::Canceled)
+    }
+
     /// get the broker address for a topic
     pub fn lookup_topic<S: Into<String>>(
         &self,
@@ -130,6 +148,7 @@ enum Query {
         /// channel to send back the response
         oneshot::Sender<Result<u32, ServiceDiscoveryError>>,
     ),
+    Close(oneshot::Sender<()>),
 }
 
 /// helper function for topic lookup
@@ -232,8 +251,13 @@ fn engine(manager: Arc<ConnectionManager>, executor: TaskExecutor) -> mpsc::Unbo
                         }
                     };
                 }
+                Query::Close(tx) => {
+                    let _ = tx.send(());
+                    break;
+                }
             }
         }
+        debug!("service discovery engine closed");
         Ok(())
     };
 

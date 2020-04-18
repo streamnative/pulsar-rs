@@ -109,6 +109,12 @@ impl Pulsar {
         })
     }
 
+    /// stops the connection manager engine
+    pub async fn close(&self) -> Result<(), Error> {
+        self.service_discovery.close().await.map_err(Error::from)?;
+        self.manager.close().await.map_err(|e| e.into())
+    }
+
     pub async fn lookup_topic<S: Into<String>>(
         &self,
         topic: S,
