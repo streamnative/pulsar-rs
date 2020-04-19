@@ -1,10 +1,9 @@
 use crate::connection::{Authentication, Connection};
 use crate::error::ConnectionError;
-use crate::executor::{PulsarExecutor, TaskExecutor};
+use crate::executor::{Executor, TaskExecutor};
 use futures::{
-    future::{self, Either},
-    sync::{mpsc, oneshot},
-    Future, Stream,
+    channel::{mpsc, oneshot},
+    StreamExt,
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -33,18 +32,17 @@ pub struct ConnectionManager {
 }
 
 impl ConnectionManager {
-    pub fn new<E: PulsarExecutor>(
+    pub async fn new<E: Executor+'static>(
         addr: SocketAddr,
         auth: Option<Authentication>,
         executor: E,
-    ) -> impl Future<Item = Self, Error = ConnectionError> {
+    ) -> Result<Self, ConnectionError> {
         let executor = TaskExecutor::new(executor);
-        Connection::new(addr.to_string(), auth.clone(), None, executor.clone())
-            .map_err(|e| e)
-            .and_then(move |conn| ConnectionManager::from_connection(conn, auth, addr, executor))
+        let conn = Connection::new(addr.to_string(), auth.clone(), None, executor.clone()).await?;
+        ConnectionManager::from_connection(conn, auth, addr, executor)
     }
 
-    pub fn from_connection<E: PulsarExecutor>(
+    pub fn from_connection<E: Executor + 'static>(
         connection: Connection,
         auth: Option<Authentication>,
         address: SocketAddr,
@@ -58,30 +56,30 @@ impl ConnectionManager {
     /// get an active Connection from a broker address
     ///
     /// creates a connection if not available
-    pub fn get_base_connection(
+    pub async fn get_base_connection(
         &self,
-    ) -> impl Future<Item = Arc<Connection>, Error = ConnectionError> {
+    ) -> Result<Arc<Connection>, ConnectionError> {
         if self.tx.is_closed() {
-            return Either::A(future::err(ConnectionError::Shutdown));
+            return Err(ConnectionError::Shutdown);
         }
 
         let (tx, rx) = oneshot::channel();
         if self.tx.unbounded_send(Query::Base(tx)).is_err() {
-            return Either::A(future::err(ConnectionError::Shutdown));
+            return Err(ConnectionError::Shutdown);
         }
 
-        Either::B(rx.map_err(|_| ConnectionError::Canceled).flatten())
+        rx.await.map_err(|_| ConnectionError::Canceled)?
     }
 
     /// get an active Connection from a broker address
     ///
     /// creates a connection if not available
-    pub fn get_connection(
+    pub async fn get_connection(
         &self,
         broker: &BrokerAddress,
-    ) -> impl Future<Item = Arc<Connection>, Error = ConnectionError> {
+    ) -> Result<Arc<Connection>, ConnectionError> {
         if self.tx.is_closed() {
-            return Either::A(future::err(ConnectionError::Shutdown));
+            return Err(ConnectionError::Shutdown);
         }
 
         let (tx, rx) = oneshot::channel();
@@ -90,26 +88,26 @@ impl ConnectionManager {
             .unbounded_send(Query::Connect(broker.clone(), tx))
             .is_err()
         {
-            return Either::A(future::err(ConnectionError::Shutdown));
+            return Err(ConnectionError::Shutdown);
         }
 
-        Either::B(rx.map_err(|_| ConnectionError::Canceled).flatten())
+        rx.await.map_err(|_| ConnectionError::Canceled)?
     }
 
-    pub fn get_connection_from_url(
+    pub async fn get_connection_from_url(
         &self,
         broker: Option<String>,
-    ) -> impl Future<Item = Option<(bool, Arc<Connection>)>, Error = ConnectionError> {
+    ) -> Result<Option<(bool, Arc<Connection>)>, ConnectionError> {
         if self.tx.is_closed() {
-            return Either::A(future::err(ConnectionError::Shutdown));
+            return Err(ConnectionError::Shutdown);
         }
 
         let (tx, rx) = oneshot::channel();
         if self.tx.unbounded_send(Query::Get(broker, tx)).is_err() {
-            return Either::A(future::err(ConnectionError::Shutdown));
+            return Err(ConnectionError::Shutdown);
         }
 
-        Either::B(rx.map_err(|_| ConnectionError::Canceled).flatten())
+        rx.await.map_err(|_| ConnectionError::Canceled)?
     }
 }
 
@@ -134,42 +132,41 @@ enum Query {
     ),
 }
 
-/// core of the service discovery
+/// core of the connection manager
 ///
-/// this function loops over the query channel and launches lookups.
+/// this function loops over the query channel and creates connections on demand
 /// It can send a message to itself for further queries if necessary.
 fn engine(
     connection: Arc<Connection>,
     auth: Option<Authentication>,
     executor: TaskExecutor,
 ) -> mpsc::UnboundedSender<Query> {
-    let (tx, rx) = mpsc::unbounded();
+    let (tx, mut rx) = mpsc::unbounded();
     let mut connections: HashMap<BrokerAddress, Arc<Connection>> = HashMap::new();
     let executor2 = executor.clone();
     let tx2 = tx.clone();
 
-    let f = move || {
-        rx.for_each(move |query: Query| {
+    let f = async move {
+        while let Some(query) = rx.next().await {
             let exe = executor2.clone();
             let self_tx = tx2.clone();
 
             match query {
-                Query::Connect(broker, tx) => Either::A(match connections.get(&broker) {
+                Query::Connect(broker, tx) => match connections.get(&broker) {
                     Some(conn) => {
                         let _ = tx.send(Ok(conn.clone()));
-                        Either::A(future::ok(()))
                     }
-                    None => Either::B(connect(broker, auth.clone(), tx, self_tx, exe)),
-                }),
+                    None => {
+                        connect(broker, auth.clone(), tx, self_tx, exe).await;
+                    },
+                },
                 Query::Base(tx) => {
                     let _ = tx.send(Ok(connection.clone()));
-                    Either::B(future::ok(()))
                 }
                 Query::Connected(broker, conn, tx) => {
                     let c = Arc::new(conn);
                     connections.insert(broker, c.clone());
                     let _ = tx.send(Ok(c));
-                    Either::B(future::ok(()))
                 }
                 Query::Get(url_opt, tx) => {
                     let res = match url_opt {
@@ -180,58 +177,55 @@ fn engine(
                         Some(ref s) => {
                             if let Some((b, c)) =
                                 connections.iter().find(|(k, _)| &k.broker_url == s)
-                            {
-                                debug!(
-                                    "using another connection for lookup, proxying to {:?}",
-                                    b.proxy
-                                );
-                                Some((b.proxy, c.clone()))
-                            } else {
-                                None
-                            }
+                                {
+                                    debug!(
+                                        "using another connection for lookup, proxying to {:?}",
+                                        b.proxy
+                                        );
+                                    Some((b.proxy, c.clone()))
+                                } else {
+                                    None
+                                }
                         }
                     };
                     let _ = tx.send(Ok(res));
-                    Either::B(future::ok(()))
                 }
             }
-        })
-        .map_err(|_| error!("service discovery engine stopped"))
+        }
     };
 
-    executor.spawn(f());
+    if let Err(_) = executor.spawn(Box::pin(f)) {
+        error!("the executor could not spawn the Connection Manager engine future");
+    }
 
     tx
 }
 
-fn connect(
+async fn connect(
     broker: BrokerAddress,
     auth: Option<Authentication>,
     tx: oneshot::Sender<Result<Arc<Connection>, ConnectionError>>,
     self_tx: mpsc::UnboundedSender<Query>,
     exe: TaskExecutor,
-) -> impl Future<Item = (), Error = ()> {
+) {
     let proxy_url = if broker.proxy {
         Some(broker.broker_url.clone())
     } else {
         None
     };
 
-    Connection::new(broker.address.to_string(), auth, proxy_url, exe).then(move |res| {
-        match res {
-            Ok(conn) => match self_tx.unbounded_send(Query::Connected(broker, conn, tx)) {
-                Err(e) => match e.into_inner() {
-                    Query::Connected(_, _, tx) => {
-                        let _ = tx.send(Err(ConnectionError::Shutdown));
-                    }
-                    _ => {}
-                },
-                Ok(_) => {}
+    match Connection::new(broker.address.to_string(), auth, proxy_url, exe).await {
+        Ok(conn) => match self_tx.unbounded_send(Query::Connected(broker, conn, tx)) {
+            Err(e) => match e.into_inner() {
+                Query::Connected(_, _, tx) => {
+                    let _ = tx.send(Err(ConnectionError::Shutdown));
+                }
+                _ => {}
             },
-            Err(e) => {
-                let _ = tx.send(Err(e));
-            }
-        };
-        future::ok(())
-    })
+            Ok(_) => {}
+        },
+        Err(e) => {
+            let _ = tx.send(Err(e));
+        }
+    }
 }

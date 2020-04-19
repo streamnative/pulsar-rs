@@ -1,17 +1,17 @@
 use crate::connection::{Authentication, ConnectionSender};
 use crate::connection_manager::{BrokerAddress, ConnectionManager};
 use crate::error::ServiceDiscoveryError;
-use crate::executor::{PulsarExecutor, TaskExecutor};
+use crate::executor::{Executor, TaskExecutor};
 use crate::message::proto::{command_lookup_topic_response, CommandLookupTopicResponse};
 use futures::{
-    future::{self, join_all, Either},
-    sync::{mpsc, oneshot},
-    Future, Stream,
+    future::{self, try_join_all, Either},
+    channel::{mpsc, oneshot},
+    Future, FutureExt, StreamExt,
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
 use trust_dns_resolver::config::*;
-use trust_dns_resolver::AsyncResolver;
+use trust_dns_resolver::TokioAsyncResolver;
 use url::Url;
 
 /// Look up broker addresses for topics and partitioned topics
@@ -25,18 +25,17 @@ pub struct ServiceDiscovery {
 }
 
 impl ServiceDiscovery {
-    pub fn new<E: PulsarExecutor>(
+    pub async fn new<E: Executor + 'static>(
         addr: SocketAddr,
         auth: Option<Authentication>,
         executor: E,
-    ) -> impl Future<Item = Self, Error = ServiceDiscoveryError> {
+    ) -> Result<Self, ServiceDiscoveryError> {
         let executor = TaskExecutor::new(executor);
-        ConnectionManager::new(addr, auth, executor.clone())
-            .map_err(|e| e.into())
-            .map(move |conn| ServiceDiscovery::with_manager(Arc::new(conn), executor))
+        let conn = ConnectionManager::new(addr, auth, executor.clone()).await?;
+        Ok(ServiceDiscovery::with_manager(Arc::new(conn), executor))
     }
 
-    pub fn with_manager<E: PulsarExecutor>(manager: Arc<ConnectionManager>, executor: E) -> Self {
+    pub fn with_manager<E: Executor + 'static>(manager: Arc<ConnectionManager>, executor: E) -> Self {
         let executor = TaskExecutor::new(executor);
         let tx = engine(manager, executor);
         ServiceDiscovery { tx }
@@ -46,21 +45,21 @@ impl ServiceDiscovery {
     pub fn lookup_topic<S: Into<String>>(
         &self,
         topic: S,
-    ) -> impl Future<Item = BrokerAddress, Error = ServiceDiscoveryError> {
+    ) -> impl Future<Output = Result<BrokerAddress, ServiceDiscoveryError>> {
         if self.tx.is_closed() {
-            return Either::A(future::err(ServiceDiscoveryError::Shutdown));
+            return Either::Left(future::err(ServiceDiscoveryError::Shutdown));
         }
 
-        Either::B(lookup_topic(topic, self.tx.clone()))
+        Either::Right(lookup_topic(topic, self.tx.clone()))
     }
 
     /// get the number of partitions for a partitioned topic
-    pub fn lookup_partitioned_topic_number<S: Into<String>>(
+    pub async fn lookup_partitioned_topic_number<S: Into<String>>(
         &self,
         topic: S,
-    ) -> impl Future<Item = u32, Error = ServiceDiscoveryError> {
+    ) -> Result<u32, ServiceDiscoveryError> {
         if self.tx.is_closed() {
-            return Either::A(future::err(ServiceDiscoveryError::Shutdown));
+            return Err(ServiceDiscoveryError::Shutdown);
         }
 
         let (tx, rx) = oneshot::channel();
@@ -70,19 +69,19 @@ impl ServiceDiscovery {
             .unbounded_send(Query::PartitionedTopic(topic, tx))
             .is_err()
         {
-            return Either::A(future::err(ServiceDiscoveryError::Shutdown));
+            return Err(ServiceDiscoveryError::Shutdown);
         }
 
-        Either::B(rx.map_err(|_| ServiceDiscoveryError::Canceled).flatten())
+        rx.await.map_err(|_| ServiceDiscoveryError::Canceled)?
     }
 
     /// get the list of topic names and addresses for a partitioned topic
-    pub fn lookup_partitioned_topic<S: Into<String>>(
+    pub async fn lookup_partitioned_topic<S: Into<String>>(
         &self,
         topic: S,
-    ) -> impl Future<Item = Vec<(String, BrokerAddress)>, Error = ServiceDiscoveryError> {
+    ) -> Result<Vec<(String, BrokerAddress)>, ServiceDiscoveryError> {
         if self.tx.is_closed() {
-            return Either::A(future::err(ServiceDiscoveryError::Shutdown));
+            return Err(ServiceDiscoveryError::Shutdown);
         }
 
         let (tx, rx) = oneshot::channel();
@@ -93,28 +92,23 @@ impl ServiceDiscovery {
             .unbounded_send(Query::PartitionedTopic(topic.clone(), tx))
             .is_err()
         {
-            return Either::A(future::err(ServiceDiscoveryError::Shutdown));
+            return Err(ServiceDiscoveryError::Shutdown);
         }
 
         let self_tx = self.tx.clone();
 
-        Either::B(
-            rx.map_err(|_| ServiceDiscoveryError::Canceled)
-                .and_then(move |res| match res {
-                    Err(e) => Either::A(future::err(e)),
-                    Ok(partitions) => {
-                        let topics = (0..partitions)
-                            .map(|nb| {
-                                let t = format!("{}-partition-{}", topic, nb);
-                                lookup_topic(t.clone(), self_tx.clone())
-                                    .map(move |address| (t, address))
-                            })
-                            .collect::<Vec<_>>();
-
-                        Either::B(join_all(topics))
-                    }
-                }),
-        )
+        let partitions = rx.await.map_err(|_| ServiceDiscoveryError::Canceled)??;
+        let topics = (0..partitions)
+            .map(|nb| {
+                let t = format!("{}-partition-{}", topic, nb);
+                lookup_topic(t.clone(), self_tx.clone())
+                    .map(move |address_res| match address_res {
+                        Err(e) => Err(e),
+                        Ok(address) => Ok((t, address))
+                    })
+            })
+        .collect::<Vec<_>>();
+        try_join_all(topics).await
     }
 }
 
@@ -141,20 +135,20 @@ enum Query {
 /// helper function for topic lookup
 ///
 /// connects to the target broker if necessary
-fn lookup_topic<S: Into<String>>(
+async fn lookup_topic<S: Into<String>>(
     topic: S,
     self_tx: mpsc::UnboundedSender<Query>,
-) -> impl Future<Item = BrokerAddress, Error = ServiceDiscoveryError> {
+) -> Result<BrokerAddress, ServiceDiscoveryError> {
     let (tx, rx) = oneshot::channel();
     let topic: String = topic.into();
     if self_tx
         .unbounded_send(Query::Topic(topic, None, false, tx))
         .is_err()
     {
-        return Either::A(future::err(ServiceDiscoveryError::Shutdown));
+        return Err(ServiceDiscoveryError::Shutdown);
     }
 
-    Either::B(rx.map_err(|_| ServiceDiscoveryError::Canceled).flatten())
+    rx.await.map_err(|_| ServiceDiscoveryError::Canceled)?
 }
 
 /// core of the service discovery
@@ -162,93 +156,90 @@ fn lookup_topic<S: Into<String>>(
 /// this function loops over the query channel and launches lookups.
 /// It can send a message to itself for further queries if necessary.
 fn engine(manager: Arc<ConnectionManager>, executor: TaskExecutor) -> mpsc::UnboundedSender<Query> {
-    let (tx, rx) = mpsc::unbounded();
+    let (tx, mut rx) = mpsc::unbounded();
     let tx2 = tx.clone();
-    let (resolver, resolver_future) =
-        AsyncResolver::new(ResolverConfig::default(), ResolverOpts::default());
-    executor.spawn(resolver_future);
 
-    let f = move || {
-        rx.for_each(move |query: Query| {
+    let f = async move {
+        let resolver = TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
+            .await
+            .map_err(|e| {
+                error!("could not create DNS resolver: {:?}", e);
+            })?;
+
+        while let Some(query) = rx.next().await {
             let self_tx = tx2.clone();
             let base_address = manager.address;
             let resolver = resolver.clone();
             let manager = manager.clone();
 
             match query {
-                Query::Topic(topic, broker_url, authoritative, tx) => Either::A({
+                Query::Topic(topic, broker_url, authoritative, tx) => {
                     let url = broker_url.clone();
-                    let conn_info = manager.get_connection_from_url(url);
-
-                    conn_info.then(move |res| match res {
+                    let conn_info = match manager.get_connection_from_url(url).await {
                         Err(conn_error) => {
                             let _ = tx.send(Err(ServiceDiscoveryError::Connection(conn_error)));
-                            Either::B(future::ok(()))
-                        }
-                        Ok(conn_info) => {
-                            if let Some((proxied_query, conn)) = conn_info {
-                                Either::A(lookup(
-                                    topic.to_string(),
-                                    proxied_query,
-                                    conn.sender(),
-                                    resolver,
-                                    base_address,
-                                    authoritative,
-                                    manager,
-                                    tx,
-                                    self_tx.clone(),
-                                ))
+                            continue;
+                        },
+                        Ok(c) => c,
+                    };
+
+                    if let Some((proxied_query, conn)) = conn_info {
+                        lookup(
+                            topic.to_string(),
+                            proxied_query,
+                            conn.sender(),
+                            resolver,
+                            base_address,
+                            authoritative,
+                            manager,
+                            tx,
+                            self_tx.clone(),
+                            ).await
+                    } else {
+                        let _ = tx.send(Err(ServiceDiscoveryError::Query(format!(
+                                        "unknown broker URL: {}",
+                                        broker_url.unwrap_or_else(String::new)
+                                        ))));
+                    }
+                },
+                Query::PartitionedTopic(topic, tx) => {
+                    let connection = match manager.get_base_connection().await {
+                        Err(conn_error) => {
+                            let _ = tx.send(Err(ServiceDiscoveryError::Connection(conn_error)));
+                            continue;
+                        },
+                        Ok(conn) => conn,
+                    };
+
+                    let response = match connection.sender().lookup_partitioned_topic(topic).await {
+                        Err(e) => {
+                            let _ = tx.send(Err(e.into()));
+                            continue;
+                        },
+                        Ok(response) => response,
+                    };
+
+                    let _ = match response.partitions {
+                        Some(partitions) => tx.send(Ok(partitions)),
+                        None => {
+                            if let Some(s) = response.message {
+                                tx.send(Err(ServiceDiscoveryError::Query(s)))
                             } else {
-                                let _ = tx.send(Err(ServiceDiscoveryError::Query(format!(
-                                    "unknown broker URL: {}",
-                                    broker_url.unwrap_or_else(String::new)
-                                ))));
-                                Either::B(future::ok(()))
+                                tx.send(Err(ServiceDiscoveryError::Query(
+                                            format!("server error: {:?}", response.error),
+                                            )))
                             }
                         }
-                    })
-                }),
-                Query::PartitionedTopic(topic, tx) => {
-                    Either::B(manager.get_base_connection().then(|res| match res {
-                        Err(conn_error) => {
-                            let _ = tx.send(Err(ServiceDiscoveryError::Connection(conn_error)));
-                            Either::A(future::ok(()))
-                        }
-                        Ok(conn) => {
-                            Either::B(conn.sender().lookup_partitioned_topic(topic).then(|res| {
-                                match res {
-                                    Err(e) => {
-                                        let _ = tx.send(Err(e.into()));
-                                    }
-                                    Ok(response) => {
-                                        let _ = match response.partitions {
-                                            Some(partitions) => tx.send(Ok(partitions)),
-                                            None => {
-                                                if let Some(s) = response.message {
-                                                    tx.send(Err(ServiceDiscoveryError::Query(s)))
-                                                } else {
-                                                    tx.send(Err(ServiceDiscoveryError::Query(
-                                                        format!(
-                                                            "server error: {:?}",
-                                                            response.error
-                                                        ),
-                                                    )))
-                                                }
-                                            }
-                                        };
-                                    }
-                                }
-                                future::ok(())
-                            }))
-                        }
-                    }))
+                    };
                 }
             }
-        })
-        .map_err(|_| error!("service discovery engine stopped"))
+        }
+        Ok(())
     };
 
-    executor.spawn(f());
+    if let Err(_) = executor.spawn(Box::pin(f.map(|_: Result<(), ()>| ()))) {
+        error!("the executor could not spawn the Service Discovery engine future");
+    }
 
     tx
 }
@@ -319,118 +310,104 @@ fn convert_lookup_response(
     })
 }
 
-fn lookup(
+async fn lookup(
     topic: String,
     proxied_query: bool,
     sender: &ConnectionSender,
-    resolver: AsyncResolver,
+    resolver: TokioAsyncResolver,
     base_address: SocketAddr,
     authoritative: bool,
     manager: Arc<ConnectionManager>,
     tx: oneshot::Sender<Result<BrokerAddress, ServiceDiscoveryError>>,
     self_tx: mpsc::UnboundedSender<Query>,
-) -> impl Future<Item = (), Error = ()> {
-    sender
-        .lookup_topic(topic.to_string(), authoritative)
-        .then(move |res| {
-            match res {
-                Err(e) => {
-                    let _ = tx.send(Err(ServiceDiscoveryError::Connection(e)));
-                    Either::A(future::ok(()))
-                }
+)  {
+    let response = match sender.lookup_topic(topic.to_string(), authoritative).await {
+        Err(e) => {
+            let _ = tx.send(Err(ServiceDiscoveryError::Connection(e)));
+            return;
+        },
+        Ok(response) => response,
+    };
 
-                Ok(response) => {
-                    let LookupResponse {
-                        broker_name,
-                        broker_url,
-                        broker_port,
-                        proxy,
-                        redirect,
-                        authoritative,
-                    } = match convert_lookup_response(&response) {
-                        Ok(info) => info,
-                        Err(e) => {
-                            let _ = tx.send(Err(e));
-                            return Either::A(future::ok(()));
-                        }
-                    };
+    let LookupResponse {
+        broker_name,
+        broker_url,
+        broker_port,
+        proxy,
+        redirect,
+        authoritative,
+    } = match convert_lookup_response(&response) {
+        Err(e) => {
+            let _ = tx.send(Err(e));
+            return;
+        }
+        Ok(info) => info,
+    };
 
-                    // get the IP and port for the broker_name
-                    // if going through a proxy, we use the base address,
-                    // otherwise we look it up by DNS query
-                    let address_query = if proxied_query || proxy {
-                        Either::A(future::ok(base_address))
-                    } else {
-                        Either::B(
-                            resolver
-                                .lookup_ip(broker_name.as_str())
-                                .map_err(move |e| {
-                                    error!("DNS lookup error: {:?}", e);
-                                    ServiceDiscoveryError::DnsLookupError
-                                })
-                                .map(move |results| {
-                                    SocketAddr::new(results.iter().next().unwrap(), broker_port)
-                                }),
-                        )
-                    };
-
-                    Either::B(
-                        address_query
-                            .map(move |address| {
-                                let b = BrokerAddress {
-                                    address,
-                                    broker_url,
-                                    proxy: proxied_query || proxy,
-                                };
-                                b
-                            })
-                            .and_then(move |b| {
-                                // if the response indicated a redirect, do another query
-                                // to the target broker
-                                if redirect {
-                                    let (tx2, rx2) = oneshot::channel();
-                                    let res = self_tx.unbounded_send(Query::Topic(
-                                        topic,
-                                        Some(b.broker_url),
-                                        authoritative,
-                                        tx2,
-                                    ));
-                                    match res {
-                                        Err(e) => match e.into_inner() {
-                                            Query::Topic(_, _, _, tx) => {
-                                                let _ =
-                                                    tx.send(Err(ServiceDiscoveryError::Shutdown));
-                                            }
-                                            _ => {}
-                                        },
-                                        Ok(_) => {}
-                                    }
-
-                                    Either::A(
-                                        rx2.map_err(|_| ServiceDiscoveryError::Canceled).flatten(),
-                                    )
-                                } else {
-                                    Either::B(future::ok(b))
-                                }
-                            })
-                            .and_then(move |broker| {
-                                manager
-                                    .get_connection(&broker.clone())
-                                    .map(|_| broker)
-                                    .from_err()
-                            })
-                            .then(move |res| match res {
-                                Err(e) => {
-                                    let _ = tx.send(Err(e));
-                                    Either::A(future::ok(()))
-                                }
-                                Ok(b) => {
-                                    let _ = tx.send(Ok(b));
-                                    Either::B(future::ok(()))
-                                }
-                            }),
-                    )
-                }
+    // get the IP and port for the broker_name
+    // if going through a proxy, we use the base address,
+    // otherwise we look it up by DNS query
+    let address = if proxied_query || proxy {
+        base_address
+    } else {
+        let results: Result<_, _> = resolver.lookup_ip(broker_name.as_str()).await
+            .map_err(move |e| {
+                error!("DNS lookup error: {:?}", e);
+                ServiceDiscoveryError::DnsLookupError
+            });
+        match results {
+            Err(_) => return,
+            Ok(lookup) => {
+                let i: std::net::IpAddr = lookup.iter().next().unwrap();
+                SocketAddr::new(i, broker_port)
             }
-        })
+        }
+    };
+
+    let b = BrokerAddress {
+        address,
+        broker_url,
+        proxy: proxied_query || proxy,
+    };
+
+    // if the response indicated a redirect, do another query
+    // to the target broker
+    let broker_address: BrokerAddress = if redirect {
+        let (tx2, rx2) = oneshot::channel();
+        let _ = self_tx.unbounded_send(Query::Topic(
+                topic,
+                Some(b.broker_url),
+                authoritative,
+                tx2,
+                ))
+            .map_err(|e|match e.into_inner() {
+                Query::Topic(_, _, _, tx) => {
+                    let _ =
+                        tx.send(Err(ServiceDiscoveryError::Shutdown));
+                }
+                _ => {}
+            });
+
+        match rx2.await.map_err(|_| ServiceDiscoveryError::Canceled) {
+          Ok(Ok(b)) => b,
+          Ok(Err(e)) => {
+              let _ = tx.send(Err(e));
+              return;
+          },
+          Err(e) => {
+              let _ = tx.send(Err(e));
+              return;
+          }
+        }
+    } else {
+        b
+    };
+
+    let _ = tx.send(manager
+        .get_connection(&broker_address.clone()).await
+        .map(|_| {
+            broker_address
+        }).map_err(|e| {
+            ServiceDiscoveryError::Connection(e)
+        }));
 }

@@ -3,18 +3,19 @@ use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use std::pin::Pin;
 
 use chrono::{DateTime, Utc};
-use futures::sync::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
-use futures::Future;
-use futures::{sync::mpsc, Async, Stream};
+use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
+use futures::{channel::mpsc, Future, FutureExt, Stream, StreamExt};
+use futures::future::{try_join_all};
+use futures::task::{Context, Poll};
 use rand;
 use regex::Regex;
-use tokio::timer::Interval;
 
 use crate::connection::{Authentication, Connection};
 use crate::error::{ConnectionError, ConsumerError, Error};
-use crate::executor::{PulsarExecutor, TaskExecutor};
+use crate::executor::{Executor, TaskExecutor};
 use crate::message::{
     parse_batched_message,
     proto::{self, command_subscribe::SubType, MessageIdData, Schema},
@@ -24,7 +25,6 @@ use crate::{DeserializeMessage, Pulsar};
 use bit_vec::BitVec;
 use nom::lib::std::cmp::Ordering;
 use nom::lib::std::collections::BinaryHeap;
-use tokio::prelude::Poll;
 
 #[derive(Clone, Default)]
 pub struct ConsumerOptions {
@@ -41,7 +41,7 @@ pub struct Consumer<T: DeserializeMessage> {
     connection: Arc<Connection>,
     topic: String,
     id: u64,
-    messages: mpsc::UnboundedReceiver<RawMessage>,
+    messages: Pin<Box<mpsc::UnboundedReceiver<RawMessage>>>,
     ack_handler: UnboundedSender<AckMessage>,
     batch_size: u32,
     remaining_messages: u32,
@@ -52,7 +52,7 @@ pub struct Consumer<T: DeserializeMessage> {
 }
 
 impl<T: DeserializeMessage> Consumer<T> {
-    pub fn new<E: PulsarExecutor>(
+    pub async fn new<E: Executor+'static>(
         addr: String,
         topic: String,
         subscription: String,
@@ -65,26 +65,24 @@ impl<T: DeserializeMessage> Consumer<T> {
         batch_size: Option<u32>,
         unacked_message_redelivery_delay: Option<Duration>,
         options: ConsumerOptions,
-    ) -> impl Future<Item = Consumer<T>, Error = Error> {
-        Connection::new(addr, auth_data, proxy_to_broker_url, executor)
-            .from_err()
-            .and_then(move |conn| {
-                Consumer::from_connection(
-                    Arc::new(conn),
-                    topic,
-                    subscription,
-                    sub_type,
-                    consumer_id,
-                    consumer_name,
-                    batch_size,
-                    unacked_message_redelivery_delay,
-                    options,
-                )
-            })
+    ) -> Result<Consumer<T>, Error> {
+        let conn = Connection::new(addr, auth_data, proxy_to_broker_url, executor)
+            .await?;
+        Consumer::from_connection(
+            Arc::new(conn),
+            topic,
+            subscription,
+            sub_type,
+            consumer_id,
+            consumer_name,
+            batch_size,
+            unacked_message_redelivery_delay,
+            options,
+            ).await
     }
 
-    pub fn from_connection(
-        conn: Arc<Connection>,
+    pub async fn from_connection(
+        connection: Arc<Connection>,
         topic: String,
         subscription: String,
         sub_type: SubType,
@@ -93,12 +91,12 @@ impl<T: DeserializeMessage> Consumer<T> {
         batch_size: Option<u32>,
         unacked_message_redelivery_delay: Option<Duration>,
         options: ConsumerOptions,
-    ) -> impl Future<Item = Consumer<T>, Error = Error> {
+    ) -> Result<Consumer<T>, Error> {
         let consumer_id = consumer_id.unwrap_or_else(rand::random);
         let (resolver, messages) = mpsc::unbounded();
         let batch_size = batch_size.unwrap_or(1000);
 
-        conn.sender()
+        connection.sender()
             .subscribe(
                 resolver,
                 topic.clone(),
@@ -107,37 +105,33 @@ impl<T: DeserializeMessage> Consumer<T> {
                 consumer_id,
                 consumer_name,
                 options.clone(),
-            )
-            .map(move |resp| (resp, conn))
-            .and_then(move |(_, conn)| {
-                conn.sender()
-                    .send_flow(consumer_id, batch_size)
-                    .map(move |()| conn)
-            })
-            .map_err(|e| Error::Consumer(ConsumerError::Connection(e)))
-            .map(move |connection| {
-                //TODO this should be shared among all consumers when using the client
-                //TODO make tick_delay configurable
-                let tick_delay = Duration::from_millis(500);
-                let ack_handler = AckHandler::new(
-                    connection.clone(),
-                    unacked_message_redelivery_delay,
-                    tick_delay,
-                    connection.executor(),
-                );
-                Consumer {
-                    connection,
-                    topic,
-                    id: consumer_id,
-                    messages,
-                    ack_handler,
-                    batch_size,
-                    remaining_messages: batch_size,
-                    data_type: PhantomData,
-                    options,
-                    current_message: None,
-                }
-            })
+            ).await.map_err(Error::Connection)?;
+
+        connection.sender()
+            .send_flow(consumer_id, batch_size)
+            .map_err(|e| Error::Consumer(ConsumerError::Connection(e)))?;
+
+        //TODO this should be shared among all consumers when using the client
+        //TODO make tick_delay configurable
+        let tick_delay = Duration::from_millis(500);
+        let ack_handler = AckHandler::new(
+            connection.clone(),
+            unacked_message_redelivery_delay,
+            tick_delay,
+            connection.executor(),
+            );
+        Ok(Consumer {
+            connection,
+            topic,
+            id: consumer_id,
+            messages: Box::pin(messages),
+            ack_handler,
+            batch_size,
+            remaining_messages: batch_size,
+            data_type: PhantomData,
+            options,
+            current_message: None,
+        })
     }
 
     pub fn topic(&self) -> &str {
@@ -167,18 +161,18 @@ impl<T: DeserializeMessage> Consumer<T> {
         }
     }
 
-    fn poll_current_message(&mut self) -> Poll<Option<Message<T::Output>>, Error> {
+    fn poll_current_message(&mut self) -> Poll<Message<T::Output>> {
         if let Some(mut iterator) = self.current_message.take() {
             match iterator.next() {
                 Some((id, payload)) => {
                     self.current_message = Some(iterator);
                     let message = self.create_message(id, payload);
-                    Ok(Async::Ready(Some(message)))
+                    Poll::Ready(message)
                 }
-                None => Ok(Async::NotReady),
+                None => Poll::Pending,
             }
         } else {
-            Ok(Async::NotReady)
+            Poll::Pending
         }
     }
 }
@@ -310,16 +304,16 @@ impl Ord for MessageResend {
 struct AckHandler {
     pending_nacks: BinaryHeap<MessageResend>,
     conn: Arc<Connection>,
-    inbound: Option<UnboundedReceiver<AckMessage>>,
+    inbound: Option<Pin<Box<UnboundedReceiver<AckMessage>>>>,
     unack_redelivery_delay: Option<Duration>,
-    tick_timer: tokio::timer::Interval,
+    tick_timer: Pin<Box<tokio::time::Interval>>,
     batch_messages: BTreeMap<MessageIdData, (bool, BitVec)>,
 }
 
 impl AckHandler {
     /// Create and spawn a new AckHandler future, which will run until the connection fails, or all
     /// inbound senders are dropped and any pending redelivery messages have been sent
-    pub fn new<E: PulsarExecutor>(
+    pub fn new<E: Executor+'static>(
         conn: Arc<Connection>,
         redelivery_delay: Option<Duration>,
         tick_delay: Duration,
@@ -328,14 +322,16 @@ impl AckHandler {
         let (tx, rx) = mpsc::unbounded();
         let executor = TaskExecutor::new(executor);
 
-        executor.clone().spawn(AckHandler {
+        if let Err(_) = executor.clone().spawn(Box::pin(AckHandler {
             pending_nacks: BinaryHeap::new(),
             conn,
-            inbound: Some(rx),
+            inbound: Some(Box::pin(rx)),
             unack_redelivery_delay: redelivery_delay,
-            tick_timer: Interval::new_interval(tick_delay),
+            tick_timer: Box::pin(tokio::time::interval(tick_delay)),
             batch_messages: BTreeMap::new(),
-        });
+        }.map(|res| trace!("AckHandler returned {:?}", res)))) {
+            error!("the executor could not spawn the AckHandler future");
+        }
         tx
     }
     fn next_ready_resend(&mut self) -> Option<MessageResend> {
@@ -346,12 +342,12 @@ impl AckHandler {
         }
         None
     }
-    fn next_inbound(&mut self) -> Option<AckMessage> {
+    fn next_inbound(&mut self, cx: &mut Context<'_>) -> Option<AckMessage> {
         if let Some(inbound) = &mut self.inbound {
-            match inbound.poll() {
-                Ok(Async::Ready(Some(msg))) => Some(msg),
-                Ok(Async::NotReady) => None,
-                Ok(Async::Ready(None)) | Err(_) => {
+            match inbound.as_mut().poll_next(cx) {
+                Poll::Ready(Some(msg)) => Some(msg),
+                Poll::Pending => None,
+                Poll::Ready(None) => {
                     self.inbound = None;
                     None
                 }
@@ -419,12 +415,11 @@ impl AckHandler {
 }
 
 impl Future for AckHandler {
-    type Item = ();
-    type Error = ();
+    type Output = Result<(), ()>;
 
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut acks: BTreeMap<(u64, bool), Vec<MessageIdData>> = BTreeMap::new();
-        while let Some(msg) = self.next_inbound() {
+        while let Some(msg) = self.next_inbound(cx) {
             match msg {
                 AckMessage::Ack {
                     consumer_id,
@@ -468,12 +463,12 @@ impl Future for AckHandler {
                 .sender()
                 .send_ack(consumer_id, message_ids, cumulative);
             if send_result.is_err() {
-                return Err(());
+                return Poll::Ready(Err(()));
             }
         }
         loop {
-            match self.tick_timer.poll() {
-                Ok(Async::Ready(Some(_))) => {
+            match self.tick_timer.as_mut().poll_next(cx) {
+                Poll::Ready(Some(_)) => {
                     let mut resends: BTreeMap<u64, Vec<MessageIdData>> = BTreeMap::new();
                     while let Some(ready) = self.next_ready_resend() {
                         resends
@@ -488,18 +483,18 @@ impl Future for AckHandler {
                             .sender()
                             .send_redeliver_unacknowleged_messages(consumer_id, message_ids);
                         if send_result.is_err() {
-                            return Err(());
+                            return Poll::Ready(Err(()));
                         }
                     }
                 }
-                Ok(Async::NotReady) => {
+                Poll::Pending => {
                     if self.inbound.is_none() && self.pending_nacks.is_empty() {
-                        return Ok(Async::Ready(()));
+                        return Poll::Ready(Ok(()));
                     } else {
-                        return Ok(Async::NotReady);
+                        return Poll::Pending;
                     }
                 }
-                Ok(Async::Ready(None)) | Err(_) => return Err(()),
+                Poll::Ready(None) => return Poll::Ready(Err(())),
             }
         }
     }
@@ -567,17 +562,16 @@ impl Iterator for BatchedMessageIterator {
 }
 
 impl<T: DeserializeMessage> Stream for Consumer<T> {
-    type Item = Message<T::Output>;
-    type Error = Error;
+    type Item = Result<Message<T::Output>, Error>;
 
-    fn poll(&mut self) -> Result<Async<Option<Self::Item>>, Self::Error> {
-        if let Ok(Async::Ready(message)) = self.poll_current_message() {
-            return Ok(Async::Ready(message));
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if let Poll::Ready(message) = self.poll_current_message() {
+            return Poll::Ready(Some(Ok(message)));
         }
 
         if !self.connection.is_valid() {
             if let Some(err) = self.connection.error() {
-                return Err(Error::Consumer(ConsumerError::Connection(err)));
+                return Poll::Ready(Some(Err(Error::Consumer(ConsumerError::Connection(err)))));
             }
         }
 
@@ -588,15 +582,19 @@ impl<T: DeserializeMessage> Stream for Consumer<T> {
             self.remaining_messages = self.batch_size;
         }
 
-        let message: Option<Option<(proto::CommandMessage, Payload)>> = try_ready!(self
-            .messages
-            .poll()
-            .map_err(|_| ConnectionError::Disconnected))
-        .map(|RawMessage { command, payload }| {
-            command
-                .message
-                .and_then(move |msg| payload.map(move |payload| (msg, payload)))
-        });
+        let message: Option<Option<(proto::CommandMessage, Payload)>> = match self
+            .messages.as_mut()
+            .poll_next(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(None) => {
+                  return Poll::Ready(Some(Err(Error::Connection(ConnectionError::Disconnected))));
+                }
+                Poll::Ready(Some(RawMessage { command, payload })) => {
+                    Some(command
+                        .message
+                        .and_then(move |msg| payload.map(move |payload| (msg, payload))))
+                }
+            };
 
         if message.is_some() {
             self.remaining_messages -= 1;
@@ -607,17 +605,21 @@ impl<T: DeserializeMessage> Stream for Consumer<T> {
                 Some(_) => {
                     self.current_message =
                         Some(BatchedMessageIterator::new(message.message_id, payload)?);
-                    self.poll_current_message()
+                    if let Poll::Ready(message) = self.poll_current_message() {
+                        Poll::Ready(Some(Ok(message)))
+                    } else {
+                        Poll::Pending
+                    }
                 }
-                None => Ok(Async::Ready(Some(
-                    self.create_message(message.message_id, payload),
-                ))),
+                None => Poll::Ready(Some(
+                   Ok(self.create_message(message.message_id, payload)),
+                )),
             },
-            Some(None) => Err(Error::Consumer(ConsumerError::MissingPayload(format!(
+            Some(None) => Poll::Ready(Some(Err(Error::Consumer(ConsumerError::MissingPayload(format!(
                 "Missing payload for message {:?}",
                 message
-            )))),
-            None => Ok(Async::Ready(None)),
+            )))))),
+            None => Poll::Ready(None),
         }
     }
 }
@@ -838,7 +840,7 @@ impl<'a, Topic, Subscription, SubscriptionType>
 }
 
 impl<'a> ConsumerBuilder<'a, Set<String>, Set<String>, Set<SubType>> {
-    pub fn build<T: DeserializeMessage>(self) -> impl Future<Item = Consumer<T>, Error = Error> {
+    pub async fn build<T: DeserializeMessage>(self) -> Result<Consumer<T>, Error> {
         let ConsumerBuilder {
             pulsar,
             topic: Set(topic),
@@ -861,7 +863,7 @@ impl<'a> ConsumerBuilder<'a, Set<String>, Set<String>, Set<SubType>> {
             consumer_id,
             unacked_message_resend_delay,
             consumer_options.unwrap_or_else(ConsumerOptions::default),
-        )
+        ).await
     }
 }
 
@@ -917,10 +919,10 @@ pub struct MultiTopicConsumer<T: DeserializeMessage> {
     topic_regex: Regex,
     pulsar: Pulsar,
     unacked_message_resend_delay: Option<Duration>,
-    consumers: BTreeMap<String, Consumer<T>>,
+    consumers: BTreeMap<String, Pin<Box<Consumer<T>>>>,
     topics: VecDeque<String>,
-    new_consumers: Option<Box<dyn Future<Item = Vec<Consumer<T>>, Error = Error> + Send>>,
-    refresh: Box<dyn Stream<Item = (), Error = ()> + Send>,
+    new_consumers: Option<Pin<Box<dyn Future<Output = Result<Vec<Consumer<T>>, Error>> + Send>>>,
+    refresh: Pin<Box<dyn Stream<Item = ()> + Send>>,
     subscription: String,
     sub_type: SubType,
     options: ConsumerOptions,
@@ -952,10 +954,10 @@ impl<T: DeserializeMessage> MultiTopicConsumer<T> {
             consumers: BTreeMap::new(),
             topics: VecDeque::new(),
             new_consumers: None,
-            refresh: Box::new(
-                Interval::new(Instant::now(), topic_refresh)
+            refresh: Box::pin(
+                tokio::time::interval(topic_refresh)
                     .map(drop)
-                    .map_err(|e| panic!("error creating referesh timer: {}", e)),
+                    //.map_err(|e| panic!("error creating referesh timer: {}", e)),
             ),
             subscription: subscription.into(),
             sub_type,
@@ -966,7 +968,7 @@ impl<T: DeserializeMessage> MultiTopicConsumer<T> {
         }
     }
 
-    pub fn start_state_stream(&mut self) -> impl Stream<Item = ConsumerState, Error = ()> {
+    pub fn start_state_stream(&mut self) -> impl Stream<Item = ConsumerState> {
         let (tx, rx) = unbounded();
         self.state_streams.push(tx);
         rx
@@ -993,7 +995,7 @@ impl<T: DeserializeMessage> MultiTopicConsumer<T> {
     fn add_consumers<I: IntoIterator<Item = Consumer<T>>>(&mut self, consumers: I) {
         for consumer in consumers {
             let topic = consumer.topic().to_owned();
-            self.consumers.insert(topic.clone(), consumer);
+            self.consumers.insert(topic.clone(), Box::pin(consumer));
             self.topics.push_back(topic);
         }
 
@@ -1026,19 +1028,18 @@ impl<T: DeserializeMessage> Debug for MultiTopicConsumer<T> {
 }
 
 impl<T: 'static + DeserializeMessage> Stream for MultiTopicConsumer<T> {
-    type Item = Message<T::Output>;
-    type Error = Error;
+    type Item = Result<Message<T::Output>, Error>;
 
-    fn poll(&mut self) -> Result<Async<Option<Self::Item>>, Self::Error> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if let Some(mut new_consumers) = self.new_consumers.take() {
-            match new_consumers.poll() {
-                Ok(Async::Ready(new_consumers)) => {
+            match new_consumers.as_mut().poll(cx) {
+                Poll::Ready(Ok(new_consumers)) => {
                     self.add_consumers(new_consumers);
                 }
-                Ok(Async::NotReady) => {
+                Poll::Pending => {
                     self.new_consumers = Some(new_consumers);
                 }
-                Err(e) => {
+                Poll::Ready(Err(e)) => {
                     error!("Error creating pulsar consumers: {}", e);
                     // don't return error here; could be intermittent connection failure and we want
                     // to retry
@@ -1046,47 +1047,47 @@ impl<T: 'static + DeserializeMessage> Stream for MultiTopicConsumer<T> {
             }
         }
 
-        if let Ok(Async::Ready(_)) = self.refresh.poll() {
+        if let Poll::Ready(Some(_)) = self.refresh.as_mut().poll_next(cx) {
             let regex = self.topic_regex.clone();
             let pulsar = self.pulsar.clone();
+            let namespace = self.namespace.clone();
             let subscription = self.subscription.clone();
             let sub_type = self.sub_type;
             let existing_topics: BTreeSet<String> = self.consumers.keys().cloned().collect();
             let options = self.options.clone();
             let unacked_message_resend_delay = self.unacked_message_resend_delay;
 
-            let new_consumers = Box::new(
-                self.pulsar
-                    .get_topics_of_namespace(self.namespace.clone(), proto::get_topics::Mode::All)
-                    .and_then(move |topics: Vec<String>| {
-                        trace!("fetched topics: {:?}", &topics);
-                        futures::future::collect(
-                            topics
-                                .into_iter()
-                                .filter(move |topic| {
-                                    !existing_topics.contains(topic)
-                                        && regex.is_match(topic.as_str())
-                                })
-                                .map(move |topic| {
-                                    trace!("creating consumer for topic {}", topic);
-                                    let pulsar = pulsar.clone();
-                                    let subscription = subscription.clone();
-                                    pulsar.create_consumer(
-                                        topic,
-                                        subscription,
-                                        sub_type,
-                                        None,
-                                        None,
-                                        None,
-                                        unacked_message_resend_delay,
-                                        options.clone(),
-                                    )
-                                }),
-                        )
-                    }),
-            );
+            let new_consumers = Box::pin(async move {
+                let topics: Vec<String> = pulsar
+                    .get_topics_of_namespace(namespace.clone(), proto::get_topics::Mode::All).await?;
+                trace!("fetched topics: {:?}", &topics);
+
+                let mut v = vec![];
+                for topic in topics
+                             .into_iter()
+                             .filter(move |topic| {
+                                 !existing_topics.contains(topic)
+                                     && regex.is_match(topic.as_str())
+                             }) {
+                    trace!("creating consumer for topic {}", topic);
+                    //let pulsar = pulsar.clone();
+                    let subscription = subscription.clone();
+                    v.push(pulsar.create_consumer(
+                        topic,
+                        subscription,
+                        sub_type,
+                        None,
+                        None,
+                        None,
+                        unacked_message_resend_delay,
+                        options.clone(),
+                    ));
+                }
+
+                try_join_all(v).await
+            });
             self.new_consumers = Some(new_consumers);
-            return self.poll();
+            return self.poll_next(cx);
         }
 
         let mut topics_to_remove = Vec::new();
@@ -1096,15 +1097,15 @@ impl<T: 'static + DeserializeMessage> Stream for MultiTopicConsumer<T> {
                 break;
             }
             let topic = self.topics.pop_front().unwrap();
-            if let Some(item) = self.consumers.get_mut(&topic).map(|c| c.poll()) {
+            if let Some(item) = self.consumers.get_mut(&topic).map(|c| c.as_mut().poll_next(cx)) {
                 match item {
-                    Ok(Async::NotReady) => {}
-                    Ok(Async::Ready(Some(msg))) => result = Some(msg),
-                    Ok(Async::Ready(None)) => {
+                    Poll::Pending => {}
+                    Poll::Ready(Some(Ok(msg))) => result = Some(msg),
+                    Poll::Ready(None) => {
                         error!("Unexpected end of stream for pulsar topic {}", &topic);
                         topics_to_remove.push(topic.clone());
                     }
-                    Err(e) => {
+                    Poll::Ready(Some(Err(e))) => {
                         error!(
                             "Unexpected error consuming from pulsar topic {}: {}",
                             &topic, e
@@ -1120,10 +1121,10 @@ impl<T: 'static + DeserializeMessage> Stream for MultiTopicConsumer<T> {
         self.remove_consumers(&topics_to_remove);
         if let Some(result) = result {
             self.record_message();
-            return Ok(Async::Ready(Some(result)));
+            return Poll::Ready(Some(Ok(result)));
         }
 
-        Ok(Async::NotReady)
+        Poll::Pending
     }
 }
 
@@ -1135,10 +1136,10 @@ mod tests {
     use std::thread;
 
     use regex::Regex;
-    use tokio::prelude::*;
     use tokio::runtime::Runtime;
+    use log::{LevelFilter};
 
-    use crate::{producer, Pulsar, SerializeMessage};
+    use crate::{producer, Pulsar, SerializeMessage, executor::TokioExecutor, tests::TEST_LOGGER};
 
     use super::*;
 
@@ -1169,6 +1170,8 @@ mod tests {
     #[test]
     #[ignore]
     fn multi_consumer() {
+        let _ = log::set_logger(&TEST_LOGGER);
+        let _ = log::set_max_level(LevelFilter::Debug);
         let addr = "127.0.0.1:6650".parse().unwrap();
         let rt = Runtime::new().unwrap();
 
@@ -1193,53 +1196,64 @@ mod tests {
             msg: 2,
         };
 
-        let client: Pulsar = Pulsar::new(addr, None, rt.executor()).wait().unwrap();
-        let producer = client.producer(None);
-
-        let send_start = Utc::now();
-        producer.send(topic1, &data1).wait().unwrap();
-        producer.send(topic1, &data2).wait().unwrap();
-        producer.send(topic2, &data3).wait().unwrap();
-        producer.send(topic2, &data4).wait().unwrap();
-
-        let data = vec![data1, data2, data3, data4];
-
-        let mut consumer: MultiTopicConsumer<TestData> = client
-            .consumer()
-            .multi_topic(Regex::new("mt_test_[ab]").unwrap())
-            .with_namespace(namespace)
-            .with_subscription("test_sub")
-            .with_subscription_type(SubType::Shared)
-            .with_topic_refresh(Duration::from_secs(1))
-            .build();
-
-        let consumer_state = consumer.start_state_stream();
-
         let error: Arc<Mutex<Option<Error>>> = Arc::new(Mutex::new(None));
         let successes = Arc::new(AtomicUsize::new(0));
+        let err = error.clone();
 
-        rt.executor().spawn({
-            let successes = successes.clone();
-            consumer
-                .take(4)
-                .for_each(move |Message { payload, ack, .. }| {
-                    ack.ack();
-                    let msg = payload.unwrap();
-                    if !data.contains(&msg) {
-                        Err(Error::Custom(format!("Unexpected message: {:?}", &msg)))
-                    } else {
-                        successes.fetch_add(1, Ordering::Relaxed);
-                        Ok(())
-                    }
-                })
-                .map_err({
-                    let error = error.clone();
-                    move |e| {
-                        let mut error = error.lock().unwrap();
+        let succ = successes.clone();
+
+        let f = async move {
+            let executor = TokioExecutor(tokio::runtime::Handle::current());
+            let client: Pulsar = Pulsar::new(addr, None, executor).await.unwrap();
+            let producer = client.producer(None);
+
+            let send_start = Utc::now();
+            producer.send(topic1, &data1).await.unwrap();
+            producer.send(topic1, &data2).await.unwrap();
+            producer.send(topic2, &data3).await.unwrap();
+            producer.send(topic2, &data4).await.unwrap();
+
+            let data = vec![data1, data2, data3, data4];
+
+            let mut consumer: MultiTopicConsumer<TestData> = client
+                .consumer()
+                .multi_topic(Regex::new("mt_test_[ab]").unwrap())
+                .with_namespace(namespace)
+                .with_subscription("test_sub")
+                .with_subscription_type(SubType::Shared)
+                .with_topic_refresh(Duration::from_secs(1))
+                .build();
+
+            let consumer_state = consumer.start_state_stream();
+
+            let mut stream = consumer.take(4);
+            while let Some(res) = stream.next().await {
+                match res {
+                    Ok(Message { payload, ack, .. }) => {
+                        ack.ack();
+                        let msg = payload.unwrap();
+                        if !data.contains(&msg) {
+                            panic!("Unexpected message: {:?}", &msg);
+                        } else {
+                            succ.fetch_add(1, Ordering::Relaxed);
+                        }
+                    },
+                    Err(e) => {
+                        let err = err.clone();
+                        let mut error = err.lock().unwrap();
                         *error = Some(e);
-                    }
-                })
-        });
+                    },
+                }
+            }
+
+            let consumer_state: Vec<ConsumerState> = consumer_state.collect::<Vec<ConsumerState>>().await;
+            let latest_state = consumer_state.last().unwrap();
+            assert!(latest_state.messages_received >= 4);
+            assert!(latest_state.connected_topics.len() >= 2);
+            assert!(latest_state.last_message_received.unwrap() >= send_start);
+        };
+
+        rt.spawn(f);
 
         let start = Instant::now();
         loop {
@@ -1252,10 +1266,5 @@ mod tests {
             thread::sleep(Duration::from_millis(100));
         }
 
-        let consumer_state: Vec<ConsumerState> = consumer_state.collect().wait().unwrap();
-        let latest_state = consumer_state.last().unwrap();
-        assert!(latest_state.messages_received >= 4);
-        assert!(latest_state.connected_topics.len() >= 2);
-        assert!(latest_state.last_message_received.unwrap() >= send_start);
     }
 }
