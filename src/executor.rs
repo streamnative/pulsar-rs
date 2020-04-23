@@ -1,7 +1,7 @@
 use futures::future::{Future, FutureExt};
-use std::sync::Arc;
-use std::pin::Pin;
 use std::ops::Deref;
+use std::pin::Pin;
+use std::sync::Arc;
 use tokio::runtime::Handle;
 
 pub trait Executor: Send + Sync {
@@ -24,8 +24,8 @@ impl TaskExecutor {
     }
 
     fn execute<F>(&self, f: F) -> Result<(), ()>
-        where
-            F: Future<Output = Result<(), ()>> + Send + 'static,
+    where
+        F: Future<Output = Result<(), ()>> + Send + 'static,
     {
         match self.inner.spawn(Box::pin(f.map(|_| ()))) {
             Ok(()) => Ok(()),
@@ -34,14 +34,13 @@ impl TaskExecutor {
     }
 }
 
-impl Executor for TaskExecutor
-{
+impl Executor for TaskExecutor {
     fn spawn(&self, f: Pin<Box<dyn Future<Output = ()> + Send>>) -> Result<(), ()> {
         self.inner.deref().spawn(f)
     }
 }
 
-#[derive(Clone,Debug)]
+#[derive(Clone, Debug)]
 pub struct TokioExecutor(pub Handle);
 
 impl Executor for TokioExecutor {

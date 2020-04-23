@@ -99,8 +99,8 @@ impl Pulsar {
         let manager = ConnectionManager::new(addr, auth, executor.clone()).await?;
         let manager = Arc::new(manager);
         let service_discovery = Arc::new(ServiceDiscovery::with_manager(
-                manager.clone(),
-                executor.clone(),
+            manager.clone(),
+            executor.clone(),
         ));
         Ok(Pulsar {
             manager,
@@ -109,11 +109,11 @@ impl Pulsar {
         })
     }
 
-    pub async fn lookup_topic<S: Into<String>>(
-        &self,
-        topic: S,
-    ) -> Result<BrokerAddress, Error> {
-        self.service_discovery.lookup_topic(topic).await.map_err(|e| e.into())
+    pub async fn lookup_topic<S: Into<String>>(&self, topic: S) -> Result<BrokerAddress, Error> {
+        self.service_discovery
+            .lookup_topic(topic)
+            .await
+            .map_err(|e| e.into())
     }
 
     /// get the number of partitions for a partitioned topic
@@ -121,7 +121,9 @@ impl Pulsar {
         &self,
         topic: S,
     ) -> Result<u32, Error> {
-        self.service_discovery.lookup_partitioned_topic_number(topic).await
+        self.service_discovery
+            .lookup_partitioned_topic_number(topic)
+            .await
             .map_err(|e| e.into())
     }
 
@@ -130,7 +132,8 @@ impl Pulsar {
         topic: S,
     ) -> Result<Vec<(String, BrokerAddress)>, Error> {
         self.service_discovery
-            .lookup_partitioned_topic(topic).await
+            .lookup_partitioned_topic(topic)
+            .await
             .map_err(|e| e.into())
     }
 
@@ -139,9 +142,11 @@ impl Pulsar {
         namespace: String,
         mode: proto::get_topics::Mode,
     ) -> Result<Vec<String>, Error> {
-        let conn = self.manager
-            .get_base_connection().await?;
-        let topics = conn.sender().get_topics_of_namespace(namespace, mode).await?;
+        let conn = self.manager.get_base_connection().await?;
+        let topics = conn
+            .sender()
+            .get_topics_of_namespace(namespace, mode)
+            .await?;
         Ok(topics.topics)
     }
 
@@ -195,8 +200,7 @@ impl Pulsar {
         let manager = self.manager.clone();
         let topic = topic.into();
 
-        let broker_address = self.service_discovery
-            .lookup_topic(topic.clone()).await?;
+        let broker_address = self.service_discovery.lookup_topic(topic.clone()).await?;
         let conn = manager.get_connection(&broker_address).await?;
         Consumer::from_connection(
             conn,
@@ -208,7 +212,8 @@ impl Pulsar {
             batch_size,
             unacked_message_redelivery_delay,
             options,
-        ).await
+        )
+        .await
     }
 
     pub async fn create_partitioned_consumers<
@@ -224,26 +229,28 @@ impl Pulsar {
     ) -> Result<Vec<Consumer<T>>, Error> {
         let manager = self.manager.clone();
 
-        let v = self.service_discovery
-            .lookup_partitioned_topic(topic).await?;
+        let v = self
+            .service_discovery
+            .lookup_partitioned_topic(topic)
+            .await?;
 
         let mut res = Vec::new();
         for (topic, broker_address) in v.iter() {
-                let subscription = subscription.clone();
-                let options = options.clone();
+            let subscription = subscription.clone();
+            let options = options.clone();
 
-                let conn = manager.get_connection(&broker_address).await?;
-                res.push(Consumer::from_connection(
-                    conn,
-                    topic.to_string(),
-                    subscription.into(),
-                    sub_type,
-                    None,
-                    None,
-                    None,
-                    None, //TODO make configurable
-                    options,
-                    ))
+            let conn = manager.get_connection(&broker_address).await?;
+            res.push(Consumer::from_connection(
+                conn,
+                topic.to_string(),
+                subscription.into(),
+                sub_type,
+                None,
+                None,
+                None,
+                None, //TODO make configurable
+                options,
+            ))
         }
 
         future::try_join_all(res).await
@@ -257,8 +264,7 @@ impl Pulsar {
     ) -> Result<TopicProducer, Error> {
         let manager = self.manager.clone();
         let topic = topic.into();
-        let broker_address = self.service_discovery
-            .lookup_topic(topic.clone()).await?;
+        let broker_address = self.service_discovery.lookup_topic(topic.clone()).await?;
         let conn = manager.get_connection(&broker_address).await?;
 
         TopicProducer::from_connection::<_>(conn, topic, name, options).await
@@ -271,13 +277,20 @@ impl Pulsar {
     ) -> Result<Vec<TopicProducer>, Error> {
         let manager = self.manager.clone();
 
-        let v = self.service_discovery
-            .lookup_partitioned_topic(topic).await?;
+        let v = self
+            .service_discovery
+            .lookup_partitioned_topic(topic)
+            .await?;
 
         let mut res = Vec::new();
         for (topic, broker_address) in v.iter() {
             let conn = manager.get_connection(&broker_address).await?;
-            res.push(TopicProducer::from_connection(conn, topic, None, options.clone()));
+            res.push(TopicProducer::from_connection(
+                conn,
+                topic,
+                None,
+                options.clone(),
+            ));
         }
 
         future::try_join_all(res).await

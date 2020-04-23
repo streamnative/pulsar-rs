@@ -1,17 +1,17 @@
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
-use std::pin::Pin;
 
 use futures::{
     self,
     channel::{mpsc, oneshot},
-    task::{Poll, Context},
+    task::{Context, Poll},
     Future, FutureExt, Sink, SinkExt, Stream, StreamExt,
 };
 use tokio::net::TcpStream;
@@ -86,7 +86,9 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> 
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match self.shutdown.as_mut().poll(cx) {
-            Poll::Ready(Ok(())) | Poll::Ready(Err(futures::channel::oneshot::Canceled)) => return Poll::Ready(Err(())),
+            Poll::Ready(Ok(())) | Poll::Ready(Err(futures::channel::oneshot::Canceled)) => {
+                return Poll::Ready(Err(()))
+            }
             Poll::Pending => {}
         }
 
@@ -181,16 +183,18 @@ impl<S: Sink<Message, Error = ConnectionError>> Sender<S> {
         }
     }
 
-    fn try_start_send(&mut self, cx: &mut Context<'_>, item: Message) -> futures::task::Poll<Result<(), ConnectionError>> {
+    fn try_start_send(
+        &mut self,
+        cx: &mut Context<'_>,
+        item: Message,
+    ) -> futures::task::Poll<Result<(), ConnectionError>> {
         match self.sink.as_mut().poll_ready(cx) {
             Poll::Pending => {
                 self.buffered = Some(item);
                 Poll::Pending
-            },
-            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-            Poll::Ready(Ok(())) => {
-                Poll::Ready(self.sink.as_mut().start_send(item))
             }
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Ready(Ok(())) => Poll::Ready(self.sink.as_mut().start_send(item)),
         }
     }
 }
@@ -200,7 +204,9 @@ impl<S: Sink<Message, Error = ConnectionError>> Future for Sender<S> {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match self.shutdown.as_mut().poll(cx) {
-            Poll::Ready(Ok(())) | Poll::Ready(Err(futures::channel::oneshot::Canceled)) => return Poll::Ready(Err(())),
+            Poll::Ready(Ok(())) | Poll::Ready(Err(futures::channel::oneshot::Canceled)) => {
+                return Poll::Ready(Err(()))
+            }
             Poll::Pending => {}
         }
 
@@ -214,11 +220,19 @@ impl<S: Sink<Message, Error = ConnectionError>> Future for Sender<S> {
                     try_ready!(self.try_start_send(cx, item).map_err(|e| self.error.set(e)))
                 }
                 Poll::Ready(None) => {
-                    try_ready!(self.sink.as_mut().poll_close(cx).map_err(|e| self.error.set(e)));
+                    try_ready!(self
+                        .sink
+                        .as_mut()
+                        .poll_close(cx)
+                        .map_err(|e| self.error.set(e)));
                     return Poll::Ready(Ok(()));
                 }
                 Poll::Pending => {
-                    try_ready!(self.sink.as_mut().poll_flush(cx).map_err(|e| self.error.set(e)));
+                    try_ready!(self
+                        .sink
+                        .as_mut()
+                        .poll_flush(cx)
+                        .map_err(|e| self.error.set(e)));
                     return Poll::Pending;
                 }
             }
@@ -287,7 +301,8 @@ impl ConnectionSender {
             num_messages,
             message,
         );
-        self.send_message(msg, key, |resp| resp.command.send_receipt).await
+        self.send_message(msg, key, |resp| resp.command.send_receipt)
+            .await
     }
 
     pub fn send_ping(&self) -> Result<(), ConnectionError> {
@@ -305,19 +320,20 @@ impl ConnectionSender {
         let msg = messages::lookup_topic(topic.into(), authoritative, request_id);
         self.send_message(msg, RequestKey::RequestId(request_id), |resp| {
             resp.command.lookup_topic_response
-        }).await
+        })
+        .await
     }
 
     pub async fn lookup_partitioned_topic<S: Into<String>>(
         &self,
         topic: S,
-    ) -> Result<proto::CommandPartitionedTopicMetadataResponse, ConnectionError>
-    {
+    ) -> Result<proto::CommandPartitionedTopicMetadataResponse, ConnectionError> {
         let request_id = self.request_id.get();
         let msg = messages::lookup_partitioned_topic(topic.into(), request_id);
         self.send_message(msg, RequestKey::RequestId(request_id), |resp| {
             resp.command.partition_metadata_response
-        }).await
+        })
+        .await
     }
 
     pub async fn create_producer(
@@ -331,20 +347,21 @@ impl ConnectionSender {
         let msg = messages::create_producer(topic, producer_name, producer_id, request_id, options);
         self.send_message(msg, RequestKey::RequestId(request_id), |resp| {
             resp.command.producer_success
-        }).await
+        })
+        .await
     }
 
     pub async fn get_topics_of_namespace(
         &self,
         namespace: String,
         mode: proto::get_topics::Mode,
-    ) -> Result<proto::CommandGetTopicsOfNamespaceResponse, ConnectionError>
-    {
+    ) -> Result<proto::CommandGetTopicsOfNamespaceResponse, ConnectionError> {
         let request_id = self.request_id.get();
         let msg = messages::get_topics_of_namespace(request_id, namespace, mode);
         self.send_message(msg, RequestKey::RequestId(request_id), |resp| {
             resp.command.get_topics_of_namespace_response
-        }).await
+        })
+        .await
     }
 
     pub async fn close_producer(
@@ -355,7 +372,8 @@ impl ConnectionSender {
         let msg = messages::close_producer(producer_id, request_id);
         self.send_message(msg, RequestKey::RequestId(request_id), |resp| {
             resp.command.success
-        }).await
+        })
+        .await
     }
 
     pub async fn subscribe(
@@ -367,7 +385,7 @@ impl ConnectionSender {
         consumer_id: u64,
         consumer_name: Option<String>,
         options: ConsumerOptions,
-        ) -> Result<proto::CommandSuccess, ConnectionError> {
+    ) -> Result<proto::CommandSuccess, ConnectionError> {
         let request_id = self.request_id.get();
         let msg = messages::subscribe(
             topic,
@@ -377,12 +395,12 @@ impl ConnectionSender {
             request_id,
             consumer_name,
             options,
-            );
+        );
         match self.registrations.unbounded_send(Register::Consumer {
             consumer_id,
             resolver,
         }) {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(_) => {
                 self.error.set(ConnectionError::Disconnected);
                 return Err(ConnectionError::Disconnected);
@@ -390,7 +408,8 @@ impl ConnectionSender {
         }
         self.send_message(msg, RequestKey::RequestId(request_id), |resp| {
             resp.command.success
-        }).await
+        })
+        .await
     }
 
     pub fn send_flow(&self, consumer_id: u64, message_permits: u32) -> Result<(), ConnectionError> {
@@ -431,7 +450,8 @@ impl ConnectionSender {
         let msg = messages::close_consumer(consumer_id, request_id);
         self.send_message(msg, RequestKey::RequestId(request_id), |resp| {
             resp.command.success
-        }).await
+        })
+        .await
     }
 
     async fn send_message<R: Debug, F>(
@@ -448,12 +468,13 @@ impl ConnectionSender {
 
         let k = key.clone();
         let response = async {
-            response.await
-            .map_err(|oneshot::Canceled| ConnectionError::Disconnected)
-            .map(move |message: Message| {
-                trace!("received message(key = {:?}): {:?}", k, message);
-                extract_message(message, extract)
-            })?
+            response
+                .await
+                .map_err(|oneshot::Canceled| ConnectionError::Disconnected)
+                .map(move |message: Message| {
+                    trace!("received message(key = {:?}): {:?}", k, message);
+                    extract_message(message, extract)
+                })?
         };
 
         let res = match (
@@ -477,16 +498,17 @@ pub struct Connection {
 }
 
 impl Connection {
-    pub async fn new<E: Executor+'static>(
+    pub async fn new<E: Executor + 'static>(
         addr: String,
         auth_data: Option<Authentication>,
         proxy_to_broker_url: Option<String>,
         executor: E,
     ) -> Result<Connection, ConnectionError> {
-        let address = SocketAddr::from_str(&addr)
-            .map_err(|e| ConnectionError::SocketAddr(e.to_string()))?;
+        let address =
+            SocketAddr::from_str(&addr).map_err(|e| ConnectionError::SocketAddr(e.to_string()))?;
 
-        let mut stream = TcpStream::connect(&address).await
+        let mut stream = TcpStream::connect(&address)
+            .await
             .map(|stream| tokio_util::codec::Framed::new(stream, Codec))?;
 
         let _ = stream
@@ -494,7 +516,8 @@ impl Connection {
                 let msg = messages::connect(auth_data, proxy_to_broker_url);
                 trace!("connection message: {:?}", msg);
                 msg
-            }).await?;
+            })
+            .await?;
 
         let msg = stream.next().await;
         match msg {
@@ -503,19 +526,17 @@ impl Connection {
                     proto::BaseCommand {
                         error: Some(error), ..
                     },
-                    ..
+                ..
             })) => Err(ConnectionError::PulsarError(format!("{:?}", error))),
             Some(Ok(msg)) => {
                 let cmd = msg.command.clone();
                 trace!("received connection response: {:?}", msg);
-                msg.command
-                    .connected
-                    .ok_or_else(|| {
-                        ConnectionError::PulsarError(format!(
-                                "Unexpected message from pulsar: {:?}",
-                                cmd
-                                ))
-                    })
+                msg.command.connected.ok_or_else(|| {
+                    ConnectionError::PulsarError(format!(
+                        "Unexpected message from pulsar: {:?}",
+                        cmd
+                    ))
+                })
             }
             Some(Err(e)) => Err(e),
             None => Err(ConnectionError::Disconnected),
@@ -529,19 +550,23 @@ impl Connection {
         let (sender_shutdown_tx, sender_shutdown_rx) = oneshot::channel();
         let executor = TaskExecutor::new(executor);
 
-        if let Err(_) = executor.spawn(Box::pin(Receiver::new(
-                    stream,
-                    tx.clone(),
-                    error.clone(),
-                    registrations_rx,
-                    receiver_shutdown_rx,
-                    ).map(|_| ()))) {
+        if let Err(_) = executor.spawn(Box::pin(
+            Receiver::new(
+                stream,
+                tx.clone(),
+                error.clone(),
+                registrations_rx,
+                receiver_shutdown_rx,
+            )
+            .map(|_| ()),
+        )) {
             error!("the executor could not spawn the Receiver future");
             return Err(ConnectionError::Shutdown);
         }
 
-        if let Err(_) = executor.spawn(Box::pin(Sender::new(sink, rx, error.clone(), sender_shutdown_rx)
-                                                .map(|_| ()))) {
+        if let Err(_) = executor.spawn(Box::pin(
+            Sender::new(sink, rx, error.clone(), sender_shutdown_rx).map(|_| ()),
+        )) {
             error!("the executor could not spawn the Receiver future");
             return Err(ConnectionError::Shutdown);
         }

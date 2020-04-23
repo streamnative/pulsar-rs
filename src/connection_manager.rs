@@ -32,7 +32,7 @@ pub struct ConnectionManager {
 }
 
 impl ConnectionManager {
-    pub async fn new<E: Executor+'static>(
+    pub async fn new<E: Executor + 'static>(
         addr: SocketAddr,
         auth: Option<Authentication>,
         executor: E,
@@ -56,9 +56,7 @@ impl ConnectionManager {
     /// get an active Connection from a broker address
     ///
     /// creates a connection if not available
-    pub async fn get_base_connection(
-        &self,
-    ) -> Result<Arc<Connection>, ConnectionError> {
+    pub async fn get_base_connection(&self) -> Result<Arc<Connection>, ConnectionError> {
         if self.tx.is_closed() {
             return Err(ConnectionError::Shutdown);
         }
@@ -158,7 +156,7 @@ fn engine(
                     }
                     None => {
                         connect(broker, auth.clone(), tx, self_tx, exe).await;
-                    },
+                    }
                 },
                 Query::Base(tx) => {
                     let _ = tx.send(Ok(connection.clone()));
@@ -177,15 +175,15 @@ fn engine(
                         Some(ref s) => {
                             if let Some((b, c)) =
                                 connections.iter().find(|(k, _)| &k.broker_url == s)
-                                {
-                                    debug!(
-                                        "using another connection for lookup, proxying to {:?}",
-                                        b.proxy
-                                        );
-                                    Some((b.proxy, c.clone()))
-                                } else {
-                                    None
-                                }
+                            {
+                                debug!(
+                                    "using another connection for lookup, proxying to {:?}",
+                                    b.proxy
+                                );
+                                Some((b.proxy, c.clone()))
+                            } else {
+                                None
+                            }
                         }
                     };
                     let _ = tx.send(Ok(res));

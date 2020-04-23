@@ -4,8 +4,8 @@ use crate::error::ServiceDiscoveryError;
 use crate::executor::{Executor, TaskExecutor};
 use crate::message::proto::{command_lookup_topic_response, CommandLookupTopicResponse};
 use futures::{
-    future::{self, try_join_all, Either},
     channel::{mpsc, oneshot},
+    future::{self, try_join_all, Either},
     Future, FutureExt, StreamExt,
 };
 use std::net::SocketAddr;
@@ -35,7 +35,10 @@ impl ServiceDiscovery {
         Ok(ServiceDiscovery::with_manager(Arc::new(conn), executor))
     }
 
-    pub fn with_manager<E: Executor + 'static>(manager: Arc<ConnectionManager>, executor: E) -> Self {
+    pub fn with_manager<E: Executor + 'static>(
+        manager: Arc<ConnectionManager>,
+        executor: E,
+    ) -> Self {
         let executor = TaskExecutor::new(executor);
         let tx = engine(manager, executor);
         ServiceDiscovery { tx }
@@ -101,13 +104,12 @@ impl ServiceDiscovery {
         let topics = (0..partitions)
             .map(|nb| {
                 let t = format!("{}-partition-{}", topic, nb);
-                lookup_topic(t.clone(), self_tx.clone())
-                    .map(move |address_res| match address_res {
-                        Err(e) => Err(e),
-                        Ok(address) => Ok((t, address))
-                    })
+                lookup_topic(t.clone(), self_tx.clone()).map(move |address_res| match address_res {
+                    Err(e) => Err(e),
+                    Ok(address) => Ok((t, address)),
+                })
             })
-        .collect::<Vec<_>>();
+            .collect::<Vec<_>>();
         try_join_all(topics).await
     }
 }
@@ -160,11 +162,12 @@ fn engine(manager: Arc<ConnectionManager>, executor: TaskExecutor) -> mpsc::Unbo
     let tx2 = tx.clone();
 
     let f = async move {
-        let resolver = TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
-            .await
-            .map_err(|e| {
-                error!("could not create DNS resolver: {:?}", e);
-            })?;
+        let resolver =
+            TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
+                .await
+                .map_err(|e| {
+                    error!("could not create DNS resolver: {:?}", e);
+                })?;
 
         while let Some(query) = rx.next().await {
             let self_tx = tx2.clone();
@@ -179,7 +182,7 @@ fn engine(manager: Arc<ConnectionManager>, executor: TaskExecutor) -> mpsc::Unbo
                         Err(conn_error) => {
                             let _ = tx.send(Err(ServiceDiscoveryError::Connection(conn_error)));
                             continue;
-                        },
+                        }
                         Ok(c) => c,
                     };
 
@@ -194,20 +197,21 @@ fn engine(manager: Arc<ConnectionManager>, executor: TaskExecutor) -> mpsc::Unbo
                             manager,
                             tx,
                             self_tx.clone(),
-                            ).await
+                        )
+                        .await
                     } else {
                         let _ = tx.send(Err(ServiceDiscoveryError::Query(format!(
-                                        "unknown broker URL: {}",
-                                        broker_url.unwrap_or_else(String::new)
-                                        ))));
+                            "unknown broker URL: {}",
+                            broker_url.unwrap_or_else(String::new)
+                        ))));
                     }
-                },
+                }
                 Query::PartitionedTopic(topic, tx) => {
                     let connection = match manager.get_base_connection().await {
                         Err(conn_error) => {
                             let _ = tx.send(Err(ServiceDiscoveryError::Connection(conn_error)));
                             continue;
-                        },
+                        }
                         Ok(conn) => conn,
                     };
 
@@ -215,7 +219,7 @@ fn engine(manager: Arc<ConnectionManager>, executor: TaskExecutor) -> mpsc::Unbo
                         Err(e) => {
                             let _ = tx.send(Err(e.into()));
                             continue;
-                        },
+                        }
                         Ok(response) => response,
                     };
 
@@ -225,9 +229,10 @@ fn engine(manager: Arc<ConnectionManager>, executor: TaskExecutor) -> mpsc::Unbo
                             if let Some(s) = response.message {
                                 tx.send(Err(ServiceDiscoveryError::Query(s)))
                             } else {
-                                tx.send(Err(ServiceDiscoveryError::Query(
-                                            format!("server error: {:?}", response.error),
-                                            )))
+                                tx.send(Err(ServiceDiscoveryError::Query(format!(
+                                    "server error: {:?}",
+                                    response.error
+                                ))))
                             }
                         }
                     };
@@ -320,12 +325,12 @@ async fn lookup(
     manager: Arc<ConnectionManager>,
     tx: oneshot::Sender<Result<BrokerAddress, ServiceDiscoveryError>>,
     self_tx: mpsc::UnboundedSender<Query>,
-)  {
+) {
     let response = match sender.lookup_topic(topic.to_string(), authoritative).await {
         Err(e) => {
             let _ = tx.send(Err(ServiceDiscoveryError::Connection(e)));
             return;
-        },
+        }
         Ok(response) => response,
     };
 
@@ -350,11 +355,14 @@ async fn lookup(
     let address = if proxied_query || proxy {
         base_address
     } else {
-        let results: Result<_, _> = resolver.lookup_ip(broker_name.as_str()).await
-            .map_err(move |e| {
-                error!("DNS lookup error: {:?}", e);
-                ServiceDiscoveryError::DnsLookupError
-            });
+        let results: Result<_, _> =
+            resolver
+                .lookup_ip(broker_name.as_str())
+                .await
+                .map_err(move |e| {
+                    error!("DNS lookup error: {:?}", e);
+                    ServiceDiscoveryError::DnsLookupError
+                });
         match results {
             Err(_) => return,
             Ok(lookup) => {
@@ -374,40 +382,35 @@ async fn lookup(
     // to the target broker
     let broker_address: BrokerAddress = if redirect {
         let (tx2, rx2) = oneshot::channel();
-        let _ = self_tx.unbounded_send(Query::Topic(
-                topic,
-                Some(b.broker_url),
-                authoritative,
-                tx2,
-                ))
-            .map_err(|e|match e.into_inner() {
+        let _ = self_tx
+            .unbounded_send(Query::Topic(topic, Some(b.broker_url), authoritative, tx2))
+            .map_err(|e| match e.into_inner() {
                 Query::Topic(_, _, _, tx) => {
-                    let _ =
-                        tx.send(Err(ServiceDiscoveryError::Shutdown));
+                    let _ = tx.send(Err(ServiceDiscoveryError::Shutdown));
                 }
                 _ => {}
             });
 
         match rx2.await.map_err(|_| ServiceDiscoveryError::Canceled) {
-          Ok(Ok(b)) => b,
-          Ok(Err(e)) => {
-              let _ = tx.send(Err(e));
-              return;
-          },
-          Err(e) => {
-              let _ = tx.send(Err(e));
-              return;
-          }
+            Ok(Ok(b)) => b,
+            Ok(Err(e)) => {
+                let _ = tx.send(Err(e));
+                return;
+            }
+            Err(e) => {
+                let _ = tx.send(Err(e));
+                return;
+            }
         }
     } else {
         b
     };
 
-    let _ = tx.send(manager
-        .get_connection(&broker_address.clone()).await
-        .map(|_| {
-            broker_address
-        }).map_err(|e| {
-            ServiceDiscoveryError::Connection(e)
-        }));
+    let _ = tx.send(
+        manager
+            .get_connection(&broker_address.clone())
+            .await
+            .map(|_| broker_address)
+            .map_err(|e| ServiceDiscoveryError::Connection(e)),
+    );
 }

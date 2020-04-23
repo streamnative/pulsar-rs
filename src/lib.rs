@@ -24,19 +24,23 @@ pub use producer::{Producer, ProducerOptions, TopicProducer};
 pub use service_discovery::ServiceDiscovery;
 
 macro_rules! try_ready {
-    ($e:expr) => (match $e {
-        $crate::futures::task::Poll::Ready(Ok(t)) => t,
-        $crate::futures::task::Poll::Pending => return $crate::futures::task::Poll::Pending,
-        $crate::futures::task::Poll::Ready(Err(e)) => return $crate::futures::task::Poll::Ready(Err(From::from(e))),
-    })
+    ($e:expr) => {
+        match $e {
+            $crate::futures::task::Poll::Ready(Ok(t)) => t,
+            $crate::futures::task::Poll::Pending => return $crate::futures::task::Poll::Pending,
+            $crate::futures::task::Poll::Ready(Err(e)) => {
+                return $crate::futures::task::Poll::Ready(Err(From::from(e)))
+            }
+        }
+    };
 }
 
 mod client;
 mod connection;
 mod connection_manager;
+pub mod consumer;
 mod error;
 mod executor;
-pub mod consumer;
 pub mod message;
 pub mod producer;
 mod service_discovery;
@@ -53,9 +57,9 @@ mod tests {
 
     use crate::client::SerializeMessage;
     use crate::consumer::Message;
+    use crate::executor::TokioExecutor;
     use crate::message::Payload;
     use crate::Error as PulsarError;
-    use crate::executor::TokioExecutor;
 
     use super::*;
     use nom::lib::std::collections::BTreeSet;
@@ -132,7 +136,7 @@ mod tests {
         }
     }
 
-    use log::{Record, Metadata, LevelFilter};
+    use log::{LevelFilter, Metadata, Record};
     pub struct SimpleLogger;
     impl log::Log for SimpleLogger {
         fn enabled(&self, _metadata: &Metadata) -> bool {
@@ -142,8 +146,13 @@ mod tests {
 
         fn log(&self, record: &Record) {
             if self.enabled(record.metadata()) {
-                println!("{} {}\t{}\t{}", chrono::Utc::now(),
-                  record.level(), record.module_path().unwrap(), record.args());
+                println!(
+                    "{} {}\t{}\t{}",
+                    chrono::Utc::now(),
+                    record.level(),
+                    record.module_path().unwrap(),
+                    record.args()
+                );
             }
         }
         fn flush(&self) {}
@@ -165,12 +174,15 @@ mod tests {
             let producer = pulsar.producer(None);
 
             for _ in 0u16..5000 {
-                producer.send(
-                    "test",
-                    &TestData {
-                        data: "data".to_string(),
-                    },
-                ).await.unwrap();
+                producer
+                    .send(
+                        "test",
+                        &TestData {
+                            data: "data".to_string(),
+                        },
+                    )
+                    .await
+                    .unwrap();
             }
 
             let consumer: Consumer<TestData> = pulsar
@@ -185,13 +197,13 @@ mod tests {
 
             let mut stream = consumer.take(5000);
             while let Some(res) = stream.next().await {
-                    let Message { payload, ack, .. } = res.unwrap();
-                    ack.ack();
-                    let data = payload.unwrap();
-                    if data.data.as_str() != "data" {
-                        panic!("Unexpected payload: {}", &data.data);
-                    }
+                let Message { payload, ack, .. } = res.unwrap();
+                ack.ack();
+                let data = payload.unwrap();
+                if data.data.as_str() != "data" {
+                    panic!("Unexpected payload: {}", &data.data);
                 }
+            }
             // FIXME .timeout(Duration::from_secs(5))
         };
 
@@ -229,7 +241,6 @@ mod tests {
 
                 let mut stream = consumer.take(1);
                 while let Some(res) = stream.next().await {
-
                     let Message { payload, ack, .. } = res.unwrap();
 
                     ack.ack();
@@ -257,16 +268,15 @@ mod tests {
 
                 producer.send(topic, send_data).await.unwrap();
 
-
                 let mut stream = consumer.take(1);
                 while let Some(res) = stream.next().await {
-                        let Message { payload, ack, .. } = res.unwrap();
-                        ack.ack();
-                        let data = payload;
-                        if data.as_slice() != send_data {
-                            panic!("Unexpected payload in &[u8] test: {:?}", &data);
-                        }
+                    let Message { payload, ack, .. } = res.unwrap();
+                    ack.ack();
+                    let data = payload;
+                    if data.as_slice() != send_data {
+                        panic!("Unexpected payload in &[u8] test: {:?}", &data);
                     }
+                }
                 //FIXME .timeout(Duration::from_secs(1))
             }
         };
@@ -311,21 +321,22 @@ mod tests {
                 .await
                 .unwrap();
 
-
             for i in 0u8..message_count {
-                producer.send(
-                    topic.clone(),
-                    &TestData {
-                        data: i.to_string(),
-                    },
-                    ).await.unwrap();
+                producer
+                    .send(
+                        topic.clone(),
+                        &TestData {
+                            data: i.to_string(),
+                        },
+                    )
+                    .await
+                    .unwrap();
             }
 
             let mut stream = consumer
                 .take(message_count as usize * 2)
                 .map_err(|e| Error::from(e));
             while let Some(res) = stream.next().await {
-
                 let Message { payload, ack, .. } = res.unwrap();
                 let data = payload.unwrap();
                 tx.send(data.data.clone()).unwrap();
@@ -336,9 +347,8 @@ mod tests {
                     ack.ack();
                 }
             }
-                //FIXME .timeout(Duration::from_secs(15))
+            //FIXME .timeout(Duration::from_secs(15))
         };
-
 
         runtime.spawn(Box::pin(f));
 
