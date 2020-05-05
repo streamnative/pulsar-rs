@@ -691,7 +691,6 @@ pub(crate) mod messages {
                         })
                         .collect(),
                     schema: options.schema,
-                    ..Default::default()
                 }),
                 ..Default::default()
             },
@@ -842,7 +841,6 @@ pub(crate) mod messages {
                     initial_position: options.initial_position,
                     schema: options.schema,
                     start_message_id: options.start_message_id,
-                    ..Default::default()
                 }),
                 ..Default::default()
             },

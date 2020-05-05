@@ -3,7 +3,8 @@ extern crate serde;
 use log::{Record, Metadata, LevelFilter};
 use pulsar::{Message, Consumer, Pulsar, TokioExecutor,
   message::Payload, SerializeMessage, DeserializeMessage, Error as PulsarError,
-  message::proto::command_subscribe::SubType, producer};
+  message::proto::command_subscribe::SubType, producer,
+  message::proto};
 use tokio::runtime::Runtime;
 use futures::StreamExt;
 
@@ -61,15 +62,21 @@ fn main() {
         let addr = "localhost";
         let executor = TokioExecutor(tokio::runtime::Handle::current());
         let pulsar: Pulsar = Pulsar::new(addr, None, executor).await.unwrap();
-        let producer = pulsar.producer(None);
+        let producer = pulsar.create_producer("test", Some("my-producer".to_string()), producer::ProducerOptions {
+            schema: Some(proto::Schema {
+                      type_: proto::schema::Type::String as i32,
+                      ..Default::default()
+                    }),
+            ..Default::default()
+        }).await.unwrap();
 
         let mut counter = 0usize;
         loop {
             producer.send(
-                "test",
                 &TestData {
                     data: "data".to_string(),
                 },
+                None
                 ).await.unwrap();
             counter += 1;
             if counter %1000 == 0 {
