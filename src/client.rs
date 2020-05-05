@@ -4,11 +4,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future;
+use trust_dns_resolver::{config::*, TokioAsyncResolver};
 
-use crate::connection::Authentication;
+use crate::connection::{Authentication, Connection};
 use crate::connection_manager::{BrokerAddress, ConnectionManager};
 use crate::consumer::{Consumer, ConsumerBuilder, ConsumerOptions, MultiTopicConsumer, Unset};
-use crate::error::Error;
+use crate::error::{Error, ServiceDiscoveryError};
 use crate::executor::{Executor, TaskExecutor};
 use crate::message::proto::{self, command_subscribe::SubType, CommandSendReceipt};
 use crate::message::Payload;
@@ -89,14 +90,37 @@ pub struct Pulsar {
 }
 
 impl Pulsar {
-    pub async fn new<E: Executor + 'static>(
-        addr: SocketAddr,
+    pub async fn new<E: Executor + 'static, S: Into<String>>(
+        addr: S,
         auth: Option<Authentication>,
         executor: E,
     ) -> Result<Self, Error> {
         let executor = TaskExecutor::new(executor);
+        let addr: String = addr.into();
 
-        let manager = ConnectionManager::new(addr, auth, executor.clone()).await?;
+        let address: SocketAddr = match addr.parse::<SocketAddr>() {
+            Ok(a) => a,
+            Err(_) => {
+                let mut it = addr.split(':');
+                let host = it.next().ok_or(Error::Custom("invalid address".to_string()))?;
+                let port = match it.next() {
+                    Some(s) => s.parse().map_err(|e| Error::Custom(format!("invalid port: {:?}", e)))?,
+                    None => 6650,
+                };
+
+                let resolver = TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default()).await
+                .map_err(|e| {
+                    Error::Custom(format!("could not create DNS resolver: {:?}", e))
+                })?;
+
+                let ip = resolver.lookup_ip(host).await.map_err(|_| ServiceDiscoveryError::DnsLookupError)?
+                    .iter().next().ok_or(ServiceDiscoveryError::DnsLookupError)?;
+                SocketAddr::new(ip, port)
+            }
+        };
+
+        let conn = Connection::new(address.to_string(), auth.clone(), None, executor.clone()).await?;
+        let manager = ConnectionManager::from_connection(conn, auth, address, executor.clone())?;
         let manager = Arc::new(manager);
         let service_discovery = Arc::new(ServiceDiscovery::with_manager(
                 manager.clone(),
