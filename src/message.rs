@@ -269,6 +269,14 @@ pub(crate) fn parse_batched_message(
     Ok(result)
 }
 
+impl BatchedMessage {
+    pub(crate) fn serialize(&self, w: &mut Vec<u8>) {
+        w.put_u32(self.metadata.encoded_len() as u32);
+        let _ = self.metadata.encode(w);
+        w.put_slice(&self.payload);
+    }
+}
+
 #[rustfmt::skip]
 pub mod proto {
     #[derive(Clone, PartialEq, Message)]

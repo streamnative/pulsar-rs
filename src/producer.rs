@@ -1,6 +1,5 @@
-use std::collections::BTreeMap;
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
 use std::pin::Pin;
 
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
@@ -17,6 +16,7 @@ use crate::connection::{Authentication, Connection, SerialId};
 use crate::error::ProducerError;
 use crate::executor::Executor;
 use crate::message::proto::{self, EncryptionKeys, Schema};
+use crate::message::BatchedMessage;
 use crate::{Error, Pulsar};
 
 type ProducerId = u64;
@@ -78,13 +78,13 @@ impl Producer {
         Producer { message_sender: tx }
     }
 
-    pub async fn send<T: SerializeMessage + ?Sized, S: Into<String>>(
+    pub async fn send<T: SerializeMessage + Sized, S: Into<String>>(
         &self,
         topic: S,
-        message: &T,
+        message: T,
     ) -> Result<proto::CommandSendReceipt, Error> {
         let topic = topic.into();
-        match T::serialize_message(message) {
+        match T::serialize_message(&message) {
             Ok(message) => self.send_message(topic, message).await,
             Err(e) => Err(e),
         }
@@ -203,7 +203,7 @@ impl Future for ProducerEngine {
                             let p = producer.clone();
                             let f = async move {
                                 p
-                                    .send_message(message, None)
+                                    .send_raw(message)
                                     .map(|r| {
                                         if let Err(res) = resolver.send(r) {
                                           error!("send_message result receiver was dropped before getting the receipt: {:?}", res);
@@ -244,7 +244,7 @@ impl Future for ProducerEngine {
                                     Ok(Ok(producer)) => {
                                         let _ = tx.send(Ok(producer.clone()));
                                         let r = producer
-                                            .send_message(message, None).await;
+                                            .send_raw(message).await;
 
                                         if let Err(res) = resolver.send(r) {
                                           error!("send_message result receiver was dropped before getting the receipt: {:?}", res);
@@ -295,6 +295,9 @@ pub struct TopicProducer {
     name: ProducerName,
     topic: String,
     message_id: SerialId,
+    //putting it in a mutex because we must send multiple messages at once
+    // while we might be pushing more messages from elsewhere
+    batch: Option<Mutex<Batch>>,
 }
 
 impl TopicProducer {
@@ -334,6 +337,7 @@ impl TopicProducer {
             .lookup_topic(topic.clone(), false).await?;
 
         let topic = topic.clone();
+        let batch_size = options.batch_size.clone();
         let success = sender
             .create_producer(topic.clone(), producer_id, name, options).await?;
         Ok(TopicProducer {
@@ -342,6 +346,7 @@ impl TopicProducer {
             name: success.producer_name,
             topic,
             message_id: sequence_ids,
+            batch: batch_size.map(Batch::new).map(Mutex::new),
         })
     }
 
@@ -360,20 +365,12 @@ impl TopicProducer {
         Ok(())
     }
 
-    pub async fn send_raw(
+    pub async fn send<T: SerializeMessage + Sized>(
         &self,
-        message: Message,
+        message: T,
     ) -> Result<proto::CommandSendReceipt, Error> {
-        self.send_message(message, None).await
-    }
-
-    pub async fn send<T: SerializeMessage + ?Sized>(
-        &self,
-        message: &T,
-        num_messages: Option<i32>,
-    ) -> Result<proto::CommandSendReceipt, Error> {
-        match T::serialize_message(message) {
-            Ok(message) => self.send_message(message, num_messages).await,
+        match T::serialize_message(&message) {
+            Ok(message) => self.send_raw(message).await,
             Err(e) => Err(e),
         }
     }
@@ -384,21 +381,73 @@ impl TopicProducer {
             .map(|e| ProducerError::Connection(e).into())
     }
 
-    async fn send_message(
+    pub async fn send_raw(
         &self,
         message: Message,
-        num_messages: Option<i32>,
     ) -> Result<proto::CommandSendReceipt, Error> {
-        self.connection
-            .sender()
-            .send(
-                self.id,
-                self.name.clone(),
-                self.message_id.get(),
-                num_messages,
-                message,
-            ).await
-            .map_err(|e| ProducerError::Connection(e).into())
+        match self.batch.as_ref() {
+            None => {
+                self.connection
+                    .sender()
+                    .send(
+                        self.id,
+                        self.name.clone(),
+                        self.message_id.get(),
+                        None,
+                        message,
+                        ).await
+                    .map_err(|e| ProducerError::Connection(e).into())
+            },
+            Some(batch) => {
+                let (tx, rx) = oneshot::channel();
+                let mut payload: Vec<u8> = Vec::new();
+                let mut receipts = Vec::new();
+                let mut counter = 0i32;
+
+                {
+                    let batch = batch.lock().unwrap();
+                    batch.push_back((tx, message));
+
+                    if batch.is_full() {
+                        for (tx, message) in batch.get_messages() {
+                            receipts.push(tx);
+                            message.serialize(&mut payload);
+                            counter += 1;
+                        }
+                    }
+                }
+
+                if counter > 0 {
+                    let message = Message {
+                      payload,
+                      num_messages_in_batch: Some(counter),
+                      ..Default::default()
+                    };
+
+                    let send_receipt = self.connection
+                        .sender()
+                        .send(
+                            self.id,
+                            self.name.clone(),
+                            self.message_id.get(),
+                            Some(counter),
+                            message,
+                        ).await
+                        .map_err(|e| {
+                          let err: Error = ProducerError::Connection(e).into();
+                          err
+                        })?;
+
+                    trace!("sending a batched message of size {}", counter);
+                    for tx in receipts.drain(..) {
+                        let _ = tx.send(send_receipt.clone());
+                    }
+                }
+                rx.await.map_err(|_| ProducerError::Custom("could not send message".to_string()).into())
+            }
+
+
+        }
     }
 }
 
@@ -406,4 +455,49 @@ impl Drop for TopicProducer {
     fn drop(&mut self) {
         let _ = self.connection.sender().close_producer(self.id);
     }
+}
+
+struct Batch {
+  pub length: u32,
+  // put it in a mutex because the design of Producer requires an immutable TopicProducer,
+  // so we cannot have a mutable Batch in a send_raw(&mut self, ...)
+  pub storage: Mutex<VecDeque<(oneshot::Sender<proto::CommandSendReceipt>, BatchedMessage)>>,
+}
+
+impl Batch {
+  pub fn new(length: u32) -> Batch {
+    Batch {
+      length,
+      storage: Mutex::new(VecDeque::with_capacity(length as usize)),
+    }
+  }
+
+  pub fn is_full(&self) -> bool {
+    self.storage.lock().unwrap().len() >= self.length as usize
+  }
+
+  pub fn push_back(&self, msg: (oneshot::Sender<proto::CommandSendReceipt>, Message)) {
+      let (tx, message) = msg;
+
+      let properties = message
+          .properties
+          .into_iter()
+          .map(|(key, value)| proto::KeyValue { key, value })
+          .collect();
+
+      let batched = BatchedMessage {
+        metadata: proto::SingleMessageMetadata {
+          properties,
+          partition_key: message.partition_key,
+          payload_size: message.payload.len() as i32,
+          ..Default::default()
+        },
+        payload: message.payload,
+      };
+      self.storage.lock().unwrap().push_back((tx, batched))
+  }
+
+  pub fn get_messages(&self) -> Vec<(oneshot::Sender<proto::CommandSendReceipt>, BatchedMessage)> {
+      self.storage.lock().unwrap().drain(..).collect()
+  }
 }
