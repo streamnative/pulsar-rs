@@ -17,7 +17,7 @@ pub use consumer::{
     Ack, Consumer, ConsumerBuilder, ConsumerOptions, ConsumerState, Message, MultiTopicConsumer,
 };
 pub use error::{ConnectionError, ConsumerError, Error, ProducerError, ServiceDiscoveryError};
-pub use executor::{Executor, TaskExecutor};
+pub use executor::{Executor, TaskExecutor, TokioExecutor};
 pub use message::proto;
 pub use message::proto::command_subscribe::SubType;
 pub use producer::{Producer, ProducerOptions, TopicProducer};
