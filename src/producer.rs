@@ -356,7 +356,7 @@ impl TopicProducer {
     pub async fn check_connection(&self) -> Result<(), Error> {
         self.connection
             .sender()
-            .lookup_topic("test", false).await?;
+            .send_ping().await?;
         Ok(())
     }
 

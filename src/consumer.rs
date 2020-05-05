@@ -142,6 +142,13 @@ impl<T: DeserializeMessage> Consumer<T> {
         &self.options
     }
 
+    pub async fn check_connection(&self) -> Result<(), Error> {
+        self.connection
+            .sender()
+            .send_ping().await?;
+        Ok(())
+    }
+
     fn create_message(
         &self,
         message_id: proto::MessageIdData,

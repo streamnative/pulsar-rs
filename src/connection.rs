@@ -35,6 +35,7 @@ pub enum Register {
         consumer_id: u64,
         resolver: mpsc::UnboundedSender<Message>,
     },
+    Ping { resolver: oneshot::Sender<()> },
 }
 
 #[derive(Debug, Clone, PartialEq, Ord, PartialOrd, Eq)]
@@ -58,6 +59,7 @@ pub struct Receiver<S: Stream<Item = Result<Message, ConnectionError>>> {
     received_messages: BTreeMap<RequestKey, Message>,
     registrations: Pin<Box<mpsc::UnboundedReceiver<Register>>>,
     shutdown: Pin<Box<oneshot::Receiver<()>>>,
+    ping: Option<oneshot::Sender<()>>,
 }
 
 impl<S: Stream<Item = Result<Message, ConnectionError>>> Receiver<S> {
@@ -77,6 +79,7 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Receiver<S> {
             consumers: BTreeMap::new(),
             registrations: Box::pin(registrations),
             shutdown: Box::pin(shutdown),
+            ping: None,
         }
     }
 }
@@ -109,6 +112,11 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> 
                 })) => {
                     self.consumers.insert(consumer_id, resolver);
                 }
+                Poll::Ready(Some(Register::Ping {
+                    resolver,
+                })) => {
+                    self.ping = Some(resolver);
+                }
                 Poll::Ready(None) => {
                     self.error.set(ConnectionError::Disconnected);
                     return Poll::Ready(Err(()));
@@ -122,6 +130,10 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> 
                 Poll::Ready(Some(Ok(msg))) => {
                     if msg.command.ping.is_some() {
                         let _ = self.outbound.unbounded_send(messages::pong());
+                    } else if msg.command.pong.is_some() {
+                        if let Some(sender) = self.ping.take() {
+                            let _ = sender.send(());
+                        }
                     } else if msg.command.message.is_some() {
                         if let Some(consumer) = self
                             .consumers
@@ -137,7 +149,7 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> 
                             self.received_messages.insert(request_key, msg);
                         }
                     } else {
-                        println!(
+                        error!(
                             "Received message with no request_id; dropping. Message: {:?}",
                             msg.command
                         );
@@ -290,10 +302,27 @@ impl ConnectionSender {
         self.send_message(msg, key, |resp| resp.command.send_receipt).await
     }
 
-    pub fn send_ping(&self) -> Result<(), ConnectionError> {
-        self.tx
-            .unbounded_send(messages::ping())
-            .map_err(|_| ConnectionError::Disconnected)
+    pub async fn send_ping(&self) -> Result<(), ConnectionError> {
+        let (resolver, response) = oneshot::channel();
+        trace!("sending ping");
+
+        let res = match (
+            self.registrations
+                .unbounded_send(Register::Ping { resolver }),
+            self.tx.unbounded_send(messages::ping()),
+        ) {
+            (Ok(_), Ok(_)) => response.await
+                .map_err(|oneshot::Canceled| {
+                    ConnectionError::Disconnected
+                })
+                .map(move |_| {
+                    trace!("received pong")
+                }),
+            _ => {
+                Err(ConnectionError::Disconnected)
+            },
+        };
+        res
     }
 
     pub async fn lookup_topic<S: Into<String>>(
