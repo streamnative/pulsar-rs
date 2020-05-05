@@ -393,7 +393,6 @@ impl TopicProducer {
                         self.id,
                         self.name.clone(),
                         self.message_id.get(),
-                        None,
                         message,
                         ).await
                     .map_err(|e| ProducerError::Connection(e).into())
@@ -430,7 +429,6 @@ impl TopicProducer {
                             self.id,
                             self.name.clone(),
                             self.message_id.get(),
-                            Some(counter),
                             message,
                         ).await
                         .map_err(|e| {

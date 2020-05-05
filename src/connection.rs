@@ -285,7 +285,6 @@ impl ConnectionSender {
         producer_id: u64,
         producer_name: String,
         sequence_id: u64,
-        num_messages: Option<i32>,
         message: producer::Message,
     ) -> Result<proto::CommandSendReceipt, ConnectionError> {
         let key = RequestKey::ProducerSend {
@@ -296,7 +295,6 @@ impl ConnectionSender {
             producer_id,
             producer_name,
             sequence_id,
-            num_messages,
             message,
         );
         self.send_message(msg, key, |resp| resp.command.send_receipt).await
@@ -750,7 +748,6 @@ pub(crate) mod messages {
         producer_id: u64,
         producer_name: String,
         sequence_id: u64,
-        num_messages: Option<i32>,
         message: producer::Message,
     ) -> Message {
         let properties = message
@@ -765,7 +762,7 @@ pub(crate) mod messages {
                 send: Some(proto::CommandSend {
                     producer_id,
                     sequence_id,
-                    num_messages,
+                    num_messages: message.num_messages_in_batch,
                 }),
                 ..Default::default()
             },
