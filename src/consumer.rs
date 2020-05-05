@@ -226,6 +226,8 @@ impl Ack {
                 consumer_id,
                 message_ids,
                 cumulative: false,
+            }).map_err(|e| {
+              error!("could not send ack");
             });
         }
     }
@@ -1266,5 +1268,52 @@ mod tests {
             thread::sleep(Duration::from_millis(100));
         }
 
+    }
+    #[test]
+    #[ignore]
+    fn consumer_dropped_with_lingering_acks() {
+        let _ = log::set_logger(&TEST_LOGGER);
+        let _ = log::set_max_level(LevelFilter::Trace);
+        let addr = "127.0.0.1:6650".parse().unwrap();
+        let mut rt = Runtime::new().unwrap();
+
+        let topic = "issue_51";
+
+        let f = async move {
+            let executor = TokioExecutor(tokio::runtime::Handle::current());
+            let client: Pulsar = Pulsar::new(addr, None, executor).await.unwrap();
+            let producer = client.producer(None);
+
+            let data1 = TestData {
+                topic: "a".to_owned(),
+                msg: 1,
+            };
+            let data2 = TestData {
+                topic: "a".to_owned(),
+                msg: 2,
+            };
+            producer.send(topic, &data1).await.unwrap();
+            producer.send(topic, &data2).await.unwrap();
+            info!("producer sends done");
+
+            let mut v: Vec<_> = {
+                let consumer: Consumer<TestData> = client
+                    .consumer()
+                    .with_topic(topic)
+                    .with_subscription("dropped_ack")
+                    .with_subscription_type(SubType::Shared)
+                    .build().await.unwrap();
+
+
+                consumer.take(1).collect().await
+            };
+
+            let msg = v.remove(0).unwrap();
+            info!("got message: {:?}", msg.payload);
+            msg.ack.ack();
+            info!("acked");
+        };
+
+        rt.block_on(f);
     }
 }
