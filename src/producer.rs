@@ -364,16 +364,7 @@ impl TopicProducer {
         &self,
         message: Message,
     ) -> Result<proto::CommandSendReceipt, Error> {
-        self.connection
-            .sender()
-            .send(
-                self.id,
-                self.name.clone(),
-                self.message_id.get(),
-                None,
-                message,
-            ).await
-            .map_err(|e| e.into())
+        self.send_message(message, None).await
     }
 
     pub async fn send<T: SerializeMessage + ?Sized>(
