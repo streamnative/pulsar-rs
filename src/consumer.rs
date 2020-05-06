@@ -1152,7 +1152,7 @@ mod tests {
 
     use super::*;
 
-    #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
     pub struct TestData {
         topic: String,
         msg: u32,
@@ -1181,7 +1181,7 @@ mod tests {
     fn multi_consumer() {
         let _ = log::set_logger(&TEST_LOGGER);
         let _ = log::set_max_level(LevelFilter::Debug);
-        let addr = "127.0.0.1:6650".parse().unwrap();
+        let addr = "127.0.0.1:6650";
         let rt = Runtime::new().unwrap();
 
         let namespace = "public/default";
@@ -1217,10 +1217,10 @@ mod tests {
             let producer = client.producer(None);
 
             let send_start = Utc::now();
-            producer.send(topic1, &data1).await.unwrap();
-            producer.send(topic1, &data2).await.unwrap();
-            producer.send(topic2, &data3).await.unwrap();
-            producer.send(topic2, &data4).await.unwrap();
+            producer.send(topic1, data1.clone()).await.unwrap();
+            producer.send(topic1, data2.clone()).await.unwrap();
+            producer.send(topic2, data3.clone()).await.unwrap();
+            producer.send(topic2, data4.clone()).await.unwrap();
 
             let data = vec![data1, data2, data3, data4];
 
@@ -1281,7 +1281,7 @@ mod tests {
     fn consumer_dropped_with_lingering_acks() {
         let _ = log::set_logger(&TEST_LOGGER);
         let _ = log::set_max_level(LevelFilter::Trace);
-        let addr = "127.0.0.1:6650".parse().unwrap();
+        let addr = "127.0.0.1:6650";
         let mut rt = Runtime::new().unwrap();
 
         let topic = "issue_51";
@@ -1299,8 +1299,8 @@ mod tests {
                 topic: "a".to_owned(),
                 msg: 2,
             };
-            producer.send(topic, &data1).await.unwrap();
-            producer.send(topic, &data2).await.unwrap();
+            producer.send(topic, data1).await.unwrap();
+            producer.send(topic, data2).await.unwrap();
             info!("producer sends done");
 
             let mut v: Vec<_> = {

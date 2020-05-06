@@ -121,7 +121,7 @@ impl Producer {
         }
     }
 
-    async fn send_message<S: Into<String>>(
+    pub async fn send_message<S: Into<String>>(
         &self,
         topic: S,
         message: Message,

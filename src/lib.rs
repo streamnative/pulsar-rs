@@ -159,7 +159,7 @@ mod tests {
         let _ = log::set_max_level(LevelFilter::Debug);
 
         let f = async {
-            let addr = "127.0.0.1:6650".parse().unwrap();
+            let addr = "127.0.0.1:6650";
             let executor = TokioExecutor(tokio::runtime::Handle::current());
             let pulsar: Pulsar = Pulsar::new(addr, None, executor).await.unwrap();
             let producer = pulsar.producer(None);
@@ -167,7 +167,7 @@ mod tests {
             for _ in 0u16..5000 {
                 producer.send(
                     "test",
-                    &TestData {
+                    TestData {
                         data: "data".to_string(),
                     },
                 ).await.unwrap();
@@ -207,7 +207,7 @@ mod tests {
 
         let f = async {
             let executor = TokioExecutor(tokio::runtime::Handle::current());
-            let addr = "127.0.0.1:6650".parse().unwrap();
+            let addr = "127.0.0.1:6650";
             let pulsar: Pulsar = Pulsar::new(addr, None, executor).await.unwrap();
             let producer = pulsar.producer(None);
 
@@ -225,7 +225,7 @@ mod tests {
                     .await
                     .unwrap();
 
-                producer.send(topic, send_data).await.unwrap();
+                producer.send(topic, send_data.to_string()).await.unwrap();
 
                 let mut stream = consumer.take(1);
                 while let Some(res) = stream.next().await {
@@ -255,7 +255,8 @@ mod tests {
                     .await
                     .unwrap();
 
-                producer.send(topic, send_data).await.unwrap();
+                let message = producer::Message { payload: send_data.to_vec(), ..Default::default() };
+                producer.send_message(topic, message).await.unwrap();
 
 
                 let mut stream = consumer.take(1);
@@ -281,7 +282,7 @@ mod tests {
         let _ = log::set_max_level(LevelFilter::Debug);
         let runtime = Runtime::new().unwrap();
 
-        let addr = "127.0.0.1:6650".parse().unwrap();
+        let addr = "127.0.0.1:6650";
         let (tx, rx) = std::sync::mpsc::channel();
 
         let mut seen = BTreeSet::new();
@@ -315,7 +316,7 @@ mod tests {
             for i in 0u8..message_count {
                 producer.send(
                     topic.clone(),
-                    &TestData {
+                    TestData {
                         data: i.to_string(),
                     },
                     ).await.unwrap();
