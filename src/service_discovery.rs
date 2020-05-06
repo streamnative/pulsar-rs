@@ -63,7 +63,7 @@ impl ServiceDiscovery {
         topic: S,
     ) -> Result<BrokerAddress, ServiceDiscoveryError> {
         let topic = topic.into();
-        let conn_info = self.manager.get_connection_from_url(None).await?;
+        let conn_info = self.manager.get_connection_from_url(None).await;
         let base_address = self.manager.address;
         let authoritative = false;
 
@@ -182,9 +182,8 @@ impl ServiceDiscovery {
             // if the response indicated a redirect, do another query
             // to the target broker
             let broker_address: BrokerAddress = if redirect {
-                let topic = topic.clone();
                 let broker_url = Some(b.broker_url);
-                let conn_info = self.manager.get_connection_from_url(broker_url).await?;
+                let conn_info = self.manager.get_connection_from_url(broker_url).await;
                 if let Some((new_proxied_query, new_conn)) = conn_info {
                     proxied_query = new_proxied_query;
                     conn = new_conn.clone();
