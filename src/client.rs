@@ -122,9 +122,16 @@ impl Pulsar {
         let conn = Connection::new(address.to_string(), auth.clone(), None, executor.clone()).await?;
         let manager = ConnectionManager::from_connection(conn, auth, address, executor.clone())?;
         let manager = Arc::new(manager);
+        let resolver = TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
+            .await
+            .map_err(|e| {
+                error!("could not create DNS resolver: {:?}", e);
+                ServiceDiscoveryError::Canceled
+            })?;
         let service_discovery = Arc::new(ServiceDiscovery::with_manager(
                 manager.clone(),
                 executor.clone(),
+                resolver,
         ));
         Ok(Pulsar {
             manager,
