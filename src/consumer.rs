@@ -7,7 +7,7 @@ use std::pin::Pin;
 
 use chrono::{DateTime, Utc};
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
-use futures::{channel::mpsc, Future, FutureExt, Stream, StreamExt};
+use futures::{channel::{mpsc, oneshot}, Future, FutureExt, Stream, StreamExt};
 use futures::future::{try_join_all};
 use futures::task::{Context, Poll};
 use rand;
@@ -49,6 +49,7 @@ pub struct Consumer<T: DeserializeMessage> {
     data_type: PhantomData<fn(Payload) -> T::Output>,
     options: ConsumerOptions,
     current_message: Option<BatchedMessageIterator>,
+    _drop_signal: oneshot::Sender<()>,
 }
 
 impl<T: DeserializeMessage> Consumer<T> {
@@ -103,7 +104,7 @@ impl<T: DeserializeMessage> Consumer<T> {
                 subscription,
                 sub_type,
                 consumer_id,
-                consumer_name,
+                consumer_name.clone(),
                 options.clone(),
             ).await.map_err(Error::Connection)?;
 
@@ -120,6 +121,18 @@ impl<T: DeserializeMessage> Consumer<T> {
             tick_delay,
             connection.executor(),
             );
+
+        // drop_signal will be dropped when Consumer is dropped, then
+        // drop_receiver will return, and we can close the consumer
+        let (_drop_signal, drop_receiver) = oneshot::channel::<()>();
+        let conn = connection.clone();
+        let _ = connection.executor().spawn(Box::pin(async move {
+            let _res = drop_receiver.await;
+            if let Err(e) = conn.sender().close_consumer(consumer_id).await {
+              error!("could not close consumer {:?}({}): {:?}", consumer_name, consumer_id, e);
+            }
+        }));
+
         Ok(Consumer {
             connection,
             topic,
@@ -131,6 +144,7 @@ impl<T: DeserializeMessage> Consumer<T> {
             data_type: PhantomData,
             options,
             current_message: None,
+            _drop_signal,
         })
     }
 
@@ -630,12 +644,6 @@ impl<T: DeserializeMessage> Stream for Consumer<T> {
             )))))),
             None => Poll::Ready(None),
         }
-    }
-}
-
-impl<T: DeserializeMessage> Drop for Consumer<T> {
-    fn drop(&mut self) {
-        let _ = self.connection.sender().close_consumer(self.id);
     }
 }
 
