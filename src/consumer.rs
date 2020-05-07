@@ -1289,36 +1289,55 @@ mod tests {
         let f = async move {
             let executor = TokioExecutor(tokio::runtime::Handle::current());
             let client: Pulsar = Pulsar::new(addr, None, executor).await.unwrap();
-            let producer = client.producer(None);
 
-            let data1 = TestData {
-                topic: "a".to_owned(),
-                msg: 1,
-            };
-            let data2 = TestData {
-                topic: "a".to_owned(),
-                msg: 2,
-            };
-            producer.send(topic, data1).await.unwrap();
-            producer.send(topic, data2).await.unwrap();
-            info!("producer sends done");
+            {
+                let producer = client.producer(None);
 
-            let mut v: Vec<_> = {
-                let consumer: Consumer<TestData> = client
+                let data1 = TestData {
+                    topic: "a".to_owned(),
+                    msg: 1,
+                };
+                producer.send(topic, data1).await.unwrap();
+                println!("producer sends done");
+            }
+
+            {
+                let v = {
+                    println!("creating consumer");
+                    let mut consumer: Consumer<TestData> = client
+                        .consumer()
+                        .with_topic(topic)
+                        .with_subscription("dropped_ack")
+                        .with_subscription_type(SubType::Shared)
+                        .build().await.unwrap();
+
+                    println!("created consumer");
+
+
+                    consumer.next().await
+                };
+
+                let msg = v.unwrap().unwrap();
+                println!("got message: {:?}", msg.payload);
+                msg.ack.ack();
+                println!("acked");
+            }
+
+            {
+                println!("creating second consumer. The message should have been acked");
+                let mut consumer: Consumer<TestData> = client
                     .consumer()
                     .with_topic(topic)
                     .with_subscription("dropped_ack")
                     .with_subscription_type(SubType::Shared)
                     .build().await.unwrap();
 
+                println!("created second consumer");
 
-                consumer.take(1).collect().await
-            };
-
-            let msg = v.remove(0).unwrap();
-            info!("got message: {:?}", msg.payload);
-            msg.ack.ack();
-            info!("acked");
+                // the message has already been acked, so we should not receive anything
+                let res: Result<_, tokio::time::Elapsed> = tokio::time::timeout(Duration::from_secs(1), consumer.next()).await;
+                assert!(res.is_err());
+            }
         };
 
         rt.block_on(f);
