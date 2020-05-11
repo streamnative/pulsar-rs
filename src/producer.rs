@@ -357,7 +357,11 @@ impl TopicProducer {
                 #[cfg(not(feature = "zstd"))]
                 return Err(Error::Custom("cannot create a producer with zstd compression because the 'zstd' cargo feature is not active".to_string()));
             },
-            Some(_) => unimplemented!(),
+            Some(CompressionType::Snappy) => {
+                #[cfg(not(feature = "snap"))]
+                return Err(Error::Custom("cannot create a producer with Snappy compression because the 'snap' cargo feature is not active".to_string()));
+            },
+            //Some() => unimplemented!(),
         };
 
         let success = sender
@@ -456,7 +460,6 @@ impl TopicProducer {
         &self,
         mut message: Message,
     ) -> Result<proto::CommandSendReceipt, Error> {
-        //use nom::HexDisplay;
         let compressed_message = match self.compression {
             None | Some(CompressionType::None) => {
                 message
@@ -471,11 +474,6 @@ impl TopicProducer {
                     let mut encoder = lz4::EncoderBuilder::new().build(v).map_err(ProducerError::Io)?;
                     encoder.write(&message.payload[..]).map_err(ProducerError::Io)?;
                     let (compressed_payload, result) = encoder.finish();
-
-                    /*println!("message compression, from({} bytes):\n{}\nto({} bytes)\n{}",
-                      message.payload.len(), message.payload.to_hex(16),
-                      compressed_payload.len(), compressed_payload.to_hex(16));
-                    */
 
                     result.map_err(ProducerError::Io)?;
                     message.payload = compressed_payload;
@@ -511,7 +509,24 @@ impl TopicProducer {
                 }
             },
             Some(CompressionType::Snappy) => {
-                unimplemented!()
+                #[cfg(not(feature = "snap"))]
+                return unimplemented!();
+
+                #[cfg(feature = "snap")]
+                {
+                    let compressed_payload: Vec<u8> = Vec::new();
+                    let mut encoder = snap::write::FrameEncoder::new(compressed_payload);
+                    encoder.write(&message.payload[..]).map_err(ProducerError::Io)?;
+                    let compressed_payload = encoder.into_inner()
+                        //FIXME
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other,
+                                                         format!("Snappy compression error: {:?}", e)))
+                        .map_err(ProducerError::Io)?;
+
+                    message.payload = compressed_payload;
+                    message.compression = Some(4);
+                    message
+                }
             },
         };
 

@@ -696,7 +696,31 @@ impl<T: DeserializeMessage> Stream for Consumer<T> {
                   payload
               }
           },
-          Some(i) => unimplemented!("unknown compression type: {}", i),
+          //Snappy
+          Some(4) => {
+              #[cfg(not(feature = "snap"))]
+              {
+                  return Poll::Ready(Some(Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
+                                  std::io::ErrorKind::Other,
+                                  "got a Snappy compressed message but 'snap' cargo feature is deactivated"))))));
+              }
+
+              #[cfg(feature = "snap")]
+              {
+                  use std::io::Read;
+
+                  let mut decompressed_payload = Vec::new();
+                  let mut decoder = snap::read::FrameDecoder::new(&payload.data[..]);
+                  decoder.read_to_end(&mut decompressed_payload).map_err(ConsumerError::Io)?;
+
+                  payload.data = decompressed_payload;
+                  payload
+              }
+          },
+          Some(i) => {
+              error!("unknown compression type: {}", i);
+              return Poll::Ready(None);
+          }
         };
 
         match payload.metadata.num_messages_in_batch {
