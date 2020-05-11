@@ -12,7 +12,7 @@ use futures::{
     self,
     channel::{mpsc, oneshot},
     task::{Poll, Context},
-    Future, FutureExt, Sink, SinkExt, Stream, StreamExt,
+    Future, FutureExt, SinkExt, Stream, StreamExt,
 };
 use tokio::net::TcpStream;
 use tokio_util;
@@ -163,75 +163,6 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> 
                 Poll::Ready(Some(Err(e))) => {
                     self.error.set(e);
                     return Poll::Ready(Err(()));
-                }
-            }
-        }
-    }
-}
-
-pub struct Sender<S: Sink<Message, Error = ConnectionError>> {
-    sink: Pin<Box<S>>,
-    outbound: Pin<Box<mpsc::UnboundedReceiver<Message>>>,
-    buffered: Option<Message>,
-    error: SharedError,
-    shutdown: Pin<Box<oneshot::Receiver<()>>>,
-}
-
-impl<S: Sink<Message, Error = ConnectionError>> Sender<S> {
-    pub fn new(
-        sink: S,
-        outbound: mpsc::UnboundedReceiver<Message>,
-        error: SharedError,
-        shutdown: oneshot::Receiver<()>,
-    ) -> Sender<S> {
-        Sender {
-            sink: Box::pin(sink),
-            outbound: Box::pin(outbound),
-            buffered: None,
-            error,
-            shutdown: Box::pin(shutdown),
-        }
-    }
-
-    fn try_start_send(&mut self, cx: &mut Context<'_>, item: Message) -> futures::task::Poll<Result<(), ConnectionError>> {
-        match self.sink.as_mut().poll_ready(cx) {
-            Poll::Pending => {
-                self.buffered = Some(item);
-                Poll::Pending
-            },
-            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-            Poll::Ready(Ok(())) => {
-                Poll::Ready(self.sink.as_mut().start_send(item))
-            }
-        }
-    }
-}
-
-impl<S: Sink<Message, Error = ConnectionError>> Future for Sender<S> {
-    type Output = Result<(), ()>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.shutdown.as_mut().poll(cx) {
-            Poll::Ready(Ok(())) | Poll::Ready(Err(futures::channel::oneshot::Canceled)) => return Poll::Ready(Err(())),
-            Poll::Pending => {}
-        }
-
-        if let Some(item) = self.buffered.take() {
-            try_ready!(self.try_start_send(cx, item).map_err(|e| self.error.set(e)))
-        }
-
-        loop {
-            match self.outbound.as_mut().poll_next(cx) {
-                Poll::Ready(Some(item)) => {
-                    try_ready!(self.try_start_send(cx, item).map_err(|e| self.error.set(e)))
-                }
-                Poll::Ready(None) => {
-                    try_ready!(self.sink.as_mut().poll_close(cx).map_err(|e| self.error.set(e)));
-                    return Poll::Ready(Ok(()));
-                }
-                Poll::Pending => {
-                    try_ready!(self.sink.as_mut().poll_flush(cx).map_err(|e| self.error.set(e)));
-                    return Poll::Pending;
                 }
             }
         }
@@ -498,7 +429,6 @@ impl ConnectionSender {
 pub struct Connection {
     addr: String,
     sender: ConnectionSender,
-    sender_shutdown: Option<oneshot::Sender<()>>,
     receiver_shutdown: Option<oneshot::Sender<()>>,
     executor: TaskExecutor,
 }
@@ -548,12 +478,11 @@ impl Connection {
             None => Err(ConnectionError::Disconnected),
         }?;
 
-        let (sink, stream) = stream.split();
-        let (tx, rx) = mpsc::unbounded();
+        let (mut sink, stream) = stream.split();
+        let (tx, mut rx) = mpsc::unbounded();
         let (registrations_tx, registrations_rx) = mpsc::unbounded();
         let error = SharedError::new();
         let (receiver_shutdown_tx, receiver_shutdown_rx) = oneshot::channel();
-        let (sender_shutdown_tx, sender_shutdown_rx) = oneshot::channel();
         let executor = TaskExecutor::new(executor);
 
         if let Err(_) = executor.spawn(Box::pin(Receiver::new(
@@ -567,8 +496,15 @@ impl Connection {
             return Err(ConnectionError::Shutdown);
         }
 
-        if let Err(_) = executor.spawn(Box::pin(Sender::new(sink, rx, error.clone(), sender_shutdown_rx)
-                                                .map(|_| ()))) {
+        let err = error.clone();
+        if let Err(_) = executor.spawn(Box::pin(async move {
+            while let Some(msg) = rx.next().await {
+                if let Err(e) = sink.send(msg).await {
+                    err.set(e);
+                    break;
+                }
+            }
+        })) {
             error!("the executor could not spawn the Receiver future");
             return Err(ConnectionError::Shutdown);
         }
@@ -578,7 +514,6 @@ impl Connection {
         Ok(Connection {
             addr,
             sender,
-            sender_shutdown: Some(sender_shutdown_tx),
             receiver_shutdown: Some(receiver_shutdown_tx),
             executor,
         })
@@ -608,9 +543,6 @@ impl Connection {
 
 impl Drop for Connection {
     fn drop(&mut self) {
-        if let Some(shutdown) = self.sender_shutdown.take() {
-            let _ = shutdown.send(());
-        }
         if let Some(shutdown) = self.receiver_shutdown.take() {
             let _ = shutdown.send(());
         }

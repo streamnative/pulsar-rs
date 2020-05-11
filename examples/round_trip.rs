@@ -1,7 +1,7 @@
 #[macro_use]
 extern crate serde;
 use log::{Record, Metadata, LevelFilter};
-use pulsar::{Message, Consumer, Pulsar, TokioExecutor,
+use pulsar::{Consumer, Pulsar, TokioExecutor,
   message::Payload, SerializeMessage, DeserializeMessage, Error as PulsarError,
   message::proto::command_subscribe::SubType, producer,
   message::proto};
