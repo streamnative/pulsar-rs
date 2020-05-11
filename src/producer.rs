@@ -347,7 +347,11 @@ impl TopicProducer {
             None | Some(CompressionType::None) => {},
             Some(CompressionType::Lz4) => {
                 #[cfg(not(feature = "lz4"))]
-                return Err(Error::Custom("cannot create a producer with LZ4 compression because the feature is not active".to_string()));
+                return Err(Error::Custom("cannot create a producer with LZ4 compression because the 'lz4' cargo feature is not active".to_string()));
+            },
+            Some(CompressionType::Zlib) => {
+                #[cfg(not(feature = "flate2"))]
+                return Err(Error::Custom("cannot create a producer with zlib compression because the 'flate2' cargo feature is not active".to_string()));
             },
             Some(_) => unimplemented!(),
         };
@@ -476,7 +480,19 @@ impl TopicProducer {
                 }
             },
             Some(CompressionType::Zlib) => {
-                unimplemented!()
+                #[cfg(not(feature = "flate2"))]
+                return unimplemented!();
+
+                #[cfg(feature = "flate2")]
+                {
+                    let mut e = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+                    e.write_all(&message.payload[..]).map_err(ProducerError::Io)?;
+                    let compressed_payload = e.finish().map_err(ProducerError::Io)?;
+
+                    message.payload = compressed_payload;
+                    message.compression = Some(2);
+                    message
+                }
             },
             Some(CompressionType::Zstd) => {
                 unimplemented!()

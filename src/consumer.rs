@@ -642,7 +642,7 @@ impl<T: DeserializeMessage> Stream for Consumer<T> {
               {
                   return Poll::Ready(Some(Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
                                   std::io::ErrorKind::Other,
-                                  "got a LZ4 compressed message but LZ4 support is deactivated"))))));
+                                  "got a LZ4 compressed message but 'lz4' cargo feature is deactivated"))))));
               }
 
               #[cfg(feature = "lz4")]
@@ -652,6 +652,28 @@ impl<T: DeserializeMessage> Stream for Consumer<T> {
                   let mut decompressed_payload = Vec::new();
                   let mut decoder = lz4::Decoder::new(&payload.data[..]).map_err(ConsumerError::Io)?;
                   decoder.read_to_end(&mut decompressed_payload).map_err(ConsumerError::Io)?;
+
+                  payload.data = decompressed_payload;
+                  payload
+              }
+          },
+          // zlib
+          Some(2) => {
+              #[cfg(not(feature = "flate2"))]
+              {
+                  return Poll::Ready(Some(Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
+                                  std::io::ErrorKind::Other,
+                                  "got a zlib compressed message but 'flate2' cargo feature is deactivated"))))));
+              }
+
+              #[cfg(feature = "flate2")]
+              {
+                  use std::io::Read;
+                  use flate2::read::ZlibDecoder;
+
+                  let mut d = ZlibDecoder::new(&payload.data[..]);
+                  let mut decompressed_payload = Vec::new();
+                  d.read_to_end(&mut decompressed_payload).map_err(ConsumerError::Io)?;
 
                   payload.data = decompressed_payload;
                   payload
