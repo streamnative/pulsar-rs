@@ -623,26 +623,46 @@ impl<T: DeserializeMessage> Stream for Consumer<T> {
             self.remaining_messages -= 1;
         }
 
-        match message {
-            Some(Some((message, payload))) => match payload.metadata.num_messages_in_batch {
-                Some(_) => {
-                    self.current_message =
-                        Some(BatchedMessageIterator::new(message.message_id, payload)?);
-                    if let Poll::Ready(message) = self.poll_current_message() {
-                        Poll::Ready(Some(Ok(message)))
-                    } else {
-                        Poll::Pending
-                    }
-                }
-                None => Poll::Ready(Some(
-                   Ok(self.create_message(message.message_id, payload)),
-                )),
-            },
-            Some(None) => Poll::Ready(Some(Err(Error::Consumer(ConsumerError::MissingPayload(format!(
+        let (message, mut payload) = match message {
+            Some(Some((message, payload))) => (message, payload),
+            Some(None) => return Poll::Ready(Some(Err(Error::Consumer(ConsumerError::MissingPayload(format!(
                 "Missing payload for message {:?}",
                 message
             )))))),
-            None => Poll::Ready(None),
+            None => return Poll::Ready(None),
+        };
+
+        let compression = payload.metadata.compression;
+
+        let payload = match compression {
+          None | Some(0) => payload,
+          // LZ4
+          Some(1) => {
+              use std::io::Read;
+
+              let mut decompressed_payload = Vec::new();
+              let mut decoder = lz4::Decoder::new(&payload.data[..]).map_err(ConsumerError::Io)?;
+              decoder.read_to_end(&mut decompressed_payload).map_err(ConsumerError::Io)?;
+
+              payload.data = decompressed_payload;
+              payload
+          },
+          Some(i) => unimplemented!("unknown compression type: {}", i),
+        };
+
+        match payload.metadata.num_messages_in_batch {
+            Some(_) => {
+                self.current_message =
+                    Some(BatchedMessageIterator::new(message.message_id, payload)?);
+                if let Poll::Ready(message) = self.poll_current_message() {
+                    Poll::Ready(Some(Ok(message)))
+                } else {
+                    Poll::Pending
+                }
+            }
+            None => Poll::Ready(Some(
+                    Ok(self.create_message(message.message_id, payload)),
+                    )),
         }
     }
 }
