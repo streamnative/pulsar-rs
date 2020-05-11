@@ -171,8 +171,7 @@ impl<T: DeserializeMessage> Consumer<T> {
             .sender()
             .send_ack(
                 self.id,
-                msg.ack.message_ids.get(&self.id).unwrap()
-                .iter().map(|m| m.id.clone()).collect(),
+                vec![msg.message_id.id.clone()],
                 false)
     }
 
@@ -182,18 +181,15 @@ impl<T: DeserializeMessage> Consumer<T> {
             .sender()
             .send_ack(
                 self.id,
-                msg.ack.message_ids.get(&self.id).unwrap()
-                .iter().map(|m| m.id.clone()).collect(),
+                vec![msg.message_id.id.clone()],
                 true)
     }
 
     pub fn nack(&self, msg: &Message<T::Output>) {
-        for (consumer_id, message_ids) in msg.ack.message_ids.iter() {
-            let _ = self.nack_handler.unbounded_send(NackMessage {
-                consumer_id: *consumer_id,
-                message_ids: message_ids.to_vec(),
-            });
-        }
+        let _ = self.nack_handler.unbounded_send(NackMessage {
+            consumer_id: self.id,
+            message_ids: vec![msg.message_id.clone()],
+        });
     }
 
     fn create_message(
@@ -203,14 +199,10 @@ impl<T: DeserializeMessage> Consumer<T> {
     ) -> Message<T::Output> {
         Message {
             topic: self.topic.clone(),
-            ack: Ack::new(
-                self.id,
-                MessageData {
-                    id: message_id,
-                    batch_size: payload.metadata.num_messages_in_batch.clone(),
-                },
-                self.nack_handler.clone(),
-            ),
+            message_id: MessageData {
+                id: message_id,
+                batch_size: payload.metadata.num_messages_in_batch.clone(),
+            },
             payload: T::deserialize_message(payload),
         }
     }
@@ -231,48 +223,10 @@ impl<T: DeserializeMessage> Consumer<T> {
     }
 }
 
+#[derive(Clone)]
 struct MessageData {
     id: proto::MessageIdData,
     batch_size: Option<i32>,
-}
-
-pub struct Ack {
-    message_ids: BTreeMap<u64, Vec<MessageData>>,
-    sender: UnboundedSender<NackMessage>,
-}
-
-impl Ack {
-    fn new(consumer_id: u64, msg: MessageData, sender: UnboundedSender<NackMessage>) -> Ack {
-        let mut message_ids = BTreeMap::new();
-        message_ids.insert(consumer_id, vec![msg]);
-        Ack {
-            message_ids,
-            sender,
-        }
-    }
-
-    fn take_message_ids(&mut self) -> BTreeMap<u64, Vec<MessageData>> {
-        let mut message_ids = BTreeMap::new();
-        std::mem::swap(&mut message_ids, &mut self.message_ids);
-        message_ids
-    }
-
-    fn send_nack(&mut self) {
-        for (consumer_id, message_ids) in self.take_message_ids() {
-            let _ = self.sender.unbounded_send(NackMessage {
-                consumer_id,
-                message_ids,
-            });
-        }
-    }
-}
-
-impl Drop for Ack {
-    fn drop(&mut self) {
-        if !self.message_ids.is_empty() {
-            self.send_nack();
-        }
-    }
 }
 
 struct NackMessage {
@@ -1051,7 +1005,7 @@ impl<T: DeserializeMessage> MultiTopicConsumer<T> {
 pub struct Message<T> {
     pub topic: String,
     pub payload: T,
-    ack: Ack,
+    message_id: MessageData,
 }
 
 impl<T: DeserializeMessage> Debug for MultiTopicConsumer<T> {
@@ -1338,33 +1292,21 @@ mod tests {
             }
 
             {
+                println!("creating consumer");
+                let mut consumer: Consumer<TestData> = client
+                    .consumer()
+                    .with_topic(topic)
+                    .with_subscription("dropped_ack")
+                    .with_subscription_type(SubType::Shared)
+                    .build().await.unwrap();
 
-                // the consumer should not be valid outside of that block
-                let v = {
-                    println!("creating consumer");
-                    let mut consumer: Consumer<TestData> = client
-                        .consumer()
-                        .with_topic(topic)
-                        .with_subscription("dropped_ack")
-                        .with_subscription_type(SubType::Shared)
-                        .build().await.unwrap();
+                println!("created consumer");
 
-                    println!("created consumer");
-
-                    //consumer.next().await
-                    let msg = consumer.next().await.unwrap().unwrap();
-                    println!("got message: {:?}", msg.payload);
-                    assert_eq!(&message, msg.payload.as_ref().unwrap(), "we pobably receive a message from a previous run of the test");
-                    consumer.ack(&msg);
-                };
-
-                /*
-                let msg = v.unwrap().unwrap();
+                //consumer.next().await
+                let msg = consumer.next().await.unwrap().unwrap();
                 println!("got message: {:?}", msg.payload);
-                assert_eq!(message, msg.payload.unwrap(), "we pobably receive a message from a previous run of the test");
-                msg.ack.ack();
-                println!("acked");
-                */
+                assert_eq!(&message, msg.payload.as_ref().unwrap(), "we pobably receive a message from a previous run of the test");
+                consumer.ack(&msg);
             }
 
             {

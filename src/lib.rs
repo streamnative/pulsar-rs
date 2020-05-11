@@ -14,7 +14,7 @@ pub use client::{DeserializeMessage, Pulsar, SerializeMessage};
 pub use connection::{Authentication, Connection};
 pub use connection_manager::ConnectionManager;
 pub use consumer::{
-    Ack, Consumer, ConsumerBuilder, ConsumerOptions, ConsumerState, Message, MultiTopicConsumer,
+    Consumer, ConsumerBuilder, ConsumerOptions, ConsumerState, Message, MultiTopicConsumer,
 };
 pub use error::{ConnectionError, ConsumerError, Error, ProducerError, ServiceDiscoveryError};
 pub use executor::{Executor, TaskExecutor, TokioExecutor};
