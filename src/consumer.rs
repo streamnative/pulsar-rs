@@ -679,6 +679,23 @@ impl<T: DeserializeMessage> Stream for Consumer<T> {
                   payload
               }
           },
+          // zstd
+          Some(3) => {
+              #[cfg(not(feature = "zstd"))]
+              {
+                  return Poll::Ready(Some(Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
+                                  std::io::ErrorKind::Other,
+                                  "got a zstd compressed message but 'zstd' cargo feature is deactivated"))))));
+              }
+
+              #[cfg(feature = "zstd")]
+              {
+                  let decompressed_payload = zstd::decode_all(&payload.data[..]).map_err(ConsumerError::Io)?;
+
+                  payload.data = decompressed_payload;
+                  payload
+              }
+          },
           Some(i) => unimplemented!("unknown compression type: {}", i),
         };
 

@@ -353,6 +353,10 @@ impl TopicProducer {
                 #[cfg(not(feature = "flate2"))]
                 return Err(Error::Custom("cannot create a producer with zlib compression because the 'flate2' cargo feature is not active".to_string()));
             },
+            Some(CompressionType::Zstd) => {
+                #[cfg(not(feature = "zstd"))]
+                return Err(Error::Custom("cannot create a producer with zstd compression because the 'zstd' cargo feature is not active".to_string()));
+            },
             Some(_) => unimplemented!(),
         };
 
@@ -495,7 +499,16 @@ impl TopicProducer {
                 }
             },
             Some(CompressionType::Zstd) => {
-                unimplemented!()
+                #[cfg(not(feature = "zstd"))]
+                return unimplemented!();
+
+                #[cfg(feature = "zstd")]
+                {
+                    let compressed_payload = zstd::encode_all(&message.payload[..], 0).map_err(ProducerError::Io)?;
+                    message.compression = Some(3);
+                    message.payload = compressed_payload;
+                    message
+                }
             },
             Some(CompressionType::Snappy) => {
                 unimplemented!()
