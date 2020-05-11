@@ -126,8 +126,10 @@ impl<T: DeserializeMessage> Consumer<T> {
         // drop_receiver will return, and we can close the consumer
         let (_drop_signal, drop_receiver) = oneshot::channel::<()>();
         let conn = connection.clone();
+        let ack_sender = ack_handler.clone();
         let _ = connection.executor().spawn(Box::pin(async move {
             let _res = drop_receiver.await;
+            ack_sender.close_channel();
             if let Err(e) = conn.sender().close_consumer(consumer_id).await {
               error!("could not close consumer {:?}({}): {:?}", consumer_name, consumer_id, e);
             }
