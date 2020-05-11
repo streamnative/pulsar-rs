@@ -342,6 +342,16 @@ impl TopicProducer {
         let topic = topic.clone();
         let batch_size = options.batch_size.clone();
         let compression = options.compression.clone();
+
+        match compression {
+            None | Some(CompressionType::None) => {},
+            Some(CompressionType::Lz4) => {
+                #[cfg(not(feature = "lz4"))]
+                return Err(Error::Custom("cannot create a producer with LZ4 compression because the feature is not active".to_string()));
+            },
+            Some(_) => unimplemented!(),
+        };
+
         let success = sender
             .create_producer(topic.clone(), producer_id, name, options).await?;
         Ok(TopicProducer {
@@ -444,20 +454,26 @@ impl TopicProducer {
                 message
             },
             Some(CompressionType::Lz4) => {
-                let v: Vec<u8> = Vec::new();
-                let mut encoder = lz4::EncoderBuilder::new().build(v).map_err(ProducerError::Io)?;
-                encoder.write(&message.payload[..]).map_err(ProducerError::Io)?;
-                let (compressed_payload, result) = encoder.finish();
+                #[cfg(not(feature = "lz4"))]
+                return unimplemented!();
 
-                /*println!("message compression, from({} bytes):\n{}\nto({} bytes)\n{}",
-                  message.payload.len(), message.payload.to_hex(16),
-                  compressed_payload.len(), compressed_payload.to_hex(16));
-                */
+                #[cfg(feature = "lz4")]
+                {
+                    let v: Vec<u8> = Vec::new();
+                    let mut encoder = lz4::EncoderBuilder::new().build(v).map_err(ProducerError::Io)?;
+                    encoder.write(&message.payload[..]).map_err(ProducerError::Io)?;
+                    let (compressed_payload, result) = encoder.finish();
 
-                result.map_err(ProducerError::Io)?;
-                message.payload = compressed_payload;
-                message.compression = Some(1);
-                message
+                    /*println!("message compression, from({} bytes):\n{}\nto({} bytes)\n{}",
+                      message.payload.len(), message.payload.to_hex(16),
+                      compressed_payload.len(), compressed_payload.to_hex(16));
+                    */
+
+                    result.map_err(ProducerError::Io)?;
+                    message.payload = compressed_payload;
+                    message.compression = Some(1);
+                    message
+                }
             },
             Some(CompressionType::Zlib) => {
                 unimplemented!()

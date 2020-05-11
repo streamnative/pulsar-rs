@@ -638,14 +638,24 @@ impl<T: DeserializeMessage> Stream for Consumer<T> {
           None | Some(0) => payload,
           // LZ4
           Some(1) => {
-              use std::io::Read;
+              #[cfg(not(feature = "lz4"))]
+              {
+                  return Poll::Ready(Some(Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
+                                  std::io::ErrorKind::Other,
+                                  "got a LZ4 compressed message but LZ4 support is deactivated"))))));
+              }
 
-              let mut decompressed_payload = Vec::new();
-              let mut decoder = lz4::Decoder::new(&payload.data[..]).map_err(ConsumerError::Io)?;
-              decoder.read_to_end(&mut decompressed_payload).map_err(ConsumerError::Io)?;
+              #[cfg(feature = "lz4")]
+              {
+                  use std::io::Read;
 
-              payload.data = decompressed_payload;
-              payload
+                  let mut decompressed_payload = Vec::new();
+                  let mut decoder = lz4::Decoder::new(&payload.data[..]).map_err(ConsumerError::Io)?;
+                  decoder.read_to_end(&mut decompressed_payload).map_err(ConsumerError::Io)?;
+
+                  payload.data = decompressed_payload;
+                  payload
+              }
           },
           Some(i) => unimplemented!("unknown compression type: {}", i),
         };
