@@ -173,7 +173,7 @@ mod tests {
                 ).await.unwrap();
             }
 
-            let consumer: Consumer<TestData> = pulsar
+            let mut consumer: Consumer<TestData> = pulsar
                 .consumer()
                 .with_topic("test")
                 .with_consumer_name("test_consumer")
@@ -183,15 +183,23 @@ mod tests {
                 .await
                 .unwrap();
 
-            let mut stream = consumer.take(5000);
-            while let Some(res) = stream.next().await {
-                    let Message { payload, ack, .. } = res.unwrap();
-                    ack.ack();
-                    let data = payload.unwrap();
-                    if data.data.as_str() != "data" {
-                        panic!("Unexpected payload: {}", &data.data);
-                    }
+            //let mut stream = consumer.take(5000);
+            let mut count = 0usize;
+            while let Some(res) = consumer.next().await {
+                let msg = res.unwrap();
+                consumer.ack(&msg);
+                let Message { payload, .. } = msg;
+                let data = payload.unwrap();
+                if data.data.as_str() != "data" {
+                    panic!("Unexpected payload: {}", &data.data);
                 }
+
+                count +=1;
+
+                if count == 5000 {
+                    break;
+                }
+            }
             // FIXME .timeout(Duration::from_secs(5))
         };
 
@@ -216,7 +224,7 @@ mod tests {
                 let topic = "test_unsized_data_str";
                 let send_data = "some unsized data";
 
-                let consumer = pulsar
+                let mut consumer = pulsar
                     .consumer()
                     .with_topic(topic)
                     .with_subscription_type(SubType::Exclusive)
@@ -227,16 +235,13 @@ mod tests {
 
                 producer.send(topic, send_data.to_string()).await.unwrap();
 
-                let mut stream = consumer.take(1);
-                while let Some(res) = stream.next().await {
+                let msg = consumer.next().await.unwrap().unwrap();
+                consumer.ack(&msg);
+                let Message { payload, .. } = msg;
 
-                    let Message { payload, ack, .. } = res.unwrap();
-
-                    ack.ack();
-                    let data = payload.unwrap();
-                    if data.as_str() != send_data {
-                        panic!("Unexpected payload in &str test: {}", &data);
-                    }
+                let data = payload.unwrap();
+                if data.as_str() != send_data {
+                    panic!("Unexpected payload in &str test: {}", &data);
                 }
                 //FIXME .timeout(Duration::from_secs(1))
             }
@@ -246,7 +251,7 @@ mod tests {
                 let topic = "test_unsized_data_bytes";
                 let send_data: &[u8] = &[0, 1, 2, 3];
 
-                let consumer = pulsar
+                let mut consumer = pulsar
                     .consumer()
                     .with_topic(topic)
                     .with_subscription_type(SubType::Exclusive)
@@ -258,17 +263,13 @@ mod tests {
                 let message = producer::Message { payload: send_data.to_vec(), ..Default::default() };
                 producer.send_message(topic, message).await.unwrap();
 
-
-                let mut stream = consumer.take(1);
-                while let Some(res) = stream.next().await {
-                        let Message { payload, ack, .. } = res.unwrap();
-                        ack.ack();
-                        let data = payload;
-                        if data.as_slice() != send_data {
-                            panic!("Unexpected payload in &[u8] test: {:?}", &data);
-                        }
-                    }
-                //FIXME .timeout(Duration::from_secs(1))
+                let msg = consumer.next().await.unwrap().unwrap();
+                consumer.ack(&msg);
+                let Message { payload, .. } = msg;
+                let data = payload;
+                if data.as_slice() != send_data {
+                    panic!("Unexpected payload in &[u8] test: {:?}", &data);
+                }
             }
         };
 
@@ -301,7 +302,7 @@ mod tests {
                 .take(7)
                 .collect();
 
-            let consumer: Consumer<TestData> = pulsar
+            let mut consumer: Consumer<TestData> = pulsar
                 .consumer()
                 .with_topic(&topic)
                 .with_consumer_name("test_consumer")
@@ -322,19 +323,22 @@ mod tests {
                     ).await.unwrap();
             }
 
-            let mut stream = consumer
-                .take(message_count as usize * 2)
-                .map_err(|e| Error::from(e));
-            while let Some(res) = stream.next().await {
+            let mut count = 0usize;
+            while let Some(res) = consumer.next().await {
 
-                let Message { payload, ack, .. } = res.unwrap();
-                let data = payload.unwrap();
+                let message = res.unwrap();
+                let data = message.payload.as_ref().unwrap().clone();
                 tx.send(data.data.clone()).unwrap();
                 if !seen.contains(&data.data) {
-                    seen.insert(data.data);
+                    seen.insert(data.data.clone());
                 } else {
                     //ack the second time around
-                    ack.ack();
+                    consumer.ack(&message);
+                }
+
+                count += 1;
+                if count == message_count as usize * 2 {
+                    break;
                 }
             }
                 //FIXME .timeout(Duration::from_secs(15))
