@@ -1380,6 +1380,7 @@ mod tests {
     #[test]
     #[ignore]
     fn consumer_dropped_with_lingering_acks() {
+        use rand::{Rng, distributions::Alphanumeric};
         let _ = log::set_logger(&TEST_LOGGER);
         let _ = log::set_max_level(LevelFilter::Trace);
         let addr = "127.0.0.1:6650";
@@ -1391,18 +1392,22 @@ mod tests {
             let executor = TokioExecutor(tokio::runtime::Handle::current());
             let client: Pulsar = Pulsar::new(addr, None, executor).await.unwrap();
 
+            let message = TestData {
+                topic: std::iter::repeat(()).map(|()| rand::thread_rng().sample(Alphanumeric))
+                    .take(8).collect(),
+                msg: 1,
+            };
+
             {
                 let producer = client.producer(None);
 
-                let data1 = TestData {
-                    topic: "a".to_owned(),
-                    msg: 1,
-                };
-                producer.send(topic, data1).await.unwrap();
+                producer.send(topic, message.clone()).await.unwrap();
                 println!("producer sends done");
             }
 
             {
+
+                // the consumer should not be valid outside of that block
                 let v = {
                     println!("creating consumer");
                     let mut consumer: Consumer<TestData> = client
@@ -1420,6 +1425,7 @@ mod tests {
 
                 let msg = v.unwrap().unwrap();
                 println!("got message: {:?}", msg.payload);
+                assert_eq!(message, msg.payload.unwrap(), "we pobably receive a message from a previous run of the test");
                 msg.ack.ack();
                 println!("acked");
             }
@@ -1437,7 +1443,17 @@ mod tests {
 
                 // the message has already been acked, so we should not receive anything
                 let res: Result<_, tokio::time::Elapsed> = tokio::time::timeout(Duration::from_secs(1), consumer.next()).await;
-                assert!(res.is_err());
+                let is_err = res.is_err();
+                if let Ok(val) = res {
+                    let msg = val.unwrap().unwrap();
+                    println!("got message: {:?}", msg.payload);
+                    // cleanup for the next test
+                    msg.ack.ack();
+                    // we should not receive a different message anyway
+                    assert_eq!(&message, msg.payload.as_ref().unwrap());
+                }
+
+                assert!(is_err, "waiting for a message should have timed out, since we already acknowledged the only message in the queue");
             }
         };
 
