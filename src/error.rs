@@ -113,6 +113,7 @@ impl std::error::Error for ConnectionError {
 pub enum ConsumerError {
     Connection(ConnectionError),
     MissingPayload(String),
+    Io(io::Error),
 }
 
 impl From<ConnectionError> for ConsumerError {
@@ -121,11 +122,18 @@ impl From<ConnectionError> for ConsumerError {
     }
 }
 
+impl From<io::Error> for ConsumerError {
+    fn from(err: io::Error) -> Self {
+        ConsumerError::Io(err)
+    }
+}
+
 impl fmt::Display for ConsumerError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             ConsumerError::Connection(e) => write!(f, "Connection error: {}", e),
             ConsumerError::MissingPayload(s) => write!(f, "Missing payload: {}", s),
+            ConsumerError::Io(s) => write!(f, "Decompression error: {}", s),
         }
     }
 }
@@ -143,6 +151,7 @@ impl std::error::Error for ConsumerError {
 pub enum ProducerError {
     Connection(ConnectionError),
     Custom(String),
+    Io(io::Error),
 }
 
 impl From<ConnectionError> for ProducerError {
@@ -151,10 +160,17 @@ impl From<ConnectionError> for ProducerError {
     }
 }
 
+impl From<io::Error> for ProducerError {
+    fn from(err: io::Error) -> Self {
+        ProducerError::Io(err)
+    }
+}
+
 impl fmt::Display for ProducerError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             ProducerError::Connection(e) => write!(f, "Connection error: {}", e),
+            ProducerError::Io(e) => write!(f, "Compression error: {}", e),
             ProducerError::Custom(s) => write!(f, "Custom error: {}", s),
         }
     }
@@ -164,6 +180,7 @@ impl std::error::Error for ProducerError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             ProducerError::Connection(e) => Some(e),
+            ProducerError::Io(e) => Some(e),
             ProducerError::Custom(_) => None,
         }
     }

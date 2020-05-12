@@ -997,6 +997,8 @@ pub mod proto {
         None = 0,
         Lz4 = 1,
         Zlib = 2,
+        Zstd = 3,
+        Snappy = 4,
     }
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Enumeration)]
     pub enum ServerError {

@@ -623,26 +623,119 @@ impl<T: DeserializeMessage> Stream for Consumer<T> {
             self.remaining_messages -= 1;
         }
 
-        match message {
-            Some(Some((message, payload))) => match payload.metadata.num_messages_in_batch {
-                Some(_) => {
-                    self.current_message =
-                        Some(BatchedMessageIterator::new(message.message_id, payload)?);
-                    if let Poll::Ready(message) = self.poll_current_message() {
-                        Poll::Ready(Some(Ok(message)))
-                    } else {
-                        Poll::Pending
-                    }
-                }
-                None => Poll::Ready(Some(
-                   Ok(self.create_message(message.message_id, payload)),
-                )),
-            },
-            Some(None) => Poll::Ready(Some(Err(Error::Consumer(ConsumerError::MissingPayload(format!(
+        let (message, mut payload) = match message {
+            Some(Some((message, payload))) => (message, payload),
+            Some(None) => return Poll::Ready(Some(Err(Error::Consumer(ConsumerError::MissingPayload(format!(
                 "Missing payload for message {:?}",
                 message
             )))))),
-            None => Poll::Ready(None),
+            None => return Poll::Ready(None),
+        };
+
+        let compression = payload.metadata.compression;
+
+        let payload = match compression {
+          None | Some(0) => payload,
+          // LZ4
+          Some(1) => {
+              #[cfg(not(feature = "lz4"))]
+              {
+                  return Poll::Ready(Some(Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
+                                  std::io::ErrorKind::Other,
+                                  "got a LZ4 compressed message but 'lz4' cargo feature is deactivated"))))));
+              }
+
+              #[cfg(feature = "lz4")]
+              {
+                  use std::io::Read;
+
+                  let mut decompressed_payload = Vec::new();
+                  let mut decoder = lz4::Decoder::new(&payload.data[..]).map_err(ConsumerError::Io)?;
+                  decoder.read_to_end(&mut decompressed_payload).map_err(ConsumerError::Io)?;
+
+                  payload.data = decompressed_payload;
+                  payload
+              }
+          },
+          // zlib
+          Some(2) => {
+              #[cfg(not(feature = "flate2"))]
+              {
+                  return Poll::Ready(Some(Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
+                                  std::io::ErrorKind::Other,
+                                  "got a zlib compressed message but 'flate2' cargo feature is deactivated"))))));
+              }
+
+              #[cfg(feature = "flate2")]
+              {
+                  use std::io::Read;
+                  use flate2::read::ZlibDecoder;
+
+                  let mut d = ZlibDecoder::new(&payload.data[..]);
+                  let mut decompressed_payload = Vec::new();
+                  d.read_to_end(&mut decompressed_payload).map_err(ConsumerError::Io)?;
+
+                  payload.data = decompressed_payload;
+                  payload
+              }
+          },
+          // zstd
+          Some(3) => {
+              #[cfg(not(feature = "zstd"))]
+              {
+                  return Poll::Ready(Some(Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
+                                  std::io::ErrorKind::Other,
+                                  "got a zstd compressed message but 'zstd' cargo feature is deactivated"))))));
+              }
+
+              #[cfg(feature = "zstd")]
+              {
+                  let decompressed_payload = zstd::decode_all(&payload.data[..]).map_err(ConsumerError::Io)?;
+
+                  payload.data = decompressed_payload;
+                  payload
+              }
+          },
+          //Snappy
+          Some(4) => {
+              #[cfg(not(feature = "snap"))]
+              {
+                  return Poll::Ready(Some(Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
+                                  std::io::ErrorKind::Other,
+                                  "got a Snappy compressed message but 'snap' cargo feature is deactivated"))))));
+              }
+
+              #[cfg(feature = "snap")]
+              {
+                  use std::io::Read;
+
+                  let mut decompressed_payload = Vec::new();
+                  let mut decoder = snap::read::FrameDecoder::new(&payload.data[..]);
+                  decoder.read_to_end(&mut decompressed_payload).map_err(ConsumerError::Io)?;
+
+                  payload.data = decompressed_payload;
+                  payload
+              }
+          },
+          Some(i) => {
+              error!("unknown compression type: {}", i);
+              return Poll::Ready(None);
+          }
+        };
+
+        match payload.metadata.num_messages_in_batch {
+            Some(_) => {
+                self.current_message =
+                    Some(BatchedMessageIterator::new(message.message_id, payload)?);
+                if let Poll::Ready(message) = self.poll_current_message() {
+                    Poll::Ready(Some(Ok(message)))
+                } else {
+                    Poll::Pending
+                }
+            }
+            None => Poll::Ready(Some(
+                    Ok(self.create_message(message.message_id, payload)),
+                    )),
         }
     }
 }
