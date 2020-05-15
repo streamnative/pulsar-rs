@@ -23,14 +23,6 @@ pub use message::proto::command_subscribe::SubType;
 pub use producer::{Producer, ProducerOptions, TopicProducer};
 pub use service_discovery::ServiceDiscovery;
 
-macro_rules! try_ready {
-    ($e:expr) => (match $e {
-        $crate::futures::task::Poll::Ready(Ok(t)) => t,
-        $crate::futures::task::Poll::Pending => return $crate::futures::task::Poll::Pending,
-        $crate::futures::task::Poll::Ready(Err(e)) => return $crate::futures::task::Poll::Ready(Err(From::from(e))),
-    })
-}
-
 mod client;
 mod connection;
 mod connection_manager;
