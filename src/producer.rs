@@ -301,6 +301,7 @@ pub struct TopicProducer {
     // while we might be pushing more messages from elsewhere
     batch: Option<Mutex<Batch>>,
     compression: Option<proto::CompressionType>,
+    _drop_signal: oneshot::Sender<()>,
 }
 
 impl TopicProducer {
@@ -366,6 +367,16 @@ impl TopicProducer {
 
         let success = sender
             .create_producer(topic.clone(), producer_id, name, options).await?;
+
+        // drop_signal will be dropped when the TopicProducer is dropped, then
+        // drop_receiver will return, and we can close the producer
+        let (_drop_signal, drop_receiver) = oneshot::channel::<()>();
+        let conn = connection.clone();
+        let _ = connection.executor().spawn(Box::pin(async move {
+            let _res = drop_receiver.await;
+             let _ = conn.sender().close_producer(producer_id).await;
+        }));
+
         Ok(TopicProducer {
             connection,
             id: producer_id,
@@ -374,6 +385,7 @@ impl TopicProducer {
             message_id: sequence_ids,
             batch: batch_size.map(Batch::new).map(Mutex::new),
             compression,
+            _drop_signal,
         })
     }
 
@@ -539,12 +551,6 @@ impl TopicProducer {
                 compressed_message,
                 ).await
             .map_err(|e| ProducerError::Connection(e).into())
-    }
-}
-
-impl Drop for TopicProducer {
-    fn drop(&mut self) {
-        let _ = self.connection.sender().close_producer(self.id);
     }
 }
 

@@ -73,10 +73,9 @@ fn main() {
         let mut counter = 0usize;
         loop {
             producer.send(
-                &TestData {
+                TestData {
                     data: "data".to_string(),
                 },
-                None
                 ).await.unwrap();
             counter += 1;
             if counter %1000 == 0 {
@@ -103,9 +102,13 @@ fn main() {
 
         let mut counter = 0usize;
         while let Some(res) = consumer.next().await {
-            let Message { payload, ack, .. } = res.unwrap();
+            let msg = res.unwrap();
+            consumer.ack(&msg);
+            let data = msg.payload.unwrap();
+            /*let Message { payload, ack, .. } = res.unwrap();
             ack.ack();
             let data = payload.unwrap();
+            */
             if data.data.as_str() != "data" {
                 panic!("Unexpected payload: {}", &data.data);
             }

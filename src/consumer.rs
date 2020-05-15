@@ -42,7 +42,7 @@ pub struct Consumer<T: DeserializeMessage> {
     topic: String,
     id: u64,
     messages: Pin<Box<mpsc::UnboundedReceiver<RawMessage>>>,
-    ack_handler: UnboundedSender<AckMessage>,
+    nack_handler: UnboundedSender<NackMessage>,
     batch_size: u32,
     remaining_messages: u32,
     #[allow(unused)]
@@ -115,7 +115,7 @@ impl<T: DeserializeMessage> Consumer<T> {
         //TODO this should be shared among all consumers when using the client
         //TODO make tick_delay configurable
         let tick_delay = Duration::from_millis(500);
-        let ack_handler = AckHandler::new(
+        let nack_handler = NackHandler::new(
             connection.clone(),
             unacked_message_redelivery_delay,
             tick_delay,
@@ -126,8 +126,10 @@ impl<T: DeserializeMessage> Consumer<T> {
         // drop_receiver will return, and we can close the consumer
         let (_drop_signal, drop_receiver) = oneshot::channel::<()>();
         let conn = connection.clone();
+        let ack_sender = nack_handler.clone();
         let _ = connection.executor().spawn(Box::pin(async move {
             let _res = drop_receiver.await;
+            ack_sender.close_channel();
             if let Err(e) = conn.sender().close_consumer(consumer_id).await {
               error!("could not close consumer {:?}({}): {:?}", consumer_name, consumer_id, e);
             }
@@ -138,7 +140,7 @@ impl<T: DeserializeMessage> Consumer<T> {
             topic,
             id: consumer_id,
             messages: Box::pin(messages),
-            ack_handler,
+            nack_handler,
             batch_size,
             remaining_messages: batch_size,
             data_type: PhantomData,
@@ -163,6 +165,33 @@ impl<T: DeserializeMessage> Consumer<T> {
         Ok(())
     }
 
+    pub fn ack(&self, msg: &Message<T::Output>) -> Result<(), ConnectionError> {
+        self
+            .connection
+            .sender()
+            .send_ack(
+                self.id,
+                vec![msg.message_id.id.clone()],
+                false)
+    }
+
+    pub fn cumulative_ack(&self, msg: &Message<T::Output>) -> Result<(), ConnectionError> {
+        self
+            .connection
+            .sender()
+            .send_ack(
+                self.id,
+                vec![msg.message_id.id.clone()],
+                true)
+    }
+
+    pub fn nack(&self, msg: &Message<T::Output>) {
+        let _ = self.nack_handler.unbounded_send(NackMessage {
+            consumer_id: self.id,
+            message_ids: vec![msg.message_id.clone()],
+        });
+    }
+
     fn create_message(
         &self,
         message_id: proto::MessageIdData,
@@ -170,14 +199,10 @@ impl<T: DeserializeMessage> Consumer<T> {
     ) -> Message<T::Output> {
         Message {
             topic: self.topic.clone(),
-            ack: Ack::new(
-                self.id,
-                MessageData {
-                    id: message_id,
-                    batch_size: payload.metadata.num_messages_in_batch.clone(),
-                },
-                self.ack_handler.clone(),
-            ),
+            message_id: MessageData {
+                id: message_id,
+                batch_size: payload.metadata.num_messages_in_batch.clone(),
+            },
             payload: T::deserialize_message(payload),
         }
     }
@@ -198,109 +223,15 @@ impl<T: DeserializeMessage> Consumer<T> {
     }
 }
 
+#[derive(Clone)]
 struct MessageData {
     id: proto::MessageIdData,
     batch_size: Option<i32>,
 }
 
-pub struct Ack {
-    message_ids: BTreeMap<u64, Vec<MessageData>>,
-    sender: UnboundedSender<AckMessage>,
-}
-
-impl Ack {
-    fn new(consumer_id: u64, msg: MessageData, sender: UnboundedSender<AckMessage>) -> Ack {
-        let mut message_ids = BTreeMap::new();
-        message_ids.insert(consumer_id, vec![msg]);
-        Ack {
-            message_ids,
-            sender,
-        }
-    }
-
-    pub fn join(mut self, mut other: Ack) -> Self {
-        for (consumer_id, message_ids) in other.take_message_ids() {
-            self.message_ids
-                .entry(consumer_id)
-                .or_insert_with(Vec::new)
-                .extend(message_ids);
-        }
-        self
-    }
-
-    pub fn extend<I: IntoIterator<Item = Ack>>(mut self, others: I) -> Self {
-        others
-            .into_iter()
-            .flat_map(|mut o| o.take_message_ids())
-            .for_each(|(consumer_id, message_ids)| {
-                self.message_ids
-                    .entry(consumer_id)
-                    .or_insert_with(Vec::new)
-                    .extend(message_ids);
-            });
-        self
-    }
-
-    pub fn ack(mut self) {
-        for (consumer_id, message_ids) in self.take_message_ids() {
-            let _ = self.sender.unbounded_send(AckMessage::Ack {
-                consumer_id,
-                message_ids,
-                cumulative: false,
-            }).map_err(|e| {
-              error!("could not send ack");
-            });
-        }
-    }
-
-    pub fn cumulative_ack(mut self) {
-        for (consumer_id, message_ids) in self.take_message_ids() {
-            let _ = self.sender.unbounded_send(AckMessage::Ack {
-                consumer_id,
-                message_ids,
-                cumulative: true,
-            });
-        }
-    }
-
-    pub fn nack(mut self) {
-        self.send_nack();
-    }
-
-    fn take_message_ids(&mut self) -> BTreeMap<u64, Vec<MessageData>> {
-        let mut message_ids = BTreeMap::new();
-        std::mem::swap(&mut message_ids, &mut self.message_ids);
-        message_ids
-    }
-
-    fn send_nack(&mut self) {
-        for (consumer_id, message_ids) in self.take_message_ids() {
-            let _ = self.sender.unbounded_send(AckMessage::Nack {
-                consumer_id,
-                message_ids,
-            });
-        }
-    }
-}
-
-impl Drop for Ack {
-    fn drop(&mut self) {
-        if !self.message_ids.is_empty() {
-            self.send_nack();
-        }
-    }
-}
-
-enum AckMessage {
-    Ack {
-        consumer_id: u64,
-        message_ids: Vec<MessageData>,
-        cumulative: bool,
-    },
-    Nack {
-        consumer_id: u64,
-        message_ids: Vec<MessageData>,
-    },
+struct NackMessage {
+    consumer_id: u64,
+    message_ids: Vec<MessageData>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -324,28 +255,28 @@ impl Ord for MessageResend {
     }
 }
 
-struct AckHandler {
+struct NackHandler {
     pending_nacks: BinaryHeap<MessageResend>,
     conn: Arc<Connection>,
-    inbound: Option<Pin<Box<UnboundedReceiver<AckMessage>>>>,
+    inbound: Option<Pin<Box<UnboundedReceiver<NackMessage>>>>,
     unack_redelivery_delay: Option<Duration>,
     tick_timer: Pin<Box<tokio::time::Interval>>,
     batch_messages: BTreeMap<MessageIdData, (bool, BitVec)>,
 }
 
-impl AckHandler {
-    /// Create and spawn a new AckHandler future, which will run until the connection fails, or all
+impl NackHandler {
+    /// Create and spawn a new NackHandler future, which will run until the connection fails, or all
     /// inbound senders are dropped and any pending redelivery messages have been sent
     pub fn new<E: Executor+'static>(
         conn: Arc<Connection>,
         redelivery_delay: Option<Duration>,
         tick_delay: Duration,
         executor: E,
-    ) -> UnboundedSender<AckMessage> {
+    ) -> UnboundedSender<NackMessage> {
         let (tx, rx) = mpsc::unbounded();
         let executor = TaskExecutor::new(executor);
 
-        if let Err(_) = executor.clone().spawn(Box::pin(AckHandler {
+        if let Err(_) = executor.clone().spawn(Box::pin(NackHandler {
             pending_nacks: BinaryHeap::new(),
             conn,
             inbound: Some(Box::pin(rx)),
@@ -365,7 +296,7 @@ impl AckHandler {
         }
         None
     }
-    fn next_inbound(&mut self, cx: &mut Context<'_>) -> Option<AckMessage> {
+    fn next_inbound(&mut self, cx: &mut Context<'_>) -> Option<NackMessage> {
         if let Some(inbound) = &mut self.inbound {
             match inbound.as_mut().poll_next(cx) {
                 Poll::Ready(Some(msg)) => Some(msg),
@@ -377,34 +308,6 @@ impl AckHandler {
             }
         } else {
             None
-        }
-    }
-
-    fn should_ack(&mut self, message_data: MessageData) -> Option<proto::MessageIdData> {
-        let MessageData { mut id, batch_size } = message_data;
-        let batch_index = id.batch_index.take();
-
-        match (batch_index, batch_size) {
-            (Some(index), Some(size)) if index >= 0 && size > 1 => {
-                let (is_nacked, seen_messages) = self
-                    .batch_messages
-                    .entry(id.clone())
-                    .or_insert_with(|| (false, BitVec::from_elem(size as usize, false)));
-
-                seen_messages.set(index as usize, true);
-                let complete = seen_messages.all();
-                let should_ack = complete && !*is_nacked;
-                if complete {
-                    self.batch_messages.remove(&id);
-                }
-
-                if should_ack {
-                    Some(id)
-                } else {
-                    None
-                }
-            }
-            _ => Some(id),
         }
     }
 
@@ -437,58 +340,28 @@ impl AckHandler {
     }
 }
 
-impl Future for AckHandler {
+impl Future for NackHandler {
     type Output = Result<(), ()>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut acks: BTreeMap<(u64, bool), Vec<MessageIdData>> = BTreeMap::new();
-        while let Some(msg) = self.next_inbound(cx) {
-            match msg {
-                AckMessage::Ack {
-                    consumer_id,
-                    message_ids,
-                    cumulative,
-                } => {
-                    let ids = message_ids
-                        .into_iter()
-                        .filter_map(|message| self.should_ack(message));
-                    acks.entry((consumer_id, cumulative))
-                        .or_insert_with(Vec::new)
-                        .extend(ids);
-                }
-                AckMessage::Nack {
-                    consumer_id,
-                    message_ids,
-                } => {
-                    // if timeout is not set, messages will only be redelivered on reconnect,
-                    // so we don't manually send redelivery request
-                    let ids: Vec<proto::MessageIdData> = message_ids
-                        .into_iter()
-                        .filter_map(|message| self.should_nack(message))
-                        .collect();
-                    if let Some(nack_timeout) = self.unack_redelivery_delay {
-                        if !ids.is_empty() {
-                            self.pending_nacks.push(MessageResend {
-                                consumer_id,
-                                when: Instant::now() + nack_timeout,
-                                message_ids: ids,
-                            });
-                        }
-                    }
+        while let Some(NackMessage { consumer_id, message_ids }) = self.next_inbound(cx) {
+            // if timeout is not set, messages will only be redelivered on reconnect,
+            // so we don't manually send redelivery request
+            let ids: Vec<proto::MessageIdData> = message_ids
+                .into_iter()
+                .filter_map(|message| self.should_nack(message))
+                .collect();
+            if let Some(nack_timeout) = self.unack_redelivery_delay {
+                if !ids.is_empty() {
+                    self.pending_nacks.push(MessageResend {
+                        consumer_id,
+                        when: Instant::now() + nack_timeout,
+                        message_ids: ids,
+                    });
                 }
             }
         }
-        //TODO should this be batched with the tick timer?
-        for ((consumer_id, cumulative), message_ids) in acks {
-            //TODO this should be resilient to reconnects
-            let send_result = self
-                .conn
-                .sender()
-                .send_ack(consumer_id, message_ids, cumulative);
-            if send_result.is_err() {
-                return Poll::Ready(Err(()));
-            }
-        }
+
         loop {
             match self.tick_timer.as_mut().poll_next(cx) {
                 Poll::Ready(Some(_)) => {
@@ -1119,12 +992,20 @@ impl<T: DeserializeMessage> MultiTopicConsumer<T> {
         }
         self.send_state();
     }
+
+    pub fn ack(&self, msg: &Message<T::Output>) -> Result<(), ConnectionError> {
+        if let Some(c) = self.consumers.get(&msg.topic) {
+            c.ack(&msg)
+        } else {
+            Err(ConnectionError::Unexpected(format!("no consumer for topic {}", msg.topic)))
+        }
+    }
 }
 
 pub struct Message<T> {
     pub topic: String,
     pub payload: T,
-    pub ack: Ack,
+    message_id: MessageData,
 }
 
 impl<T: DeserializeMessage> Debug for MultiTopicConsumer<T> {
@@ -1336,12 +1217,12 @@ mod tests {
 
             let consumer_state = consumer.start_state_stream();
 
-            let mut stream = consumer.take(4);
-            while let Some(res) = stream.next().await {
+            let mut counter = 0usize;
+            while let Some(res) = consumer.next().await {
                 match res {
-                    Ok(Message { payload, ack, .. }) => {
-                        ack.ack();
-                        let msg = payload.unwrap();
+                    Ok(message) => {
+                        consumer.ack(&message);
+                        let msg = message.payload.unwrap();
                         if !data.contains(&msg) {
                             panic!("Unexpected message: {:?}", &msg);
                         } else {
@@ -1353,6 +1234,11 @@ mod tests {
                         let mut error = err.lock().unwrap();
                         *error = Some(e);
                     },
+                }
+
+                counter += 1;
+                if counter == 4 {
+                    break;
                 }
             }
 
@@ -1380,8 +1266,9 @@ mod tests {
     #[test]
     #[ignore]
     fn consumer_dropped_with_lingering_acks() {
+        use rand::{Rng, distributions::Alphanumeric};
         let _ = log::set_logger(&TEST_LOGGER);
-        let _ = log::set_max_level(LevelFilter::Trace);
+        let _ = log::set_max_level(LevelFilter::Debug);
         let addr = "127.0.0.1:6650";
         let mut rt = Runtime::new().unwrap();
 
@@ -1391,37 +1278,35 @@ mod tests {
             let executor = TokioExecutor(tokio::runtime::Handle::current());
             let client: Pulsar = Pulsar::new(addr, None, executor).await.unwrap();
 
+            let message = TestData {
+                topic: std::iter::repeat(()).map(|()| rand::thread_rng().sample(Alphanumeric))
+                    .take(8).collect(),
+                msg: 1,
+            };
+
             {
                 let producer = client.producer(None);
 
-                let data1 = TestData {
-                    topic: "a".to_owned(),
-                    msg: 1,
-                };
-                producer.send(topic, data1).await.unwrap();
+                producer.send(topic, message.clone()).await.unwrap();
                 println!("producer sends done");
             }
 
             {
-                let v = {
-                    println!("creating consumer");
-                    let mut consumer: Consumer<TestData> = client
-                        .consumer()
-                        .with_topic(topic)
-                        .with_subscription("dropped_ack")
-                        .with_subscription_type(SubType::Shared)
-                        .build().await.unwrap();
+                println!("creating consumer");
+                let mut consumer: Consumer<TestData> = client
+                    .consumer()
+                    .with_topic(topic)
+                    .with_subscription("dropped_ack")
+                    .with_subscription_type(SubType::Shared)
+                    .build().await.unwrap();
 
-                    println!("created consumer");
+                println!("created consumer");
 
-
-                    consumer.next().await
-                };
-
-                let msg = v.unwrap().unwrap();
+                //consumer.next().await
+                let msg = consumer.next().await.unwrap().unwrap();
                 println!("got message: {:?}", msg.payload);
-                msg.ack.ack();
-                println!("acked");
+                assert_eq!(&message, msg.payload.as_ref().unwrap(), "we pobably receive a message from a previous run of the test");
+                consumer.ack(&msg);
             }
 
             {
@@ -1437,7 +1322,17 @@ mod tests {
 
                 // the message has already been acked, so we should not receive anything
                 let res: Result<_, tokio::time::Elapsed> = tokio::time::timeout(Duration::from_secs(1), consumer.next()).await;
-                assert!(res.is_err());
+                let is_err = res.is_err();
+                if let Ok(val) = res {
+                    let msg = val.unwrap().unwrap();
+                    println!("got message: {:?}", msg.payload);
+                    // cleanup for the next test
+                    consumer.ack(&msg);
+                    // we should not receive a different message anyway
+                    assert_eq!(&message, msg.payload.as_ref().unwrap());
+                }
+
+                assert!(is_err, "waiting for a message should have timed out, since we already acknowledged the only message in the queue");
             }
         };
 
