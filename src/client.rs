@@ -10,7 +10,7 @@ use crate::connection::{Authentication, Connection};
 use crate::connection_manager::{BrokerAddress, ConnectionManager};
 use crate::consumer::{Consumer, ConsumerBuilder, ConsumerOptions, MultiTopicConsumer, Unset};
 use crate::error::{Error, ServiceDiscoveryError};
-use crate::executor::{Executor, TaskExecutor};
+use crate::executor::PulsarExecutor;
 use crate::message::proto::{self, command_subscribe::SubType, CommandSendReceipt};
 use crate::message::Payload;
 use crate::producer::{self, Producer, ProducerOptions, TopicProducer};
@@ -83,19 +83,16 @@ impl SerializeMessage for str {
 //TODO add more DeserializeMessage impls
 
 #[derive(Clone)]
-pub struct Pulsar {
-    manager: Arc<ConnectionManager>,
-    service_discovery: Arc<ServiceDiscovery>,
-    executor: TaskExecutor,
+pub struct Pulsar<E: PulsarExecutor + ?Sized> {
+    manager: Arc<ConnectionManager<E>>,
+    service_discovery: Arc<ServiceDiscovery<E>>,
 }
 
-impl Pulsar {
-    pub async fn new<E: Executor + 'static, S: Into<String>>(
+impl<Exe: PulsarExecutor> Pulsar<Exe> {
+    pub async fn new<S: Into<String>>(
         addr: S,
         auth: Option<Authentication>,
-        executor: E,
     ) -> Result<Self, Error> {
-        let executor = TaskExecutor::new(executor);
         let addr: String = addr.into();
 
         let address: SocketAddr = match addr.parse::<SocketAddr>() {
@@ -119,8 +116,8 @@ impl Pulsar {
             }
         };
 
-        let conn = Connection::new(address.to_string(), auth.clone(), None, executor.clone()).await?;
-        let manager = ConnectionManager::from_connection(conn, auth, address, executor.clone())?;
+        let conn = Connection::new::<Exe>(address.to_string(), auth.clone(), None).await?;
+        let manager = ConnectionManager::from_connection(conn, auth, address)?;
         let manager = Arc::new(manager);
         let resolver = TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
             .await
@@ -130,13 +127,11 @@ impl Pulsar {
             })?;
         let service_discovery = Arc::new(ServiceDiscovery::with_manager(
                 manager.clone(),
-                executor.clone(),
                 resolver,
         ));
         Ok(Pulsar {
             manager,
             service_discovery,
-            executor,
         })
     }
 
@@ -176,7 +171,7 @@ impl Pulsar {
         Ok(topics.topics)
     }
 
-    pub fn consumer(&self) -> ConsumerBuilder<Unset, Unset, Unset> {
+    pub fn consumer(&self) -> ConsumerBuilder<Unset, Unset, Unset, Exe> {
         ConsumerBuilder::new(self)
     }
 
@@ -189,7 +184,7 @@ impl Pulsar {
         topic_refresh: Duration,
         unacked_message_resend_delay: Option<Duration>,
         options: ConsumerOptions,
-    ) -> MultiTopicConsumer<T>
+    ) -> MultiTopicConsumer<T, Exe>
     where
         T: DeserializeMessage,
         S1: Into<String>,
@@ -229,7 +224,7 @@ impl Pulsar {
         let broker_address = self.service_discovery
             .lookup_topic(topic.clone()).await?;
         let conn = manager.get_connection(&broker_address).await?;
-        Consumer::from_connection(
+        Consumer::from_connection::<Exe>(
             conn,
             topic,
             subscription.into(),
@@ -264,7 +259,7 @@ impl Pulsar {
                 let options = options.clone();
 
                 let conn = manager.get_connection(&broker_address).await?;
-                res.push(Consumer::from_connection(
+                res.push(Consumer::from_connection::<Exe>(
                     conn,
                     topic.to_string(),
                     subscription.into(),
@@ -292,7 +287,7 @@ impl Pulsar {
             .lookup_topic(topic.clone()).await?;
         let conn = manager.get_connection(&broker_address).await?;
 
-        TopicProducer::from_connection::<_>(conn, topic, name, options).await
+        TopicProducer::from_connection::<Exe, _>(conn, topic, name, options).await
     }
 
     pub async fn create_partitioned_producers<S: Into<String>>(
@@ -308,7 +303,7 @@ impl Pulsar {
         let mut res = Vec::new();
         for (topic, broker_address) in v.iter() {
             let conn = manager.get_connection(&broker_address).await?;
-            res.push(TopicProducer::from_connection(conn, topic, None, options.clone()));
+            res.push(TopicProducer::from_connection::<Exe, _>(conn, topic, None, options.clone()));
         }
 
         future::try_join_all(res).await
@@ -340,7 +335,7 @@ impl Pulsar {
         Producer::new(self.clone(), options.unwrap_or_default())
     }
 
-    pub(crate) fn executor(&self) -> &TaskExecutor {
+    /*pub(crate) fn executor(&self) -> &TaskExecutor {
         &self.executor
-    }
+    }*/
 }

@@ -19,7 +19,7 @@ use tokio_util;
 
 use crate::consumer::ConsumerOptions;
 use crate::error::{ConnectionError, SharedError};
-use crate::executor::{Executor, TaskExecutor};
+use crate::executor::PulsarExecutor;
 use crate::message::{
     proto::{self, command_subscribe::SubType},
     Codec, Message,
@@ -430,15 +430,13 @@ pub struct Connection {
     addr: String,
     sender: ConnectionSender,
     receiver_shutdown: Option<oneshot::Sender<()>>,
-    executor: TaskExecutor,
 }
 
 impl Connection {
-    pub async fn new<E: Executor+'static>(
+    pub async fn new<Exe: PulsarExecutor + ?Sized>(
         addr: String,
         auth_data: Option<Authentication>,
         proxy_to_broker_url: Option<String>,
-        executor: E,
     ) -> Result<Connection, ConnectionError> {
         let address = SocketAddr::from_str(&addr)
             .map_err(|e| ConnectionError::SocketAddr(e.to_string()))?;
@@ -483,9 +481,8 @@ impl Connection {
         let (registrations_tx, registrations_rx) = mpsc::unbounded();
         let error = SharedError::new();
         let (receiver_shutdown_tx, receiver_shutdown_rx) = oneshot::channel();
-        let executor = TaskExecutor::new(executor);
 
-        if let Err(_) = executor.spawn(Box::pin(Receiver::new(
+        if let Err(_) = Exe::spawn(Box::pin(Receiver::new(
                     stream,
                     tx.clone(),
                     error.clone(),
@@ -497,7 +494,7 @@ impl Connection {
         }
 
         let err = error.clone();
-        if let Err(_) = executor.spawn(Box::pin(async move {
+        if let Err(_) = Exe::spawn(Box::pin(async move {
             while let Some(msg) = rx.next().await {
                 if let Err(e) = sink.send(msg).await {
                     err.set(e);
@@ -515,7 +512,6 @@ impl Connection {
             addr,
             sender,
             receiver_shutdown: Some(receiver_shutdown_tx),
-            executor,
         })
     }
 
@@ -536,9 +532,9 @@ impl Connection {
         &self.sender
     }
 
-    pub fn executor(&self) -> TaskExecutor {
+    /*pub fn executor(&self) -> TaskExecutor {
         self.executor.clone()
-    }
+    }*/
 }
 
 impl Drop for Connection {

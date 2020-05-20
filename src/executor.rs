@@ -8,6 +8,10 @@ pub trait Executor: Send + Sync {
     fn spawn(&self, f: Pin<Box<dyn Future<Output = ()> + Send>>) -> Result<(), ()>;
 }
 
+pub trait PulsarExecutor: Clone + Send + Sync + 'static {
+    fn spawn(f: Pin<Box<dyn Future<Output = ()> + Send>>) -> Result<(), ()>;
+}
+
 #[derive(Clone)]
 pub struct TaskExecutor {
     inner: Arc<dyn Executor + Send + Sync + 'static>,
@@ -47,6 +51,14 @@ pub struct TokioExecutor(pub Handle);
 impl Executor for TokioExecutor {
     fn spawn(&self, f: Pin<Box<dyn Future<Output = ()> + Send>>) -> Result<(), ()> {
         self.0.spawn(f);
+        Ok(())
+    }
+}
+
+impl PulsarExecutor for TokioExecutor {
+    fn spawn(f: Pin<Box<dyn Future<Output = ()> + Send>>) -> Result<(), ()> {
+        let handle = tokio::runtime::Handle::current();
+        handle.spawn(f);
         Ok(())
     }
 }

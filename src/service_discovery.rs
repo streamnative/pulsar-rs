@@ -1,7 +1,7 @@
 use crate::connection::{Authentication, Connection};
 use crate::connection_manager::{BrokerAddress, ConnectionManager};
 use crate::error::ServiceDiscoveryError;
-use crate::executor::{Executor, TaskExecutor};
+use crate::executor:: PulsarExecutor;
 use crate::message::proto::{command_lookup_topic_response, CommandLookupTopicResponse};
 use futures::{future::try_join_all, FutureExt};
 use std::net::SocketAddr;
@@ -16,20 +16,17 @@ use url::Url;
 /// interacting with a cluster. It will automatically follow redirects
 /// or use a proxy, and aggregate broker connections
 #[derive(Clone)]
-pub struct ServiceDiscovery {
-    manager: Arc<ConnectionManager>,
-    executor: TaskExecutor,
+pub struct ServiceDiscovery<Exe: PulsarExecutor + ?Sized> {
+    manager: Arc<ConnectionManager<Exe>>,
     resolver: TokioAsyncResolver,
 }
 
-impl ServiceDiscovery {
-    pub async fn new<E: Executor + 'static>(
+impl<Exe: PulsarExecutor> ServiceDiscovery<Exe> {
+    pub async fn new(
         addr: SocketAddr,
         auth: Option<Authentication>,
-        executor: E,
     ) -> Result<Self, ServiceDiscoveryError> {
-        let executor = TaskExecutor::new(executor);
-        let conn = ConnectionManager::new(addr, auth, executor.clone()).await?;
+        let conn = ConnectionManager::new(addr, auth).await?;
         let resolver =
             TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
                 .await
@@ -39,20 +36,16 @@ impl ServiceDiscovery {
                 })?;
         Ok(ServiceDiscovery::with_manager(
             Arc::new(conn),
-            executor,
             resolver,
         ))
     }
 
-    pub fn with_manager<E: Executor + 'static>(
-        manager: Arc<ConnectionManager>,
-        executor: E,
+    pub fn with_manager(
+        manager: Arc<ConnectionManager<Exe>>,
         resolver: TokioAsyncResolver,
     ) -> Self {
-        let executor = TaskExecutor::new(executor);
         ServiceDiscovery {
             manager,
-            executor,
             resolver,
         }
     }

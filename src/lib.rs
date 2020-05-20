@@ -37,7 +37,7 @@ mod service_discovery;
 mod tests {
     use std::time::{Duration, Instant};
 
-    use futures::{StreamExt, TryStreamExt};
+    use futures::StreamExt;
     use tokio;
     use tokio::runtime::Runtime;
 
@@ -152,8 +152,7 @@ mod tests {
 
         let f = async {
             let addr = "127.0.0.1:6650";
-            let executor = TokioExecutor(tokio::runtime::Handle::current());
-            let pulsar: Pulsar = Pulsar::new(addr, None, executor).await.unwrap();
+            let pulsar: Pulsar<TokioExecutor> = Pulsar::new(addr, None).await.unwrap();
             let producer = pulsar.producer(None);
 
             for _ in 0u16..5000 {
@@ -206,9 +205,8 @@ mod tests {
         let mut runtime = Runtime::new().unwrap();
 
         let f = async {
-            let executor = TokioExecutor(tokio::runtime::Handle::current());
             let addr = "127.0.0.1:6650";
-            let pulsar: Pulsar = Pulsar::new(addr, None, executor).await.unwrap();
+            let pulsar: Pulsar<TokioExecutor> = Pulsar::new(addr, None).await.unwrap();
             let producer = pulsar.producer(None);
 
             // test &str
@@ -284,8 +282,7 @@ mod tests {
 
         let message_count = 10;
         let f = async move {
-            let executor = TokioExecutor(tokio::runtime::Handle::current());
-            let pulsar: Pulsar = Pulsar::new(addr, None, executor).await.unwrap();
+            let pulsar: Pulsar<TokioExecutor> = Pulsar::new(addr, None).await.unwrap();
 
             let producer = pulsar.producer(None);
 

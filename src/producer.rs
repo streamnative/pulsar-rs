@@ -7,15 +7,15 @@ use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use futures::channel::oneshot;
 use futures::{
     future::try_join_all,
-    Future, FutureExt, TryFutureExt, Stream,
+    Future, FutureExt, Stream,
     task::{Context, Poll},
 };
 use rand;
 
 use crate::client::SerializeMessage;
-use crate::connection::{Authentication, Connection, SerialId};
+use crate::connection::{Connection, SerialId};
 use crate::error::ProducerError;
-use crate::executor::Executor;
+use crate::executor::PulsarExecutor;
 use crate::message::proto::{self, EncryptionKeys, Schema, CompressionType};
 use crate::message::BatchedMessage;
 use crate::{Error, Pulsar};
@@ -65,10 +65,9 @@ pub struct Producer {
 }
 
 impl Producer {
-    pub fn new(pulsar: Pulsar, options: ProducerOptions) -> Producer {
+    pub fn new<Exe: PulsarExecutor + ?Sized>(pulsar: Pulsar<Exe>, options: ProducerOptions) -> Producer {
         let (tx, rx) = unbounded();
-        let executor = pulsar.executor().clone();
-        if let Err(_) = executor.spawn(Box::pin(ProducerEngine {
+        if let Err(_) = Exe::spawn(Box::pin(ProducerEngine {
             pulsar,
             inbound: Box::pin(rx),
             producers: BTreeMap::new(),
@@ -154,15 +153,15 @@ impl Producer {
     }
 }
 
-struct ProducerEngine {
-    pulsar: Pulsar,
+struct ProducerEngine<Exe: PulsarExecutor + ?Sized> {
+    pulsar: Pulsar<Exe>,
     inbound: Pin<Box<UnboundedReceiver<ProducerMessage>>>,
     producers: BTreeMap<String, Arc<TopicProducer>>,
     new_producers: BTreeMap<String, Pin<Box<oneshot::Receiver<Result<Arc<TopicProducer>, Error>>>>>,
     producer_options: ProducerOptions,
 }
 
-impl Future for ProducerEngine {
+impl<Exe: PulsarExecutor> Future for ProducerEngine<Exe> {
     type Output = Result<(), ()>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), ()>> {
@@ -212,7 +211,7 @@ impl Future for ProducerEngine {
                                         }
                                     }).await;
                             };
-                            if let Err(_) = self.pulsar.executor().spawn(Box::pin(f)) {
+                            if let Err(_) = Exe::spawn(Box::pin(f)) {
                                 error!("the executor could not spawn the message sending future");
                             }
                         }
@@ -234,7 +233,7 @@ impl Future for ProducerEngine {
                                        error!("create_producer result receiver was dropped before getting the prducer");
                                    }
                                 };
-                                if let Err(_) = self.pulsar.executor().spawn(Box::pin(f)) {
+                                if let Err(_) = Exe::spawn(Box::pin(f)) {
                                     error!("the executor could not spawn the producer creation future");
                                 }
                                 Box::pin(rx)
@@ -305,7 +304,7 @@ pub struct TopicProducer {
 }
 
 impl TopicProducer {
-    pub fn new<S1, S2, E: Executor+'static>(
+    /*pub fn new<S1, S2, E: Executor+'static>(
         addr: S1,
         topic: S2,
         name: Option<String>,
@@ -324,8 +323,9 @@ impl TopicProducer {
                 TopicProducer::from_connection::<_>(Arc::new(conn), topic.into(), name, options)
             })
     }
+    */
 
-    pub async fn from_connection<S: Into<String>>(
+    pub async fn from_connection<Exe: PulsarExecutor, S: Into<String>>(
         connection: Arc<Connection>,
         topic: S,
         name: Option<String>,
@@ -372,7 +372,7 @@ impl TopicProducer {
         // drop_receiver will return, and we can close the producer
         let (_drop_signal, drop_receiver) = oneshot::channel::<()>();
         let conn = connection.clone();
-        let _ = connection.executor().spawn(Box::pin(async move {
+        let _ = Exe::spawn(Box::pin(async move {
             let _res = drop_receiver.await;
              let _ = conn.sender().close_producer(producer_id).await;
         }));
