@@ -15,7 +15,7 @@ use rand;
 use crate::client::SerializeMessage;
 use crate::connection::{Connection, SerialId};
 use crate::error::ProducerError;
-use crate::executor::PulsarExecutor;
+use crate::executor::Executor;
 use crate::message::proto::{self, EncryptionKeys, Schema, CompressionType};
 use crate::message::BatchedMessage;
 use crate::{Error, Pulsar};
@@ -65,7 +65,7 @@ pub struct Producer {
 }
 
 impl Producer {
-    pub fn new<Exe: PulsarExecutor + ?Sized>(pulsar: Pulsar<Exe>, options: ProducerOptions) -> Producer {
+    pub fn new<Exe: Executor + ?Sized>(pulsar: Pulsar<Exe>, options: ProducerOptions) -> Producer {
         let (tx, rx) = unbounded();
         if let Err(_) = Exe::spawn(Box::pin(ProducerEngine {
             pulsar,
@@ -153,7 +153,7 @@ impl Producer {
     }
 }
 
-struct ProducerEngine<Exe: PulsarExecutor + ?Sized> {
+struct ProducerEngine<Exe: Executor + ?Sized> {
     pulsar: Pulsar<Exe>,
     inbound: Pin<Box<UnboundedReceiver<ProducerMessage>>>,
     producers: BTreeMap<String, Arc<TopicProducer>>,
@@ -161,7 +161,7 @@ struct ProducerEngine<Exe: PulsarExecutor + ?Sized> {
     producer_options: ProducerOptions,
 }
 
-impl<Exe: PulsarExecutor> Future for ProducerEngine<Exe> {
+impl<Exe: Executor> Future for ProducerEngine<Exe> {
     type Output = Result<(), ()>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), ()>> {

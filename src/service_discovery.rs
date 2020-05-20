@@ -1,7 +1,7 @@
 use crate::connection::{Authentication, Connection};
 use crate::connection_manager::{BrokerAddress, ConnectionManager};
 use crate::error::ServiceDiscoveryError;
-use crate::executor:: PulsarExecutor;
+use crate::executor:: Executor;
 use crate::message::proto::{command_lookup_topic_response, CommandLookupTopicResponse};
 use futures::{future::try_join_all, FutureExt};
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -14,11 +14,11 @@ use url::Url;
 /// interacting with a cluster. It will automatically follow redirects
 /// or use a proxy, and aggregate broker connections
 #[derive(Clone)]
-pub struct ServiceDiscovery<Exe: PulsarExecutor + ?Sized> {
+pub struct ServiceDiscovery<Exe: Executor + ?Sized> {
     manager: Arc<ConnectionManager<Exe>>,
 }
 
-impl<Exe: PulsarExecutor> ServiceDiscovery<Exe> {
+impl<Exe: Executor> ServiceDiscovery<Exe> {
     pub async fn new(
         addr: SocketAddr,
         auth: Option<Authentication>,

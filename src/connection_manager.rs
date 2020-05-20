@@ -1,6 +1,6 @@
 use crate::connection::{Authentication, Connection};
 use crate::error::ConnectionError;
-use crate::executor::PulsarExecutor;
+use crate::executor::Executor;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -23,7 +23,7 @@ pub struct BrokerAddress {
 /// interacting with a cluster. It will automatically follow redirects
 /// or use a proxy, and aggregate broker connections
 #[derive(Clone)]
-pub struct ConnectionManager<Exe: PulsarExecutor + ?Sized> {
+pub struct ConnectionManager<Exe: Executor + ?Sized> {
     pub address: SocketAddr,
     base: Arc<Connection>,
     auth: Option<Authentication>,
@@ -31,7 +31,7 @@ pub struct ConnectionManager<Exe: PulsarExecutor + ?Sized> {
     connections: Arc<Mutex<HashMap<BrokerAddress, Arc<Connection>>>>,
 }
 
-impl<Exe: PulsarExecutor> ConnectionManager<Exe> {
+impl<Exe: Executor> ConnectionManager<Exe> {
     pub async fn new(
         addr: SocketAddr,
         auth: Option<Authentication>,

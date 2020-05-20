@@ -19,7 +19,7 @@ use tokio_util;
 
 use crate::consumer::ConsumerOptions;
 use crate::error::{ConnectionError, SharedError};
-use crate::executor::{PulsarExecutor, ExecutorKind};
+use crate::executor::{Executor, ExecutorKind};
 use crate::message::{
     proto::{self, command_subscribe::SubType},
     Codec, Message,
@@ -433,7 +433,7 @@ pub struct Connection {
 }
 
 impl Connection {
-    pub async fn new<Exe: PulsarExecutor + ?Sized>(
+    pub async fn new<Exe: Executor + ?Sized>(
         addr: String,
         auth_data: Option<Authentication>,
         proxy_to_broker_url: Option<String>,
@@ -457,7 +457,7 @@ impl Connection {
         }
     }
 
-    pub async fn from_stream<Exe: PulsarExecutor+ ?Sized, S>(
+    pub async fn from_stream<Exe: Executor+ ?Sized, S>(
         addr: String,
         mut stream: S,
         auth_data: Option<Authentication>,
@@ -554,10 +554,6 @@ impl Connection {
     pub fn sender(&self) -> &ConnectionSender {
         &self.sender
     }
-
-    /*pub fn executor(&self) -> TaskExecutor {
-        self.executor.clone()
-    }*/
 }
 
 impl Drop for Connection {

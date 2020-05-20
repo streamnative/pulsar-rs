@@ -9,7 +9,7 @@ use crate::connection::Authentication;
 use crate::connection_manager::{BrokerAddress, ConnectionManager};
 use crate::consumer::{Consumer, ConsumerBuilder, ConsumerOptions, MultiTopicConsumer, Unset};
 use crate::error::Error;
-use crate::executor::PulsarExecutor;
+use crate::executor::Executor;
 use crate::message::proto::{self, command_subscribe::SubType, CommandSendReceipt};
 use crate::message::Payload;
 use crate::producer::{self, Producer, ProducerOptions, TopicProducer};
@@ -82,12 +82,12 @@ impl SerializeMessage for str {
 //TODO add more DeserializeMessage impls
 
 #[derive(Clone)]
-pub struct Pulsar<E: PulsarExecutor + ?Sized> {
+pub struct Pulsar<E: Executor + ?Sized> {
     manager: Arc<ConnectionManager<E>>,
     service_discovery: Arc<ServiceDiscovery<E>>,
 }
 
-impl<Exe: PulsarExecutor> Pulsar<Exe> {
+impl<Exe: Executor> Pulsar<Exe> {
     pub async fn new<S: Into<String>>(
         addr: S,
         auth: Option<Authentication>,
@@ -329,8 +329,4 @@ impl<Exe: PulsarExecutor> Pulsar<Exe> {
     pub fn producer(&self, options: Option<ProducerOptions>) -> Producer {
         Producer::new(self.clone(), options.unwrap_or_default())
     }
-
-    /*pub(crate) fn executor(&self) -> &TaskExecutor {
-        &self.executor
-    }*/
 }
