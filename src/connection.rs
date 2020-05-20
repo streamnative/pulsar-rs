@@ -12,14 +12,14 @@ use futures::{
     self,
     channel::{mpsc, oneshot},
     task::{Poll, Context},
-    Future, FutureExt, SinkExt, Stream, StreamExt,
+    Future, FutureExt, Sink, SinkExt, Stream, StreamExt,
 };
 use tokio::net::TcpStream;
 use tokio_util;
 
 use crate::consumer::ConsumerOptions;
 use crate::error::{ConnectionError, SharedError};
-use crate::executor::PulsarExecutor;
+use crate::executor::{PulsarExecutor, ExecutorKind};
 use crate::message::{
     proto::{self, command_subscribe::SubType},
     Codec, Message,
@@ -441,9 +441,32 @@ impl Connection {
         let address = SocketAddr::from_str(&addr)
             .map_err(|e| ConnectionError::SocketAddr(e.to_string()))?;
 
-        let mut stream = TcpStream::connect(&address).await
-            .map(|stream| tokio_util::codec::Framed::new(stream, Codec))?;
+        match Exe::kind() {
+            ExecutorKind::Tokio => {
+                let stream = TcpStream::connect(&address).await
+                    .map(|stream| tokio_util::codec::Framed::new(stream, Codec))?;
 
+                Connection::from_stream::<Exe, _>(addr, stream, auth_data, proxy_to_broker_url).await
+            },
+            ExecutorKind::AsyncStd => {
+                let stream = async_std::net::TcpStream::connect(&address).await
+                    .map(|stream| futures_codec::Framed::new(stream, Codec))?;
+
+                Connection::from_stream::<Exe, _>(addr, stream, auth_data, proxy_to_broker_url).await
+            }
+        }
+    }
+
+    pub async fn from_stream<Exe: PulsarExecutor+ ?Sized, S>(
+        addr: String,
+        mut stream: S,
+        auth_data: Option<Authentication>,
+        proxy_to_broker_url: Option<String>,
+    ) -> Result<Connection, ConnectionError>
+    where
+      S: Stream<Item = Result<Message, ConnectionError>>,
+      S: Sink<Message, Error = ConnectionError>,
+      S: Send + std::marker::Unpin +'static {
         let _ = stream
             .send({
                 let msg = messages::connect(auth_data, proxy_to_broker_url);
