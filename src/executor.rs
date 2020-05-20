@@ -1,4 +1,4 @@
-use futures::future::{Future, FutureExt};
+use futures::{Future, FutureExt, Stream};
 use std::ops::Deref;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -19,6 +19,8 @@ pub trait PulsarExecutor: Clone + Send + Sync + 'static {
     where
         F: FnOnce() -> Res + Send + 'static,
         Res: Send + 'static;
+
+    fn interval(duration: std::time::Duration) -> Interval;
 
     // test at runtime and manually choose the implementation
     // because we cannot (yet) have async trait methods,
@@ -82,6 +84,10 @@ impl PulsarExecutor for TokioExecutor {
         JoinHandle::Tokio(tokio::task::spawn_blocking(f))
     }
 
+    fn interval(duration: std::time::Duration) -> Interval {
+        Interval::Tokio(tokio::time::interval(duration))
+    }
+
     fn kind() -> ExecutorKind {
         ExecutorKind::Tokio
     }
@@ -111,6 +117,10 @@ impl PulsarExecutor for AsyncStdExecutor {
         JoinHandle::AsyncStd(async_std::task::spawn_blocking(f))
     }
 
+    fn interval(duration: std::time::Duration) -> Interval {
+        Interval::AsyncStd(async_std::stream::interval(duration))
+    }
+
     fn kind() -> ExecutorKind {
         ExecutorKind::AsyncStd
     }
@@ -135,6 +145,30 @@ impl<T> Future for JoinHandle<T> {
                 JoinHandle::AsyncStd(j) => match Pin::new_unchecked(j).poll(cx) {
                     Poll::Pending => Poll::Pending,
                     Poll::Ready(v) => Poll::Ready(Some(v)),
+                },
+            }
+        }
+    }
+}
+
+pub enum Interval {
+  Tokio(tokio::time::Interval),
+  AsyncStd(async_std::stream::Interval),
+}
+
+impl Stream for Interval {
+    type Item = ();
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut std::task::Context) -> std::task::Poll<Option<Self::Item>> {
+        unsafe {
+            match Pin::get_unchecked_mut(self) {
+                Interval::Tokio(j) => match Pin::new_unchecked(j).poll_next(cx) {
+                    Poll::Pending => Poll::Pending,
+                    Poll::Ready(v) => Poll::Ready(v.map(|_| ())),
+                },
+                Interval::AsyncStd(j) => match Pin::new_unchecked(j).poll_next(cx) {
+                    Poll::Pending => Poll::Pending,
+                    Poll::Ready(v) => Poll::Ready(v),
                 },
             }
         }

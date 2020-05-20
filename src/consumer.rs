@@ -15,7 +15,7 @@ use regex::Regex;
 
 use crate::connection:: Connection;
 use crate::error::{ConnectionError, ConsumerError, Error};
-use crate::executor::PulsarExecutor;
+use crate::executor::{PulsarExecutor, Interval};
 use crate::message::{
     parse_batched_message,
     proto::{self, command_subscribe::SubType, MessageIdData, Schema},
@@ -259,7 +259,7 @@ struct NackHandler {
     conn: Arc<Connection>,
     inbound: Option<Pin<Box<UnboundedReceiver<NackMessage>>>>,
     unack_redelivery_delay: Option<Duration>,
-    tick_timer: Pin<Box<tokio::time::Interval>>,
+    tick_timer: Pin<Box<Interval>>,
     batch_messages: BTreeMap<MessageIdData, (bool, BitVec)>,
 }
 
@@ -278,7 +278,7 @@ impl NackHandler {
             conn,
             inbound: Some(Box::pin(rx)),
             unack_redelivery_delay: redelivery_delay,
-            tick_timer: Box::pin(tokio::time::interval(tick_delay)),
+            tick_timer: Box::pin(Exe::interval(tick_delay)),
             batch_messages: BTreeMap::new(),
         }.map(|res| trace!("AckHandler returned {:?}", res)))) {
             error!("the executor could not spawn the AckHandler future");
