@@ -304,28 +304,7 @@ pub struct TopicProducer {
 }
 
 impl TopicProducer {
-    /*pub fn new<S1, S2, E: Executor+'static>(
-        addr: S1,
-        topic: S2,
-        name: Option<String>,
-        auth: Option<Authentication>,
-        proxy_to_broker_url: Option<String>,
-        options: ProducerOptions,
-        executor: E,
-    ) -> impl Future<Output = Result<TopicProducer, Error>>
-    where
-        S1: Into<String>,
-        S2: Into<String>,
-    {
-        Connection::new(addr.into(), auth, proxy_to_broker_url, executor)
-            .map_err(|e| e.into())
-            .and_then(move |conn| {
-                TopicProducer::from_connection::<_>(Arc::new(conn), topic.into(), name, options)
-            })
-    }
-    */
-
-    pub async fn from_connection<Exe: PulsarExecutor, S: Into<String>>(
+    pub async fn from_connection<Exe: Executor, S: Into<String>>(
         connection: Arc<Connection>,
         topic: S,
         name: Option<String>,

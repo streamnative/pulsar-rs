@@ -53,36 +53,7 @@ pub struct Consumer<T: DeserializeMessage> {
 }
 
 impl<T: DeserializeMessage> Consumer<T> {
-    /*pub async fn new<E: Executor+'static>(
-        addr: String,
-        topic: String,
-        subscription: String,
-        sub_type: SubType,
-        consumer_id: Option<u64>,
-        consumer_name: Option<String>,
-        auth_data: Option<Authentication>,
-        proxy_to_broker_url: Option<String>,
-        executor: E,
-        batch_size: Option<u32>,
-        unacked_message_redelivery_delay: Option<Duration>,
-        options: ConsumerOptions,
-    ) -> Result<Consumer<T>, Error> {
-        let conn = Connection::new(addr, auth_data, proxy_to_broker_url, executor)
-            .await?;
-        Consumer::from_connection(
-            Arc::new(conn),
-            topic,
-            subscription,
-            sub_type,
-            consumer_id,
-            consumer_name,
-            batch_size,
-            unacked_message_redelivery_delay,
-            options,
-            ).await
-    }*/
-
-    pub async fn from_connection<Exe: PulsarExecutor>(
+    pub async fn from_connection<Exe: Executor>(
         connection: Arc<Connection>,
         topic: String,
         subscription: String,
