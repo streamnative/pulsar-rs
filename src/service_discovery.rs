@@ -4,10 +4,8 @@ use crate::error::ServiceDiscoveryError;
 use crate::executor:: PulsarExecutor;
 use crate::message::proto::{command_lookup_topic_response, CommandLookupTopicResponse};
 use futures::{future::try_join_all, FutureExt};
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
-use trust_dns_resolver::config::*;
-use trust_dns_resolver::TokioAsyncResolver;
 use url::Url;
 
 /// Look up broker addresses for topics and partitioned topics
@@ -18,7 +16,6 @@ use url::Url;
 #[derive(Clone)]
 pub struct ServiceDiscovery<Exe: PulsarExecutor + ?Sized> {
     manager: Arc<ConnectionManager<Exe>>,
-    resolver: TokioAsyncResolver,
 }
 
 impl<Exe: PulsarExecutor> ServiceDiscovery<Exe> {
@@ -27,26 +24,16 @@ impl<Exe: PulsarExecutor> ServiceDiscovery<Exe> {
         auth: Option<Authentication>,
     ) -> Result<Self, ServiceDiscoveryError> {
         let conn = ConnectionManager::new(addr, auth).await?;
-        let resolver =
-            TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
-                .await
-                .map_err(|e| {
-                    error!("could not create DNS resolver: {:?}", e);
-                    ServiceDiscoveryError::Canceled
-                })?;
         Ok(ServiceDiscovery::with_manager(
             Arc::new(conn),
-            resolver,
         ))
     }
 
     pub fn with_manager(
         manager: Arc<ConnectionManager<Exe>>,
-        resolver: TokioAsyncResolver,
     ) -> Self {
         ServiceDiscovery {
             manager,
-            resolver,
         }
     }
 
@@ -149,20 +136,13 @@ impl<Exe: PulsarExecutor> ServiceDiscovery<Exe> {
             let address = if proxied_query || proxy {
                 base_address
             } else {
-                let results: Result<_, _> = self
-                    .resolver
-                    .lookup_ip(broker_name.as_str())
-                    .await
-                    .map_err(move |e| {
-                        error!("DNS lookup error: {:?}", e);
-                        ServiceDiscoveryError::DnsLookupError
-                    });
-                match results {
-                    Err(_) => return Err(ServiceDiscoveryError::DnsLookupError),
-                    Ok(lookup) => {
-                        let i: std::net::IpAddr = lookup.iter().next().unwrap();
-                        SocketAddr::new(i, broker_port)
-                    }
+                match Exe::spawn_blocking(move|| {
+                    (broker_name.as_str(), broker_port).to_socket_addrs().map_err(|e| {
+                        error!("error querying '{}': {:?}", broker_name, e);
+                    }).ok().and_then(|mut it| it.next())
+                }).await {
+                    Some(Some(address)) => address,
+                    _ => return Err(ServiceDiscoveryError::DnsLookupError)
                 }
             };
 

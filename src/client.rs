@@ -1,15 +1,14 @@
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::string::FromUtf8Error;
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future;
-use trust_dns_resolver::{config::*, TokioAsyncResolver};
 
-use crate::connection::{Authentication, Connection};
+use crate::connection::Authentication;
 use crate::connection_manager::{BrokerAddress, ConnectionManager};
 use crate::consumer::{Consumer, ConsumerBuilder, ConsumerOptions, MultiTopicConsumer, Unset};
-use crate::error::{Error, ServiceDiscoveryError};
+use crate::error::Error;
 use crate::executor::PulsarExecutor;
 use crate::message::proto::{self, command_subscribe::SubType, CommandSendReceipt};
 use crate::message::Payload;
@@ -98,36 +97,32 @@ impl<Exe: PulsarExecutor> Pulsar<Exe> {
         let address: SocketAddr = match addr.parse::<SocketAddr>() {
             Ok(a) => a,
             Err(_) => {
-                let mut it = addr.split(':');
-                let host = it.next().ok_or(Error::Custom("invalid address".to_string()))?;
-                let port = match it.next() {
-                    Some(s) => s.parse().map_err(|e| Error::Custom(format!("invalid port: {:?}", e)))?,
-                    None => 6650,
-                };
+                let a = addr.clone();
+                match Exe::spawn_blocking(move|| {
+                    let res = if a.contains(':') {
+                        a.to_socket_addrs()
+                    } else {
+                        (a.as_str(), 6650u16).to_socket_addrs()
+                    };
 
-                let resolver = TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default()).await
-                .map_err(|e| {
-                    Error::Custom(format!("could not create DNS resolver: {:?}", e))
-                })?;
+                    res.map_err(|e| {
+                        error!("error querying '{}': {:?}", a, e);
 
-                let ip = resolver.lookup_ip(host).await.map_err(|_| ServiceDiscoveryError::DnsLookupError)?
-                    .iter().next().ok_or(ServiceDiscoveryError::DnsLookupError)?;
-                SocketAddr::new(ip, port)
+                    }).ok().and_then(|mut it| it.next())
+                }).await {
+                    Some(Some(address)) => {
+                        println!("dns lookup returned {:?}", address);
+                        address
+                    },
+                    _ => return Err(Error::Custom(format!("could not query address: {}", addr))),
+                }
             }
         };
 
-        let conn = Connection::new::<Exe>(address.to_string(), auth.clone(), None).await?;
-        let manager = ConnectionManager::from_connection(conn, auth, address)?;
+        let manager = ConnectionManager::new(address, auth).await?;
         let manager = Arc::new(manager);
-        let resolver = TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
-            .await
-            .map_err(|e| {
-                error!("could not create DNS resolver: {:?}", e);
-                ServiceDiscoveryError::Canceled
-            })?;
         let service_discovery = Arc::new(ServiceDiscovery::with_manager(
                 manager.clone(),
-                resolver,
         ));
         Ok(Pulsar {
             manager,
