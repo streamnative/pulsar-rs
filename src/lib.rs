@@ -151,7 +151,6 @@ mod tests {
     pub static TEST_LOGGER: SimpleLogger = SimpleLogger;
 
     #[test]
-    #[ignore]
     #[cfg(feature = "tokio-runtime")]
     fn round_trip() {
         let mut runtime = Runtime::new().unwrap();
@@ -161,16 +160,6 @@ mod tests {
         let f = async {
             let addr = "127.0.0.1:6650";
             let pulsar: Pulsar<TokioExecutor> = Pulsar::new(addr, None).await.unwrap();
-            let producer = pulsar.producer(None);
-
-            for _ in 0u16..5000 {
-                producer.send(
-                    "test",
-                    TestData {
-                        data: "data".to_string(),
-                    },
-                ).await.unwrap();
-            }
 
             let mut consumer: Consumer<TestData> = pulsar
                 .consumer()
@@ -182,9 +171,26 @@ mod tests {
                 .await
                 .unwrap();
 
+            info!("consumer created");
+
+            let producer = pulsar.producer(None);
+            info!("producer created");
+
+            info!("will send message");
+            for _ in 0u16..5000 {
+                producer.send(
+                    "test",
+                    TestData {
+                        data: "data".to_string(),
+                    },
+                ).await.unwrap();
+            }
+
+            info!("sent");
             //let mut stream = consumer.take(5000);
             let mut count = 0usize;
             while let Some(res) = consumer.next().await {
+            //let res =  consumer.next().await.unwrap();
                 let msg = res.unwrap();
                 consumer.ack(&msg);
                 let Message { payload, .. } = msg;
@@ -195,6 +201,9 @@ mod tests {
 
                 count +=1;
 
+                if count % 500 == 0 {
+                    info!("messages received: {}", count);
+                }
                 if count == 5000 {
                     break;
                 }
