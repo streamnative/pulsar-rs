@@ -111,7 +111,6 @@ impl<Exe: Executor> Pulsar<Exe> {
                     }).ok().and_then(|mut it| it.next())
                 }).await {
                     Some(Some(address)) => {
-                        println!("dns lookup returned {:?}", address);
                         address
                     },
                     _ => return Err(Error::Custom(format!("could not query address: {}", addr))),
