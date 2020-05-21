@@ -17,7 +17,11 @@ pub use consumer::{
     Consumer, ConsumerBuilder, ConsumerOptions, ConsumerState, Message, MultiTopicConsumer,
 };
 pub use error::{ConnectionError, ConsumerError, Error, ProducerError, ServiceDiscoveryError};
-pub use executor::{TokioExecutor, AsyncStdExecutor};
+pub use executor::Executor;
+#[cfg(feature = "tokio-runtime")]
+pub use executor::TokioExecutor;
+#[cfg(feature = "async-std-runtime")]
+pub use executor::AsyncStdExecutor;
 pub use message::proto;
 pub use message::proto::command_subscribe::SubType;
 pub use producer::{Producer, ProducerOptions, TopicProducer};
@@ -38,7 +42,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use futures::StreamExt;
+    #[cfg(feature = "tokio-runtime")]
     use tokio;
+    #[cfg(feature = "tokio-runtime")]
     use tokio::runtime::Runtime;
 
     use message::proto::command_subscribe::SubType;
@@ -47,6 +53,7 @@ mod tests {
     use crate::consumer::Message;
     use crate::message::Payload;
     use crate::Error as PulsarError;
+    #[cfg(feature = "tokio-runtime")]
     use crate::executor::TokioExecutor;
 
     use super::*;
@@ -145,6 +152,7 @@ mod tests {
 
     #[test]
     #[ignore]
+    #[cfg(feature = "tokio-runtime")]
     fn round_trip() {
         let mut runtime = Runtime::new().unwrap();
         let _ = log::set_logger(&TEST_LOGGER);
@@ -199,6 +207,7 @@ mod tests {
 
     #[test]
     #[ignore]
+    #[cfg(feature = "tokio-runtime")]
     fn unsized_data() {
         let _ = log::set_logger(&TEST_LOGGER);
         let _ = log::set_max_level(LevelFilter::Debug);
@@ -268,6 +277,7 @@ mod tests {
 
     #[test]
     #[ignore]
+    #[cfg(feature = "tokio-runtime")]
     fn redelivery() {
         let _ = log::set_logger(&TEST_LOGGER);
         let _ = log::set_max_level(LevelFilter::Debug);

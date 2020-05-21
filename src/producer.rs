@@ -273,7 +273,7 @@ impl<Exe: Executor> Future for ProducerEngine<Exe> {
                                     }
                                 }
                             };
-                            tokio::spawn(f);
+                            Exe::spawn(Box::pin(f));
                             self.new_producers.insert(topic, Box::pin(rx));
                         }
                     }

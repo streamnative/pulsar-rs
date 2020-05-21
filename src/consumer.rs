@@ -906,7 +906,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
             topics: VecDeque::new(),
             new_consumers: None,
             refresh: Box::pin(
-                tokio::time::interval(topic_refresh)
+                Exe::interval(topic_refresh)
                     .map(drop)
                     //.map_err(|e| panic!("error creating referesh timer: {}", e)),
             ),
@@ -1095,10 +1095,13 @@ mod tests {
     use std::thread;
 
     use regex::Regex;
+    #[cfg(feature = "tokio-runtime")]
     use tokio::runtime::Runtime;
     use log::{LevelFilter};
 
-    use crate::{producer, Pulsar, SerializeMessage, executor::TokioExecutor, tests::TEST_LOGGER};
+    use crate::{producer, Pulsar, SerializeMessage, tests::TEST_LOGGER};
+    #[cfg(feature = "tokio-runtime")]
+    use crate::executor::TokioExecutor;
 
     use super::*;
 
@@ -1128,6 +1131,7 @@ mod tests {
 
     #[test]
     #[ignore]
+    #[cfg(feature = "tokio-runtime")]
     fn multi_consumer() {
         let _ = log::set_logger(&TEST_LOGGER);
         let _ = log::set_max_level(LevelFilter::Debug);
@@ -1230,8 +1234,10 @@ mod tests {
         }
 
     }
+
     #[test]
     #[ignore]
+    #[cfg(feature = "tokio-runtime")]
     fn consumer_dropped_with_lingering_acks() {
         use rand::{Rng, distributions::Alphanumeric};
         let _ = log::set_logger(&TEST_LOGGER);

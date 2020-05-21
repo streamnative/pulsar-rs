@@ -14,7 +14,9 @@ use futures::{
     task::{Poll, Context},
     Future, FutureExt, Sink, SinkExt, Stream, StreamExt,
 };
+#[cfg(feature = "tokio-runtime")]
 use tokio::net::TcpStream;
+#[cfg(feature = "tokio-runtime")]
 use tokio_util;
 
 use crate::consumer::ConsumerOptions;
@@ -442,17 +444,27 @@ impl Connection {
             .map_err(|e| ConnectionError::SocketAddr(e.to_string()))?;
 
         match Exe::kind() {
+            #[cfg(feature = "tokio-runtime")]
             ExecutorKind::Tokio => {
-                let stream = TcpStream::connect(&address).await
+                let stream = tokio::net::TcpStream::connect(&address).await
                     .map(|stream| tokio_util::codec::Framed::new(stream, Codec))?;
 
                 Connection::from_stream::<Exe, _>(addr, stream, auth_data, proxy_to_broker_url).await
             },
+            #[cfg(not(feature = "tokio_runtime"))]
+            ExecutorKind::Tokio => {
+                unimplemented!("the tokio-runtime cargo feature is not active");
+            }
+            #[cfg(feature = "async-std-runtime")]
             ExecutorKind::AsyncStd => {
                 let stream = async_std::net::TcpStream::connect(&address).await
                     .map(|stream| futures_codec::Framed::new(stream, Codec))?;
 
                 Connection::from_stream::<Exe, _>(addr, stream, auth_data, proxy_to_broker_url).await
+            }
+            #[cfg(not(feature = "async-std-runtime"))]
+            ExecutorKind::AsyncStd => {
+                unimplemented!("the async-std-runtime cargo feature is not active");
             }
         }
     }

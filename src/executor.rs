@@ -1,6 +1,5 @@
 use futures::{Future, Stream};
 use std::pin::Pin;
-use tokio::runtime::Handle;
 
 pub enum ExecutorKind {
     Tokio,
@@ -22,9 +21,11 @@ pub trait Executor: Clone + Send + Sync + 'static {
     fn kind() -> ExecutorKind;
 }
 
+#[cfg(feature = "tokio-runtime")]
 #[derive(Clone, Debug)]
-pub struct TokioExecutor(pub Handle);
+pub struct TokioExecutor(pub tokio::runtime::Handle);
 
+#[cfg(feature = "tokio-runtime")]
 impl Executor for TokioExecutor {
     fn spawn(f: Pin<Box<dyn Future<Output = ()> + Send>>) -> Result<(), ()> {
         tokio::task::spawn(f);
@@ -48,9 +49,11 @@ impl Executor for TokioExecutor {
     }
 }
 
+#[cfg(feature = "async-std-runtime")]
 #[derive(Clone, Debug)]
 pub struct AsyncStdExecutor;
 
+#[cfg(feature = "async-std-runtime")]
 impl Executor for AsyncStdExecutor {
     fn spawn(f: Pin<Box<dyn Future<Output = ()> + Send>>) -> Result<(), ()> {
         async_std::task::spawn(f);
@@ -75,8 +78,13 @@ impl Executor for AsyncStdExecutor {
 }
 
 pub enum JoinHandle<T> {
+    #[cfg(feature = "tokio-runtime")]
     Tokio(tokio::task::JoinHandle<T>),
+    #[cfg(feature = "async-std-runtime")]
     AsyncStd(async_std::task::JoinHandle<T>),
+    // here to avoid a compilation error since T is not used
+    #[cfg(all(not(feature = "tokio-runtime"), not(feature = "async-std-runtime")))]
+    PlaceHolder(T),
 }
 
 use std::task::Poll;
@@ -86,38 +94,59 @@ impl<T> Future for JoinHandle<T> {
     fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context) -> std::task::Poll<Self::Output> {
         unsafe {
             match Pin::get_unchecked_mut(self) {
+                #[cfg(feature = "tokio-runtime")]
                 JoinHandle::Tokio(j) => match Pin::new_unchecked(j).poll(cx) {
                     Poll::Pending => Poll::Pending,
                     Poll::Ready(v) => Poll::Ready(v.ok()),
                 },
+                #[cfg(feature = "async-std-runtime")]
                 JoinHandle::AsyncStd(j) => match Pin::new_unchecked(j).poll(cx) {
                     Poll::Pending => Poll::Pending,
                     Poll::Ready(v) => Poll::Ready(Some(v)),
                 },
+                #[cfg(all(not(feature = "tokio-runtime"), not(feature = "async-std-runtime")))]
+                JoinHandle::PlaceHolder(t) => {
+                    unimplemented!("please activate one of the following cargo features: tokio-runtime, async-std-runtime")
+
+                }
             }
         }
     }
 }
 
 pub enum Interval {
-  Tokio(tokio::time::Interval),
-  AsyncStd(async_std::stream::Interval),
+    #[cfg(feature = "tokio-runtime")]
+    Tokio(tokio::time::Interval),
+    #[cfg(feature = "async-std-runtime")]
+    AsyncStd(async_std::stream::Interval),
+    #[cfg(all(not(feature = "tokio-runtime"), not(feature = "async-std-runtime")))]
+    PlaceHolder,
 }
 
 impl Stream for Interval {
     type Item = ();
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut std::task::Context) -> std::task::Poll<Option<Self::Item>> {
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context,
+    ) -> std::task::Poll<Option<Self::Item>> {
         unsafe {
             match Pin::get_unchecked_mut(self) {
+                #[cfg(feature = "tokio-runtime")]
                 Interval::Tokio(j) => match Pin::new_unchecked(j).poll_next(cx) {
                     Poll::Pending => Poll::Pending,
                     Poll::Ready(v) => Poll::Ready(v.map(|_| ())),
                 },
+                #[cfg(feature = "async-std-runtime")]
                 Interval::AsyncStd(j) => match Pin::new_unchecked(j).poll_next(cx) {
                     Poll::Pending => Poll::Pending,
                     Poll::Ready(v) => Poll::Ready(v),
                 },
+                #[cfg(all(not(feature = "tokio-runtime"), not(feature = "async-std-runtime")))]
+                Interval::PlaceHolder => {
+                    unimplemented!("please activate one of the following cargo features: tokio-runtime, async-std-runtime")
+
+                }
             }
         }
     }
