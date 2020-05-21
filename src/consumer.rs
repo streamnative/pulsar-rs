@@ -13,9 +13,9 @@ use futures::task::{Context, Poll};
 use rand;
 use regex::Regex;
 
-use crate::connection::{Authentication, Connection};
+use crate::connection:: Connection;
 use crate::error::{ConnectionError, ConsumerError, Error};
-use crate::executor::{Executor, TaskExecutor};
+use crate::executor::{Executor, Interval};
 use crate::message::{
     parse_batched_message,
     proto::{self, command_subscribe::SubType, MessageIdData, Schema},
@@ -53,36 +53,7 @@ pub struct Consumer<T: DeserializeMessage> {
 }
 
 impl<T: DeserializeMessage> Consumer<T> {
-    pub async fn new<E: Executor+'static>(
-        addr: String,
-        topic: String,
-        subscription: String,
-        sub_type: SubType,
-        consumer_id: Option<u64>,
-        consumer_name: Option<String>,
-        auth_data: Option<Authentication>,
-        proxy_to_broker_url: Option<String>,
-        executor: E,
-        batch_size: Option<u32>,
-        unacked_message_redelivery_delay: Option<Duration>,
-        options: ConsumerOptions,
-    ) -> Result<Consumer<T>, Error> {
-        let conn = Connection::new(addr, auth_data, proxy_to_broker_url, executor)
-            .await?;
-        Consumer::from_connection(
-            Arc::new(conn),
-            topic,
-            subscription,
-            sub_type,
-            consumer_id,
-            consumer_name,
-            batch_size,
-            unacked_message_redelivery_delay,
-            options,
-            ).await
-    }
-
-    pub async fn from_connection(
+    pub async fn from_connection<Exe: Executor>(
         connection: Arc<Connection>,
         topic: String,
         subscription: String,
@@ -115,11 +86,10 @@ impl<T: DeserializeMessage> Consumer<T> {
         //TODO this should be shared among all consumers when using the client
         //TODO make tick_delay configurable
         let tick_delay = Duration::from_millis(500);
-        let nack_handler = NackHandler::new(
+        let nack_handler = NackHandler::new::<Exe>(
             connection.clone(),
             unacked_message_redelivery_delay,
             tick_delay,
-            connection.executor(),
             );
 
         // drop_signal will be dropped when Consumer is dropped, then
@@ -127,7 +97,7 @@ impl<T: DeserializeMessage> Consumer<T> {
         let (_drop_signal, drop_receiver) = oneshot::channel::<()>();
         let conn = connection.clone();
         let ack_sender = nack_handler.clone();
-        let _ = connection.executor().spawn(Box::pin(async move {
+        let _ = Exe::spawn(Box::pin(async move {
             let _res = drop_receiver.await;
             ack_sender.close_channel();
             if let Err(e) = conn.sender().close_consumer(consumer_id).await {
@@ -260,28 +230,26 @@ struct NackHandler {
     conn: Arc<Connection>,
     inbound: Option<Pin<Box<UnboundedReceiver<NackMessage>>>>,
     unack_redelivery_delay: Option<Duration>,
-    tick_timer: Pin<Box<tokio::time::Interval>>,
+    tick_timer: Pin<Box<Interval>>,
     batch_messages: BTreeMap<MessageIdData, (bool, BitVec)>,
 }
 
 impl NackHandler {
     /// Create and spawn a new NackHandler future, which will run until the connection fails, or all
     /// inbound senders are dropped and any pending redelivery messages have been sent
-    pub fn new<E: Executor+'static>(
+    pub fn new<Exe: Executor + ?Sized>(
         conn: Arc<Connection>,
         redelivery_delay: Option<Duration>,
         tick_delay: Duration,
-        executor: E,
     ) -> UnboundedSender<NackMessage> {
         let (tx, rx) = mpsc::unbounded();
-        let executor = TaskExecutor::new(executor);
 
-        if let Err(_) = executor.clone().spawn(Box::pin(NackHandler {
+        if let Err(_) = Exe::spawn(Box::pin(NackHandler {
             pending_nacks: BinaryHeap::new(),
             conn,
             inbound: Some(Box::pin(rx)),
             unack_redelivery_delay: redelivery_delay,
-            tick_timer: Box::pin(tokio::time::interval(tick_delay)),
+            tick_timer: Box::pin(Exe::interval(tick_delay)),
             batch_messages: BTreeMap::new(),
         }.map(|res| trace!("AckHandler returned {:?}", res)))) {
             error!("the executor could not spawn the AckHandler future");
@@ -617,8 +585,8 @@ pub struct Set<T>(T);
 
 pub struct Unset;
 
-pub struct ConsumerBuilder<'a, Topic, Subscription, SubscriptionType> {
-    pulsar: &'a Pulsar,
+pub struct ConsumerBuilder<'a, Topic, Subscription, SubscriptionType, Exe: Executor + ?Sized> {
+    pulsar: &'a Pulsar<Exe>,
     topic: Topic,
     subscription: Subscription,
     subscription_type: SubscriptionType,
@@ -633,8 +601,8 @@ pub struct ConsumerBuilder<'a, Topic, Subscription, SubscriptionType> {
     topic_refresh: Option<Duration>,
 }
 
-impl<'a> ConsumerBuilder<'a, Unset, Unset, Unset> {
-    pub fn new(pulsar: &'a Pulsar) -> Self {
+impl<'a, Exe: Executor + ?Sized> ConsumerBuilder<'a, Unset, Unset, Unset, Exe> {
+    pub fn new(pulsar: &'a Pulsar<Exe>) -> Self {
         ConsumerBuilder {
             pulsar,
             topic: Unset,
@@ -652,13 +620,13 @@ impl<'a> ConsumerBuilder<'a, Unset, Unset, Unset> {
     }
 }
 
-impl<'a, Subscription, SubscriptionType>
-    ConsumerBuilder<'a, Unset, Subscription, SubscriptionType>
+impl<'a, Subscription, SubscriptionType, Exe: Executor + ?Sized>
+    ConsumerBuilder<'a, Unset, Subscription, SubscriptionType, Exe>
 {
     pub fn with_topic<S: Into<String>>(
         self,
         topic: S,
-    ) -> ConsumerBuilder<'a, Set<String>, Subscription, SubscriptionType> {
+    ) -> ConsumerBuilder<'a, Set<String>, Subscription, SubscriptionType, Exe> {
         ConsumerBuilder {
             pulsar: self.pulsar,
             topic: Set(topic.into()),
@@ -677,7 +645,7 @@ impl<'a, Subscription, SubscriptionType>
     pub fn multi_topic(
         self,
         regex: Regex,
-    ) -> ConsumerBuilder<'a, Set<Regex>, Subscription, SubscriptionType> {
+    ) -> ConsumerBuilder<'a, Set<Regex>, Subscription, SubscriptionType, Exe> {
         ConsumerBuilder {
             pulsar: self.pulsar,
             topic: Set(regex),
@@ -694,11 +662,11 @@ impl<'a, Subscription, SubscriptionType>
     }
 }
 
-impl<'a, Topic, SubscriptionType> ConsumerBuilder<'a, Topic, Unset, SubscriptionType> {
+impl<'a, Topic, SubscriptionType, Exe: Executor + ?Sized> ConsumerBuilder<'a, Topic, Unset, SubscriptionType, Exe> {
     pub fn with_subscription<S: Into<String>>(
         self,
         subscription: S,
-    ) -> ConsumerBuilder<'a, Topic, Set<String>, SubscriptionType> {
+    ) -> ConsumerBuilder<'a, Topic, Set<String>, SubscriptionType, Exe> {
         ConsumerBuilder {
             pulsar: self.pulsar,
             subscription: Set(subscription.into()),
@@ -715,11 +683,11 @@ impl<'a, Topic, SubscriptionType> ConsumerBuilder<'a, Topic, Unset, Subscription
     }
 }
 
-impl<'a, Topic, Subscription> ConsumerBuilder<'a, Topic, Subscription, Unset> {
+impl<'a, Topic, Subscription, Exe: Executor + ?Sized> ConsumerBuilder<'a, Topic, Subscription, Unset, Exe> {
     pub fn with_subscription_type(
         self,
         subscription_type: SubType,
-    ) -> ConsumerBuilder<'a, Topic, Subscription, Set<SubType>> {
+    ) -> ConsumerBuilder<'a, Topic, Subscription, Set<SubType>, Exe> {
         ConsumerBuilder {
             pulsar: self.pulsar,
             subscription_type: Set(subscription_type),
@@ -736,13 +704,13 @@ impl<'a, Topic, Subscription> ConsumerBuilder<'a, Topic, Subscription, Unset> {
     }
 }
 
-impl<'a, Subscription, SubscriptionType>
-    ConsumerBuilder<'a, Set<Regex>, Subscription, SubscriptionType>
+impl<'a, Subscription, SubscriptionType, Exe: Executor + ?Sized>
+    ConsumerBuilder<'a, Set<Regex>, Subscription, SubscriptionType, Exe>
 {
     pub fn with_namespace<S: Into<String>>(
         self,
         namespace: S,
-    ) -> ConsumerBuilder<'a, Set<Regex>, Subscription, SubscriptionType> {
+    ) -> ConsumerBuilder<'a, Set<Regex>, Subscription, SubscriptionType, Exe> {
         ConsumerBuilder {
             pulsar: self.pulsar,
             topic: self.topic,
@@ -761,7 +729,7 @@ impl<'a, Subscription, SubscriptionType>
     pub fn with_topic_refresh(
         self,
         refresh_interval: Duration,
-    ) -> ConsumerBuilder<'a, Set<Regex>, Subscription, SubscriptionType> {
+    ) -> ConsumerBuilder<'a, Set<Regex>, Subscription, SubscriptionType, Exe> {
         ConsumerBuilder {
             pulsar: self.pulsar,
             topic: self.topic,
@@ -778,13 +746,13 @@ impl<'a, Subscription, SubscriptionType>
     }
 }
 
-impl<'a, Topic, Subscription, SubscriptionType>
-    ConsumerBuilder<'a, Topic, Subscription, SubscriptionType>
+impl<'a, Topic, Subscription, SubscriptionType, Exe: Executor + ?Sized>
+    ConsumerBuilder<'a, Topic, Subscription, SubscriptionType, Exe>
 {
     pub fn with_consumer_id(
         mut self,
         consumer_id: u64,
-    ) -> ConsumerBuilder<'a, Topic, Subscription, SubscriptionType> {
+    ) -> ConsumerBuilder<'a, Topic, Subscription, SubscriptionType, Exe> {
         self.consumer_id = Some(consumer_id);
         self
     }
@@ -792,7 +760,7 @@ impl<'a, Topic, Subscription, SubscriptionType>
     pub fn with_consumer_name<S: Into<String>>(
         mut self,
         consumer_name: S,
-    ) -> ConsumerBuilder<'a, Topic, Subscription, SubscriptionType> {
+    ) -> ConsumerBuilder<'a, Topic, Subscription, SubscriptionType, Exe> {
         self.consumer_name = Some(consumer_name.into());
         self
     }
@@ -800,7 +768,7 @@ impl<'a, Topic, Subscription, SubscriptionType>
     pub fn with_batch_size(
         mut self,
         batch_size: u32,
-    ) -> ConsumerBuilder<'a, Topic, Subscription, SubscriptionType> {
+    ) -> ConsumerBuilder<'a, Topic, Subscription, SubscriptionType, Exe> {
         self.batch_size = Some(batch_size);
         self
     }
@@ -808,7 +776,7 @@ impl<'a, Topic, Subscription, SubscriptionType>
     pub fn with_options(
         mut self,
         options: ConsumerOptions,
-    ) -> ConsumerBuilder<'a, Topic, Subscription, SubscriptionType> {
+    ) -> ConsumerBuilder<'a, Topic, Subscription, SubscriptionType, Exe> {
         self.consumer_options = Some(options);
         self
     }
@@ -822,7 +790,7 @@ impl<'a, Topic, Subscription, SubscriptionType>
     }
 }
 
-impl<'a> ConsumerBuilder<'a, Set<String>, Set<String>, Set<SubType>> {
+impl<'a, Exe: Executor> ConsumerBuilder<'a, Set<String>, Set<String>, Set<SubType>, Exe> {
     pub async fn build<T: DeserializeMessage>(self) -> Result<Consumer<T>, Error> {
         let ConsumerBuilder {
             pulsar,
@@ -850,8 +818,8 @@ impl<'a> ConsumerBuilder<'a, Set<String>, Set<String>, Set<SubType>> {
     }
 }
 
-impl<'a> ConsumerBuilder<'a, Set<Regex>, Set<String>, Set<SubType>> {
-    pub fn build<T: DeserializeMessage>(self) -> MultiTopicConsumer<T> {
+impl<'a, Exe: Executor> ConsumerBuilder<'a, Set<Regex>, Set<String>, Set<SubType>, Exe> {
+    pub fn build<T: DeserializeMessage>(self) -> MultiTopicConsumer<T, Exe> {
         let ConsumerBuilder {
             pulsar,
             topic: Set(topic),
@@ -897,10 +865,10 @@ pub struct ConsumerState {
     pub messages_received: u64,
 }
 
-pub struct MultiTopicConsumer<T: DeserializeMessage> {
+pub struct MultiTopicConsumer<T: DeserializeMessage, Exe: Executor> {
     namespace: String,
     topic_regex: Regex,
-    pulsar: Pulsar,
+    pulsar: Pulsar<Exe>,
     unacked_message_resend_delay: Option<Duration>,
     consumers: BTreeMap<String, Pin<Box<Consumer<T>>>>,
     topics: VecDeque<String>,
@@ -914,9 +882,9 @@ pub struct MultiTopicConsumer<T: DeserializeMessage> {
     state_streams: Vec<UnboundedSender<ConsumerState>>,
 }
 
-impl<T: DeserializeMessage> MultiTopicConsumer<T> {
+impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
     pub fn new<S1, S2>(
-        pulsar: Pulsar,
+        pulsar: Pulsar<Exe>,
         namespace: S1,
         topic_regex: Regex,
         subscription: S2,
@@ -938,7 +906,7 @@ impl<T: DeserializeMessage> MultiTopicConsumer<T> {
             topics: VecDeque::new(),
             new_consumers: None,
             refresh: Box::pin(
-                tokio::time::interval(topic_refresh)
+                Exe::interval(topic_refresh)
                     .map(drop)
                     //.map_err(|e| panic!("error creating referesh timer: {}", e)),
             ),
@@ -1008,7 +976,7 @@ pub struct Message<T> {
     message_id: MessageData,
 }
 
-impl<T: DeserializeMessage> Debug for MultiTopicConsumer<T> {
+impl<T: DeserializeMessage, Exe: Executor> Debug for MultiTopicConsumer<T, Exe> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(
             f,
@@ -1018,7 +986,7 @@ impl<T: DeserializeMessage> Debug for MultiTopicConsumer<T> {
     }
 }
 
-impl<T: 'static + DeserializeMessage> Stream for MultiTopicConsumer<T> {
+impl<T: 'static + DeserializeMessage, Exe: Executor> Stream for MultiTopicConsumer<T, Exe> {
     type Item = Result<Message<T::Output>, Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -1127,10 +1095,13 @@ mod tests {
     use std::thread;
 
     use regex::Regex;
+    #[cfg(feature = "tokio-runtime")]
     use tokio::runtime::Runtime;
     use log::{LevelFilter};
 
-    use crate::{producer, Pulsar, SerializeMessage, executor::TokioExecutor, tests::TEST_LOGGER};
+    use crate::{producer, Pulsar, SerializeMessage, tests::TEST_LOGGER};
+    #[cfg(feature = "tokio-runtime")]
+    use crate::executor::TokioExecutor;
 
     use super::*;
 
@@ -1160,6 +1131,7 @@ mod tests {
 
     #[test]
     #[ignore]
+    #[cfg(feature = "tokio-runtime")]
     fn multi_consumer() {
         let _ = log::set_logger(&TEST_LOGGER);
         let _ = log::set_max_level(LevelFilter::Debug);
@@ -1194,8 +1166,7 @@ mod tests {
         let succ = successes.clone();
 
         let f = async move {
-            let executor = TokioExecutor(tokio::runtime::Handle::current());
-            let client: Pulsar = Pulsar::new(addr, None, executor).await.unwrap();
+            let client: Pulsar<TokioExecutor> = Pulsar::new(addr, None).await.unwrap();
             let producer = client.producer(None);
 
             let send_start = Utc::now();
@@ -1206,7 +1177,7 @@ mod tests {
 
             let data = vec![data1, data2, data3, data4];
 
-            let mut consumer: MultiTopicConsumer<TestData> = client
+            let mut consumer: MultiTopicConsumer<TestData, _> = client
                 .consumer()
                 .multi_topic(Regex::new("mt_test_[ab]").unwrap())
                 .with_namespace(namespace)
@@ -1263,8 +1234,10 @@ mod tests {
         }
 
     }
+
     #[test]
     #[ignore]
+    #[cfg(feature = "tokio-runtime")]
     fn consumer_dropped_with_lingering_acks() {
         use rand::{Rng, distributions::Alphanumeric};
         let _ = log::set_logger(&TEST_LOGGER);
@@ -1275,8 +1248,7 @@ mod tests {
         let topic = "issue_51";
 
         let f = async move {
-            let executor = TokioExecutor(tokio::runtime::Handle::current());
-            let client: Pulsar = Pulsar::new(addr, None, executor).await.unwrap();
+            let client: Pulsar<TokioExecutor> = Pulsar::new(addr, None).await.unwrap();
 
             let message = TestData {
                 topic: std::iter::repeat(()).map(|()| rand::thread_rng().sample(Alphanumeric))

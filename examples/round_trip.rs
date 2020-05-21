@@ -60,8 +60,7 @@ fn main() {
 
     let producer = async {
         let addr = "localhost";
-        let executor = TokioExecutor(tokio::runtime::Handle::current());
-        let pulsar: Pulsar = Pulsar::new(addr, None, executor).await.unwrap();
+        let pulsar: Pulsar<TokioExecutor> = Pulsar::new(addr, None).await.unwrap();
         let producer = pulsar.create_producer("test", Some("my-producer".to_string()), producer::ProducerOptions {
             schema: Some(proto::Schema {
                       type_: proto::schema::Type::String as i32,
@@ -87,8 +86,7 @@ fn main() {
 
     let consumer = async {
         let addr = "localhost";
-        let executor = TokioExecutor(tokio::runtime::Handle::current());
-        let pulsar: Pulsar = Pulsar::new(addr, None, executor).await.unwrap();
+        let pulsar: Pulsar<TokioExecutor> = Pulsar::new(addr, None).await.unwrap();
 
         let mut consumer: Consumer<TestData> = pulsar
             .consumer()

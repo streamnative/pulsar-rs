@@ -1,13 +1,11 @@
 use crate::connection::{Authentication, Connection};
 use crate::connection_manager::{BrokerAddress, ConnectionManager};
 use crate::error::ServiceDiscoveryError;
-use crate::executor::{Executor, TaskExecutor};
+use crate::executor:: Executor;
 use crate::message::proto::{command_lookup_topic_response, CommandLookupTopicResponse};
 use futures::{future::try_join_all, FutureExt};
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
-use trust_dns_resolver::config::*;
-use trust_dns_resolver::TokioAsyncResolver;
 use url::Url;
 
 /// Look up broker addresses for topics and partitioned topics
@@ -16,44 +14,26 @@ use url::Url;
 /// interacting with a cluster. It will automatically follow redirects
 /// or use a proxy, and aggregate broker connections
 #[derive(Clone)]
-pub struct ServiceDiscovery {
-    manager: Arc<ConnectionManager>,
-    executor: TaskExecutor,
-    resolver: TokioAsyncResolver,
+pub struct ServiceDiscovery<Exe: Executor + ?Sized> {
+    manager: Arc<ConnectionManager<Exe>>,
 }
 
-impl ServiceDiscovery {
-    pub async fn new<E: Executor + 'static>(
+impl<Exe: Executor> ServiceDiscovery<Exe> {
+    pub async fn new(
         addr: SocketAddr,
         auth: Option<Authentication>,
-        executor: E,
     ) -> Result<Self, ServiceDiscoveryError> {
-        let executor = TaskExecutor::new(executor);
-        let conn = ConnectionManager::new(addr, auth, executor.clone()).await?;
-        let resolver =
-            TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default())
-                .await
-                .map_err(|e| {
-                    error!("could not create DNS resolver: {:?}", e);
-                    ServiceDiscoveryError::Canceled
-                })?;
+        let conn = ConnectionManager::new(addr, auth).await?;
         Ok(ServiceDiscovery::with_manager(
             Arc::new(conn),
-            executor,
-            resolver,
         ))
     }
 
-    pub fn with_manager<E: Executor + 'static>(
-        manager: Arc<ConnectionManager>,
-        executor: E,
-        resolver: TokioAsyncResolver,
+    pub fn with_manager(
+        manager: Arc<ConnectionManager<Exe>>,
     ) -> Self {
-        let executor = TaskExecutor::new(executor);
         ServiceDiscovery {
             manager,
-            executor,
-            resolver,
         }
     }
 
@@ -156,20 +136,13 @@ impl ServiceDiscovery {
             let address = if proxied_query || proxy {
                 base_address
             } else {
-                let results: Result<_, _> = self
-                    .resolver
-                    .lookup_ip(broker_name.as_str())
-                    .await
-                    .map_err(move |e| {
-                        error!("DNS lookup error: {:?}", e);
-                        ServiceDiscoveryError::DnsLookupError
-                    });
-                match results {
-                    Err(_) => return Err(ServiceDiscoveryError::DnsLookupError),
-                    Ok(lookup) => {
-                        let i: std::net::IpAddr = lookup.iter().next().unwrap();
-                        SocketAddr::new(i, broker_port)
-                    }
+                match Exe::spawn_blocking(move|| {
+                    (broker_name.as_str(), broker_port).to_socket_addrs().map_err(|e| {
+                        error!("error querying '{}': {:?}", broker_name, e);
+                    }).ok().and_then(|mut it| it.next())
+                }).await {
+                    Some(Some(address)) => address,
+                    _ => return Err(ServiceDiscoveryError::DnsLookupError)
                 }
             };
 

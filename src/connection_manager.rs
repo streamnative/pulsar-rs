@@ -1,9 +1,10 @@
 use crate::connection::{Authentication, Connection};
 use crate::error::ConnectionError;
-use crate::executor::{Executor, TaskExecutor};
+use crate::executor::Executor;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::marker::PhantomData;
 
 /// holds connection information for a broker
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -22,38 +23,34 @@ pub struct BrokerAddress {
 /// interacting with a cluster. It will automatically follow redirects
 /// or use a proxy, and aggregate broker connections
 #[derive(Clone)]
-pub struct ConnectionManager {
+pub struct ConnectionManager<Exe: Executor + ?Sized> {
     pub address: SocketAddr,
     base: Arc<Connection>,
     auth: Option<Authentication>,
-    executor: TaskExecutor,
+    executor: PhantomData<Exe>,
     connections: Arc<Mutex<HashMap<BrokerAddress, Arc<Connection>>>>,
 }
 
-impl ConnectionManager {
-    pub async fn new<E: Executor + 'static>(
+impl<Exe: Executor> ConnectionManager<Exe> {
+    pub async fn new(
         addr: SocketAddr,
         auth: Option<Authentication>,
-        executor: E,
     ) -> Result<Self, ConnectionError> {
-        let executor = TaskExecutor::new(executor);
-        let conn = Connection::new(addr.to_string(), auth.clone(), None, executor.clone()).await?;
-        ConnectionManager::from_connection(conn, auth, addr, executor)
+        let conn = Connection::new::<Exe>(addr.to_string(), auth.clone(), None).await?;
+        ConnectionManager::from_connection(conn, auth, addr)
     }
 
-    pub fn from_connection<E: Executor + 'static>(
+    pub fn from_connection(
         connection: Connection,
         auth: Option<Authentication>,
         address: SocketAddr,
-        executor: E,
-    ) -> Result<ConnectionManager, ConnectionError> {
-        let executor = TaskExecutor::new(executor);
+    ) -> Result<Self, ConnectionError> {
         let base = Arc::new(connection);
         Ok(ConnectionManager {
             address,
             base,
             auth,
-            executor,
+            executor: PhantomData,
             connections: Arc::new(Mutex::new(HashMap::new())),
         })
     }
@@ -116,11 +113,10 @@ impl ConnectionManager {
             None
         };
 
-        let conn = Connection::new(
+        let conn = Connection::new::<Exe>(
             broker.address.to_string(),
             self.auth.clone(),
             proxy_url,
-            self.executor.clone(),
         )
         .await?;
         let c = Arc::new(conn);

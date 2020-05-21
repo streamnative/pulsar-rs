@@ -17,7 +17,11 @@ pub use consumer::{
     Consumer, ConsumerBuilder, ConsumerOptions, ConsumerState, Message, MultiTopicConsumer,
 };
 pub use error::{ConnectionError, ConsumerError, Error, ProducerError, ServiceDiscoveryError};
-pub use executor::{Executor, TaskExecutor, TokioExecutor};
+pub use executor::Executor;
+#[cfg(feature = "tokio-runtime")]
+pub use executor::TokioExecutor;
+#[cfg(feature = "async-std-runtime")]
+pub use executor::AsyncStdExecutor;
 pub use message::proto;
 pub use message::proto::command_subscribe::SubType;
 pub use producer::{Producer, ProducerOptions, TopicProducer};
@@ -37,8 +41,10 @@ mod service_discovery;
 mod tests {
     use std::time::{Duration, Instant};
 
-    use futures::{StreamExt, TryStreamExt};
+    use futures::StreamExt;
+    #[cfg(feature = "tokio-runtime")]
     use tokio;
+    #[cfg(feature = "tokio-runtime")]
     use tokio::runtime::Runtime;
 
     use message::proto::command_subscribe::SubType;
@@ -47,6 +53,7 @@ mod tests {
     use crate::consumer::Message;
     use crate::message::Payload;
     use crate::Error as PulsarError;
+    #[cfg(feature = "tokio-runtime")]
     use crate::executor::TokioExecutor;
 
     use super::*;
@@ -145,6 +152,7 @@ mod tests {
 
     #[test]
     #[ignore]
+    #[cfg(feature = "tokio-runtime")]
     fn round_trip() {
         let mut runtime = Runtime::new().unwrap();
         let _ = log::set_logger(&TEST_LOGGER);
@@ -152,8 +160,7 @@ mod tests {
 
         let f = async {
             let addr = "127.0.0.1:6650";
-            let executor = TokioExecutor(tokio::runtime::Handle::current());
-            let pulsar: Pulsar = Pulsar::new(addr, None, executor).await.unwrap();
+            let pulsar: Pulsar<TokioExecutor> = Pulsar::new(addr, None).await.unwrap();
             let producer = pulsar.producer(None);
 
             for _ in 0u16..5000 {
@@ -200,15 +207,15 @@ mod tests {
 
     #[test]
     #[ignore]
+    #[cfg(feature = "tokio-runtime")]
     fn unsized_data() {
         let _ = log::set_logger(&TEST_LOGGER);
         let _ = log::set_max_level(LevelFilter::Debug);
         let mut runtime = Runtime::new().unwrap();
 
         let f = async {
-            let executor = TokioExecutor(tokio::runtime::Handle::current());
             let addr = "127.0.0.1:6650";
-            let pulsar: Pulsar = Pulsar::new(addr, None, executor).await.unwrap();
+            let pulsar: Pulsar<TokioExecutor> = Pulsar::new(addr, None).await.unwrap();
             let producer = pulsar.producer(None);
 
             // test &str
@@ -270,6 +277,7 @@ mod tests {
 
     #[test]
     #[ignore]
+    #[cfg(feature = "tokio-runtime")]
     fn redelivery() {
         let _ = log::set_logger(&TEST_LOGGER);
         let _ = log::set_max_level(LevelFilter::Debug);
@@ -284,8 +292,7 @@ mod tests {
 
         let message_count = 10;
         let f = async move {
-            let executor = TokioExecutor(tokio::runtime::Handle::current());
-            let pulsar: Pulsar = Pulsar::new(addr, None, executor).await.unwrap();
+            let pulsar: Pulsar<TokioExecutor> = Pulsar::new(addr, None).await.unwrap();
 
             let producer = pulsar.producer(None);
 

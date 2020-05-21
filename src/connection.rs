@@ -12,14 +12,16 @@ use futures::{
     self,
     channel::{mpsc, oneshot},
     task::{Poll, Context},
-    Future, FutureExt, SinkExt, Stream, StreamExt,
+    Future, FutureExt, Sink, SinkExt, Stream, StreamExt,
 };
+#[cfg(feature = "tokio-runtime")]
 use tokio::net::TcpStream;
+#[cfg(feature = "tokio-runtime")]
 use tokio_util;
 
 use crate::consumer::ConsumerOptions;
 use crate::error::{ConnectionError, SharedError};
-use crate::executor::{Executor, TaskExecutor};
+use crate::executor::{Executor, ExecutorKind};
 use crate::message::{
     proto::{self, command_subscribe::SubType},
     Codec, Message,
@@ -430,22 +432,53 @@ pub struct Connection {
     addr: String,
     sender: ConnectionSender,
     receiver_shutdown: Option<oneshot::Sender<()>>,
-    executor: TaskExecutor,
 }
 
 impl Connection {
-    pub async fn new<E: Executor+'static>(
+    pub async fn new<Exe: Executor + ?Sized>(
         addr: String,
         auth_data: Option<Authentication>,
         proxy_to_broker_url: Option<String>,
-        executor: E,
     ) -> Result<Connection, ConnectionError> {
         let address = SocketAddr::from_str(&addr)
             .map_err(|e| ConnectionError::SocketAddr(e.to_string()))?;
 
-        let mut stream = TcpStream::connect(&address).await
-            .map(|stream| tokio_util::codec::Framed::new(stream, Codec))?;
+        match Exe::kind() {
+            #[cfg(feature = "tokio-runtime")]
+            ExecutorKind::Tokio => {
+                let stream = tokio::net::TcpStream::connect(&address).await
+                    .map(|stream| tokio_util::codec::Framed::new(stream, Codec))?;
 
+                Connection::from_stream::<Exe, _>(addr, stream, auth_data, proxy_to_broker_url).await
+            },
+            #[cfg(not(feature = "tokio_runtime"))]
+            ExecutorKind::Tokio => {
+                unimplemented!("the tokio-runtime cargo feature is not active");
+            }
+            #[cfg(feature = "async-std-runtime")]
+            ExecutorKind::AsyncStd => {
+                let stream = async_std::net::TcpStream::connect(&address).await
+                    .map(|stream| futures_codec::Framed::new(stream, Codec))?;
+
+                Connection::from_stream::<Exe, _>(addr, stream, auth_data, proxy_to_broker_url).await
+            }
+            #[cfg(not(feature = "async-std-runtime"))]
+            ExecutorKind::AsyncStd => {
+                unimplemented!("the async-std-runtime cargo feature is not active");
+            }
+        }
+    }
+
+    pub async fn from_stream<Exe: Executor+ ?Sized, S>(
+        addr: String,
+        mut stream: S,
+        auth_data: Option<Authentication>,
+        proxy_to_broker_url: Option<String>,
+    ) -> Result<Connection, ConnectionError>
+    where
+      S: Stream<Item = Result<Message, ConnectionError>>,
+      S: Sink<Message, Error = ConnectionError>,
+      S: Send + std::marker::Unpin +'static {
         let _ = stream
             .send({
                 let msg = messages::connect(auth_data, proxy_to_broker_url);
@@ -483,9 +516,8 @@ impl Connection {
         let (registrations_tx, registrations_rx) = mpsc::unbounded();
         let error = SharedError::new();
         let (receiver_shutdown_tx, receiver_shutdown_rx) = oneshot::channel();
-        let executor = TaskExecutor::new(executor);
 
-        if let Err(_) = executor.spawn(Box::pin(Receiver::new(
+        if let Err(_) = Exe::spawn(Box::pin(Receiver::new(
                     stream,
                     tx.clone(),
                     error.clone(),
@@ -497,7 +529,7 @@ impl Connection {
         }
 
         let err = error.clone();
-        if let Err(_) = executor.spawn(Box::pin(async move {
+        if let Err(_) = Exe::spawn(Box::pin(async move {
             while let Some(msg) = rx.next().await {
                 if let Err(e) = sink.send(msg).await {
                     err.set(e);
@@ -515,7 +547,6 @@ impl Connection {
             addr,
             sender,
             receiver_shutdown: Some(receiver_shutdown_tx),
-            executor,
         })
     }
 
@@ -534,10 +565,6 @@ impl Connection {
     /// Chain to send a message, e.g. conn.sender().send_ping()
     pub fn sender(&self) -> &ConnectionSender {
         &self.sender
-    }
-
-    pub fn executor(&self) -> TaskExecutor {
-        self.executor.clone()
     }
 }
 
