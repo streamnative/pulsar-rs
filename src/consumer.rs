@@ -1236,7 +1236,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     #[cfg(feature = "tokio-runtime")]
     fn consumer_dropped_with_lingering_acks() {
         use rand::{Rng, distributions::Alphanumeric};
@@ -1270,6 +1269,8 @@ mod tests {
                     .with_topic(topic)
                     .with_subscription("dropped_ack")
                     .with_subscription_type(SubType::Shared)
+                    // get earliest messages
+                    .with_options(ConsumerOptions { initial_position: Some(1), ..Default::default() })
                     .build().await.unwrap();
 
                 println!("created consumer");
@@ -1288,6 +1289,7 @@ mod tests {
                     .with_topic(topic)
                     .with_subscription("dropped_ack")
                     .with_subscription_type(SubType::Shared)
+                    .with_options(ConsumerOptions { initial_position: Some(1), ..Default::default() })
                     .build().await.unwrap();
 
                 println!("created second consumer");

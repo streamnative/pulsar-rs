@@ -215,7 +215,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     #[cfg(feature = "tokio-runtime")]
     fn unsized_data() {
         let _ = log::set_logger(&TEST_LOGGER);
