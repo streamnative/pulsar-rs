@@ -18,30 +18,22 @@ use crate::service_discovery::ServiceDiscovery;
 /// Helper trait for consumer deserialization
 pub trait DeserializeMessage {
     type Output: Sized;
-    fn deserialize_message(payload: Payload) -> Self::Output;
-}
-
-impl DeserializeMessage for Payload {
-    type Output = Self;
-
-    fn deserialize_message(payload: Payload) -> Self::Output {
-        payload
-    }
+    fn deserialize_message(payload: &Payload) -> Self::Output;
 }
 
 impl DeserializeMessage for Vec<u8> {
     type Output = Self;
 
-    fn deserialize_message(payload: Payload) -> Self::Output {
-        payload.data
+    fn deserialize_message(payload: &Payload) -> Self::Output {
+        payload.data.to_vec()
     }
 }
 
 impl DeserializeMessage for String {
     type Output = Result<String, FromUtf8Error>;
 
-    fn deserialize_message(payload: Payload) -> Self::Output {
-        String::from_utf8(payload.data)
+    fn deserialize_message(payload: &Payload) -> Self::Output {
+        String::from_utf8(payload.data.to_vec())
     }
 }
 

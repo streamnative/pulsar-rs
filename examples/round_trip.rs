@@ -27,7 +27,7 @@ impl SerializeMessage for TestData {
 impl DeserializeMessage for TestData {
     type Output = Result<TestData, serde_json::Error>;
 
-    fn deserialize_message(payload: Payload) -> Self::Output {
+    fn deserialize_message(payload: &Payload) -> Self::Output {
         serde_json::from_slice(&payload.data)
     }
 }
@@ -102,7 +102,7 @@ fn main() {
         while let Some(res) = consumer.next().await {
             let msg = res.unwrap();
             consumer.ack(&msg);
-            let data = msg.payload.unwrap();
+            let data = msg.deserialize().unwrap();
             /*let Message { payload, ack, .. } = res.unwrap();
             ack.ack();
             let data = payload.unwrap();

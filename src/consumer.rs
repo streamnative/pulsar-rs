@@ -135,7 +135,7 @@ impl<T: DeserializeMessage> Consumer<T> {
         Ok(())
     }
 
-    pub fn ack(&self, msg: &Message<T::Output>) -> Result<(), ConnectionError> {
+    pub fn ack(&self, msg: &Message<T>) -> Result<(), ConnectionError> {
         self
             .connection
             .sender()
@@ -145,7 +145,7 @@ impl<T: DeserializeMessage> Consumer<T> {
                 false)
     }
 
-    pub fn cumulative_ack(&self, msg: &Message<T::Output>) -> Result<(), ConnectionError> {
+    pub fn cumulative_ack(&self, msg: &Message<T>) -> Result<(), ConnectionError> {
         self
             .connection
             .sender()
@@ -155,7 +155,7 @@ impl<T: DeserializeMessage> Consumer<T> {
                 true)
     }
 
-    pub fn nack(&self, msg: &Message<T::Output>) {
+    pub fn nack(&self, msg: &Message<T>) {
         let _ = self.nack_handler.unbounded_send(NackMessage {
             consumer_id: self.id,
             message_ids: vec![msg.message_id.clone()],
@@ -166,18 +166,19 @@ impl<T: DeserializeMessage> Consumer<T> {
         &self,
         message_id: proto::MessageIdData,
         payload: Payload,
-    ) -> Message<T::Output> {
+    ) -> Message<T> {
         Message {
             topic: self.topic.clone(),
             message_id: MessageData {
                 id: message_id,
                 batch_size: payload.metadata.num_messages_in_batch.clone(),
             },
-            payload: T::deserialize_message(payload),
+            payload,
+            _phantom: PhantomData,
         }
     }
 
-    fn poll_current_message(&mut self) -> Poll<Message<T::Output>> {
+    fn poll_current_message(&mut self) -> Poll<Message<T>> {
         if let Some(mut iterator) = self.current_message.take() {
             match iterator.next() {
                 Some((id, payload)) => {
@@ -426,7 +427,7 @@ impl Iterator for BatchedMessageIterator {
 }
 
 impl<T: DeserializeMessage> Stream for Consumer<T> {
-    type Item = Result<Message<T::Output>, Error>;
+    type Item = Result<Message<T>, Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if let Poll::Ready(message) = self.poll_current_message() {
@@ -961,7 +962,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
         self.send_state();
     }
 
-    pub fn ack(&self, msg: &Message<T::Output>) -> Result<(), ConnectionError> {
+    pub fn ack(&self, msg: &Message<T>) -> Result<(), ConnectionError> {
         if let Some(c) = self.consumers.get(&msg.topic) {
             c.ack(&msg)
         } else {
@@ -972,8 +973,15 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
 
 pub struct Message<T> {
     pub topic: String,
-    pub payload: T,
+    pub payload: Payload,
     message_id: MessageData,
+    _phantom: PhantomData<T>,
+}
+
+impl<T: DeserializeMessage> Message<T> {
+  pub fn deserialize(&self) -> T::Output {
+      T::deserialize_message(&self.payload)
+  }
 }
 
 impl<T: DeserializeMessage, Exe: Executor> Debug for MultiTopicConsumer<T, Exe> {
@@ -987,7 +995,7 @@ impl<T: DeserializeMessage, Exe: Executor> Debug for MultiTopicConsumer<T, Exe> 
 }
 
 impl<T: 'static + DeserializeMessage, Exe: Executor> Stream for MultiTopicConsumer<T, Exe> {
-    type Item = Result<Message<T::Output>, Error>;
+    type Item = Result<Message<T>, Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if let Some(mut new_consumers) = self.new_consumers.take() {
@@ -1124,7 +1132,7 @@ mod tests {
     impl DeserializeMessage for TestData {
         type Output = Result<TestData, serde_json::Error>;
 
-        fn deserialize_message(payload: Payload) -> Self::Output {
+        fn deserialize_message(payload: &Payload) -> Self::Output {
             serde_json::from_slice(&payload.data)
         }
     }
@@ -1193,7 +1201,7 @@ mod tests {
                 match res {
                     Ok(message) => {
                         consumer.ack(&message);
-                        let msg = message.payload.unwrap();
+                        let msg = message.deserialize().unwrap();
                         if !data.contains(&msg) {
                             panic!("Unexpected message: {:?}", &msg);
                         } else {
@@ -1278,7 +1286,7 @@ mod tests {
                 //consumer.next().await
                 let msg = consumer.next().await.unwrap().unwrap();
                 println!("got message: {:?}", msg.payload);
-                assert_eq!(&message, msg.payload.as_ref().unwrap(), "we pobably receive a message from a previous run of the test");
+                assert_eq!(message, msg.deserialize().unwrap(), "we probably receive a message from a previous run of the test");
                 consumer.ack(&msg);
             }
 
@@ -1303,7 +1311,7 @@ mod tests {
                     // cleanup for the next test
                     consumer.ack(&msg);
                     // we should not receive a different message anyway
-                    assert_eq!(&message, msg.payload.as_ref().unwrap());
+                    assert_eq!(message, msg.deserialize().unwrap());
                 }
 
                 assert!(is_err, "waiting for a message should have timed out, since we already acknowledged the only message in the queue");
