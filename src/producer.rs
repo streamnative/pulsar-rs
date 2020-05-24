@@ -122,7 +122,7 @@ impl Producer {
         }
     }
 
-    pub async fn send_message<S: Into<String>>(
+    async fn send_message<S: Into<String>>(
         &self,
         topic: S,
         message: Message,
@@ -399,7 +399,7 @@ impl TopicProducer {
             .map(|e| ProducerError::Connection(e).into())
     }
 
-    pub async fn send_raw(
+    async fn send_raw(
         &self,
         message: Message,
     ) -> Result<proto::CommandSendReceipt, Error> {

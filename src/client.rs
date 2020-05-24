@@ -49,6 +49,16 @@ pub trait SerializeMessage {
     fn serialize_message(input: &Self) -> Result<producer::Message, Error>;
 }
 
+impl SerializeMessage for Vec<u8> {
+    fn serialize_message(input: &Self) -> Result<producer::Message, Error> {
+        //TODO figure out how to avoid copying here
+        Ok(producer::Message {
+            payload: input.to_vec(),
+            ..Default::default()
+        })
+    }
+}
+
 impl SerializeMessage for [u8] {
     fn serialize_message(input: &Self) -> Result<producer::Message, Error> {
         //TODO figure out how to avoid copying here
@@ -303,26 +313,14 @@ impl<Exe: Executor> Pulsar<Exe> {
         future::try_join_all(res).await
     }
 
-    pub async fn send<S: Into<String>, M: SerializeMessage + ?Sized>(
+    pub async fn send<S: Into<String>, M: SerializeMessage + Sized>(
         &self,
         topic: S,
-        message: &M,
-        options: ProducerOptions,
-    ) -> Result<CommandSendReceipt, Error> {
-        match M::serialize_message(message) {
-            Ok(message) => self.send_raw::<S>(message, topic, options).await,
-            Err(e) => Err(e),
-        }
-    }
-
-    pub async fn send_raw<S: Into<String>>(
-        &self,
-        message: producer::Message,
-        topic: S,
+        message: M,
         options: ProducerOptions,
     ) -> Result<CommandSendReceipt, Error> {
         let producer = self.create_producer(topic, None, options).await?;
-        producer.send_raw(message).await
+        producer.send(message).await
     }
 
     pub fn producer(&self, options: Option<ProducerOptions>) -> Producer {

@@ -267,8 +267,7 @@ mod tests {
                     .await
                     .unwrap();
 
-                let message = producer::Message { payload: send_data.to_vec(), ..Default::default() };
-                producer.send_message(topic, message).await.unwrap();
+                producer.send(topic, send_data.to_vec()).await.unwrap();
 
                 let msg = consumer.next().await.unwrap().unwrap();
                 consumer.ack(&msg);
