@@ -41,7 +41,7 @@ mod service_discovery;
 mod tests {
     use std::time::{Duration, Instant};
 
-    use futures::StreamExt;
+    use futures::{StreamExt, TryStreamExt};
     #[cfg(feature = "tokio-runtime")]
     use tokio;
     #[cfg(feature = "tokio-runtime")]
@@ -81,7 +81,7 @@ mod tests {
     impl DeserializeMessage for TestData {
         type Output = Result<TestData, serde_json::Error>;
 
-        fn deserialize_message(payload: Payload) -> Self::Output {
+        fn deserialize_message(payload: &Payload) -> Self::Output {
             serde_json::from_slice(&payload.data)
         }
     }
@@ -189,12 +189,11 @@ mod tests {
             info!("sent");
             //let mut stream = consumer.take(5000);
             let mut count = 0usize;
-            while let Some(res) = consumer.next().await {
+            while let Ok(Some(msg)) = consumer.try_next().await {
             //let res =  consumer.next().await.unwrap();
-                let msg = res.unwrap();
+                //let msg = res.unwrap();
                 consumer.ack(&msg);
-                let Message { payload, .. } = msg;
-                let data = payload.unwrap();
+                let data = msg.deserialize().unwrap();
                 if data.data.as_str() != "data" {
                     panic!("Unexpected payload: {}", &data.data);
                 }
@@ -244,9 +243,8 @@ mod tests {
 
                 let msg = consumer.next().await.unwrap().unwrap();
                 consumer.ack(&msg);
-                let Message { payload, .. } = msg;
 
-                let data = payload.unwrap();
+                let data = msg.deserialize().unwrap();
                 if data.as_str() != send_data {
                     panic!("Unexpected payload in &str test: {}", &data);
                 }
@@ -272,8 +270,7 @@ mod tests {
 
                 let msg = consumer.next().await.unwrap().unwrap();
                 consumer.ack(&msg);
-                let Message { payload, .. } = msg;
-                let data = payload;
+                let data = msg.deserialize();
                 if data.as_slice() != send_data {
                     panic!("Unexpected payload in &[u8] test: {:?}", &data);
                 }
@@ -334,7 +331,7 @@ mod tests {
             while let Some(res) = consumer.next().await {
 
                 let message = res.unwrap();
-                let data = message.payload.as_ref().unwrap().clone();
+                let data = message.deserialize().unwrap();
                 tx.send(data.data.clone()).unwrap();
                 if !seen.contains(&data.data) {
                     seen.insert(data.data.clone());
