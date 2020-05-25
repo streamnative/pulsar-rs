@@ -112,6 +112,7 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
                 .await?;
             let LookupResponse {
                 broker_name,
+                broker_hostname,
                 broker_url,
                 broker_port,
                 proxy,
@@ -139,6 +140,7 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
 
             let b = BrokerAddress {
                 address,
+                hostname: broker_hostname,
                 broker_url,
                 proxy: proxied_query || proxy,
                 tls,
@@ -175,6 +177,7 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
 
 struct LookupResponse {
     pub broker_name: String,
+    pub broker_hostname: String,
     pub broker_url: String,
     pub broker_port: u16,
     pub proxy: bool,
@@ -248,6 +251,7 @@ fn convert_lookup_response(
 
     Ok(LookupResponse {
         broker_name,
+        broker_hostname: broker_url.clone(),
         broker_url,
         broker_port,
         proxy,

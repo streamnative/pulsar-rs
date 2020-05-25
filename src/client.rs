@@ -103,6 +103,7 @@ impl<Exe: Executor> Pulsar<Exe> {
             error!("invalid scheme: {}", url.scheme());
             return Err(Error::ServiceDiscovery(ServiceDiscoveryError::NotFound));
         }
+        let hostname = url.host().map(|s| s.to_string());
 
         let tls = match url.scheme() {
             "pulsar" => false,
@@ -127,7 +128,9 @@ impl<Exe: Executor> Pulsar<Exe> {
             _ => return Err(Error::Custom(format!("could not query address: {}", addr))),
         };
 
-        let manager = ConnectionManager::new(address, auth, tls).await?;
+        let hostname = hostname.unwrap_or_else(|| address.to_string());
+
+        let manager = ConnectionManager::new(address, hostname, auth, tls).await?;
         let manager = Arc::new(manager);
         let service_discovery = Arc::new(ServiceDiscovery::with_manager(
                 manager.clone(),

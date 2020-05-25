@@ -11,6 +11,8 @@ use std::marker::PhantomData;
 pub struct BrokerAddress {
     /// IP and port (using the proxy's if applicable)
     pub address: SocketAddr,
+    /// hostname
+    pub hostname: String,
     /// pulsar URL for the broker
     pub broker_url: String,
     /// true if we're connecting through a proxy
@@ -36,10 +38,11 @@ pub struct ConnectionManager<Exe: Executor + ?Sized> {
 impl<Exe: Executor> ConnectionManager<Exe> {
     pub async fn new(
         addr: SocketAddr,
+        hostname: String,
         auth: Option<Authentication>,
         tls: bool,
     ) -> Result<Self, ConnectionError> {
-        let conn = Connection::new::<Exe>(addr.to_string(), auth.clone(), None, tls).await?;
+        let conn = Connection::new::<Exe>(addr.to_string(), hostname, auth.clone(), None, tls).await?;
         ConnectionManager::from_connection(conn, auth, addr)
     }
 
@@ -118,6 +121,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
 
         let conn = Connection::new::<Exe>(
             broker.address.to_string(),
+            broker.hostname.clone(),
             self.auth.clone(),
             proxy_url,
             broker.tls,
