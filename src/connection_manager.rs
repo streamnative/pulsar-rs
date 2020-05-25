@@ -15,6 +15,8 @@ pub struct BrokerAddress {
     pub broker_url: String,
     /// true if we're connecting through a proxy
     pub proxy: bool,
+    /// true if we're connecting with TLS
+    pub tls: bool,
 }
 
 /// Look up broker addresses for topics and partitioned topics
@@ -35,8 +37,9 @@ impl<Exe: Executor> ConnectionManager<Exe> {
     pub async fn new(
         addr: SocketAddr,
         auth: Option<Authentication>,
+        tls: bool,
     ) -> Result<Self, ConnectionError> {
-        let conn = Connection::new::<Exe>(addr.to_string(), auth.clone(), None).await?;
+        let conn = Connection::new::<Exe>(addr.to_string(), auth.clone(), None, tls).await?;
         ConnectionManager::from_connection(conn, auth, addr)
     }
 
@@ -117,6 +120,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
             broker.address.to_string(),
             self.auth.clone(),
             proxy_url,
+            broker.tls,
         )
         .await?;
         let c = Arc::new(conn);

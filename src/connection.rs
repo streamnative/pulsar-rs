@@ -439,6 +439,7 @@ impl Connection {
         addr: String,
         auth_data: Option<Authentication>,
         proxy_to_broker_url: Option<String>,
+        tls: bool,
     ) -> Result<Connection, ConnectionError> {
         let address = SocketAddr::from_str(&addr)
             .map_err(|e| ConnectionError::SocketAddr(e.to_string()))?;

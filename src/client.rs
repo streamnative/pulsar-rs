@@ -104,6 +104,15 @@ impl<Exe: Executor> Pulsar<Exe> {
             return Err(Error::ServiceDiscovery(ServiceDiscoveryError::NotFound));
         }
 
+        let tls = match url.scheme() {
+            "pulsar" => false,
+            "pulsar+ssl" => true,
+            s => {
+                error!("invalid scheme: {}", s);
+                return Err(Error::ServiceDiscovery(ServiceDiscoveryError::NotFound));
+            },
+        };
+
         let address: SocketAddr = match Exe::spawn_blocking(move || {
             url.socket_addrs(|| match url.scheme() {
                 "pulsar" => Some(6650),
@@ -118,7 +127,7 @@ impl<Exe: Executor> Pulsar<Exe> {
             _ => return Err(Error::Custom(format!("could not query address: {}", addr))),
         };
 
-        let manager = ConnectionManager::new(address, auth).await?;
+        let manager = ConnectionManager::new(address, auth, tls).await?;
         let manager = Arc::new(manager);
         let service_discovery = Arc::new(ServiceDiscovery::with_manager(
                 manager.clone(),

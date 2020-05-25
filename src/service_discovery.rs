@@ -19,16 +19,6 @@ pub struct ServiceDiscovery<Exe: Executor + ?Sized> {
 }
 
 impl<Exe: Executor> ServiceDiscovery<Exe> {
-    pub async fn new(
-        addr: SocketAddr,
-        auth: Option<Authentication>,
-    ) -> Result<Self, ServiceDiscoveryError> {
-        let conn = ConnectionManager::new(addr, auth).await?;
-        Ok(ServiceDiscovery::with_manager(
-            Arc::new(conn),
-        ))
-    }
-
     pub fn with_manager(
         manager: Arc<ConnectionManager<Exe>>,
     ) -> Self {
@@ -127,6 +117,7 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
                 proxy,
                 redirect,
                 authoritative,
+                tls,
             } = convert_lookup_response(&response)?;
             is_authoritative = authoritative;
 
@@ -150,6 +141,7 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
                 address,
                 broker_url,
                 proxy: proxied_query || proxy,
+                tls,
             };
 
             // if the response indicated a redirect, do another query
@@ -188,6 +180,7 @@ struct LookupResponse {
     pub proxy: bool,
     pub redirect: bool,
     pub authoritative: bool,
+    pub tls: bool,
 }
 
 /// extracts information from a lookup response
@@ -211,12 +204,13 @@ fn convert_lookup_response(
 
     // FIXME: only using the plaintext url for now
     let url = Url::parse(
+        response.broker_service_url_tls.as_ref().or(
         response
-            .broker_service_url
-            .as_ref()
+            .broker_service_url.as_ref())
             .ok_or(ServiceDiscoveryError::NotFound)?,
     )
     .map_err(|_| ServiceDiscoveryError::NotFound)?;
+
     let broker_name = url
         .host_str()
         .ok_or(ServiceDiscoveryError::NotFound)?
@@ -232,10 +226,25 @@ fn convert_lookup_response(
             .ok_or(ServiceDiscoveryError::NotFound)?
             .to_string()
     };
-    let broker_port = url.port().unwrap_or(6650);
+    let broker_port = url.port().unwrap_or(match url.scheme() {
+      "pulsar" => 6650,
+      "pulsar+ssl" => 6651,
+      s => {
+          error!("invalid scheme: {}", s);
+          return Err(ServiceDiscoveryError::NotFound);
+      },
+    });
     let authoritative = response.authoritative.unwrap_or(false);
     let redirect =
         response.response == Some(command_lookup_topic_response::LookupType::Redirect as i32);
+    let tls = match url.scheme() {
+      "pulsar" => false,
+      "pulsar+ssl" => true,
+      s => {
+          error!("invalid scheme: {}", s);
+          return Err(ServiceDiscoveryError::NotFound);
+      },
+    };
 
     Ok(LookupResponse {
         broker_name,
@@ -244,5 +253,6 @@ fn convert_lookup_response(
         proxy,
         redirect,
         authoritative,
+        tls,
     })
 }
