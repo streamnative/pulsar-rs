@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::net::SocketAddr;
-use std::str::FromStr;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -14,10 +13,7 @@ use futures::{
     task::{Poll, Context},
     Future, FutureExt, Sink, SinkExt, Stream, StreamExt,
 };
-#[cfg(feature = "tokio-runtime")]
-use tokio::net::TcpStream;
-#[cfg(feature = "tokio-runtime")]
-use tokio_util;
+use url::Url;
 
 use crate::consumer::ConsumerOptions;
 use crate::error::{ConnectionError, SharedError};
@@ -429,21 +425,53 @@ impl ConnectionSender {
 }
 
 pub struct Connection {
-    addr: String,
+    url: Url,
     sender: ConnectionSender,
     receiver_shutdown: Option<oneshot::Sender<()>>,
 }
 
 impl Connection {
     pub async fn new<Exe: Executor + ?Sized>(
-        addr: String,
-        host: String,
+        url: String,
         auth_data: Option<Authentication>,
         proxy_to_broker_url: Option<String>,
-        tls: bool,
     ) -> Result<Connection, ConnectionError> {
-        let address = SocketAddr::from_str(&addr)
-            .map_err(|e| ConnectionError::SocketAddr(e.to_string()))?;
+        let url = Url::parse(&url).map_err(|e| {
+            error!("error parsing URL: {:?}", e);
+            ConnectionError::NotFound
+        })?;
+        if url.scheme() != "pulsar" && url.scheme() != "pulsar+ssl" {
+            error!("invalid scheme: {}", url.scheme());
+            return Err(ConnectionError::NotFound);
+        }
+        let hostname = url.host().map(|s| s.to_string());
+
+        let tls = match url.scheme() {
+            "pulsar" => false,
+            "pulsar+ssl" => true,
+            s => {
+                error!("invalid scheme: {}", s);
+                return Err(ConnectionError::NotFound);
+            },
+        };
+
+        let u = url.clone();
+        let address: SocketAddr = match Exe::spawn_blocking(move || {
+            u.socket_addrs(|| match u.scheme() {
+                "pulsar" => Some(6650),
+                "pulsar+ssl" => Some(6651),
+                _ => None,
+            }).map_err(|e| {
+                error!("could not look up address: {:?}", e);
+                e
+            }).ok().and_then(|v| v.get(0).map(|a| *a))
+        }).await {
+            Some(Some(address)) => address,
+            _ => //return Err(Error::Custom(format!("could not query address: {}", url))),
+                return Err(ConnectionError::NotFound),
+        };
+
+        let hostname = hostname.unwrap_or_else(|| address.ip().to_string());
 
         match Exe::kind() {
             #[cfg(feature = "tokio-runtime")]
@@ -453,15 +481,15 @@ impl Connection {
 
                     let cx = native_tls::TlsConnector::builder().build()?;
                     let cx = tokio_native_tls::TlsConnector::from(cx);
-                    let stream = cx.connect(&host, stream).await
+                    let stream = cx.connect(&hostname, stream).await
                         .map(|stream| tokio_util::codec::Framed::new(stream, Codec))?;
 
-                    Connection::from_stream::<Exe, _>(addr, stream, auth_data, proxy_to_broker_url).await
+                    Connection::from_stream::<Exe, _>(url, stream, auth_data, proxy_to_broker_url).await
                 } else {
                     let stream = tokio::net::TcpStream::connect(&address).await
                         .map(|stream| tokio_util::codec::Framed::new(stream, Codec))?;
 
-                    Connection::from_stream::<Exe, _>(addr, stream, auth_data, proxy_to_broker_url).await
+                    Connection::from_stream::<Exe, _>(url, stream, auth_data, proxy_to_broker_url).await
                 }
             },
             #[cfg(not(feature = "tokio_runtime"))]
@@ -472,15 +500,15 @@ impl Connection {
             ExecutorKind::AsyncStd => {
                 if tls {
                     let stream = async_std::net::TcpStream::connect(&address).await?;
-                    let stream = async_native_tls::connect(&host, stream).await
+                    let stream = async_native_tls::connect(&hostname, stream).await
                         .map(|stream| futures_codec::Framed::new(stream, Codec))?;
 
-                    Connection::from_stream::<Exe, _>(addr, stream, auth_data, proxy_to_broker_url).await
+                    Connection::from_stream::<Exe, _>(url, stream, auth_data, proxy_to_broker_url).await
                 } else {
                     let stream = async_std::net::TcpStream::connect(&address).await
                         .map(|stream| futures_codec::Framed::new(stream, Codec))?;
 
-                    Connection::from_stream::<Exe, _>(addr, stream, auth_data, proxy_to_broker_url).await
+                    Connection::from_stream::<Exe, _>(url, stream, auth_data, proxy_to_broker_url).await
                 }
             }
             #[cfg(not(feature = "async-std-runtime"))]
@@ -491,7 +519,7 @@ impl Connection {
     }
 
     pub async fn from_stream<Exe: Executor+ ?Sized, S>(
-        addr: String,
+        url: Url,
         mut stream: S,
         auth_data: Option<Authentication>,
         proxy_to_broker_url: Option<String>,
@@ -565,7 +593,7 @@ impl Connection {
         let sender = ConnectionSender::new(tx, registrations_tx, SerialId::new(), error);
 
         Ok(Connection {
-            addr,
+            url,
             sender,
             receiver_shutdown: Some(receiver_shutdown_tx),
         })
@@ -579,8 +607,8 @@ impl Connection {
         self.sender.error.is_set()
     }
 
-    pub fn addr(&self) -> &str {
-        &self.addr
+    pub fn url(&self) -> &Url {
+        &self.url
     }
 
     /// Chain to send a message, e.g. conn.sender().send_ping()

@@ -1,15 +1,13 @@
-use std::net::{SocketAddr, ToSocketAddrs};
 use std::string::FromUtf8Error;
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future;
-use url::Url;
 
 use crate::connection::Authentication;
 use crate::connection_manager::{BrokerAddress, ConnectionManager};
 use crate::consumer::{Consumer, ConsumerBuilder, ConsumerOptions, MultiTopicConsumer, Unset};
-use crate::error::{Error, ServiceDiscoveryError};
+use crate::error::Error;
 use crate::executor::Executor;
 use crate::message::proto::{self, command_subscribe::SubType, CommandSendReceipt};
 use crate::message::Payload;
@@ -91,46 +89,11 @@ pub struct Pulsar<E: Executor + ?Sized> {
 
 impl<Exe: Executor> Pulsar<Exe> {
     pub async fn new<S: Into<String>>(
-        addr: S,
+        url: S,
         auth: Option<Authentication>,
     ) -> Result<Self, Error> {
-        let addr: String = addr.into();
-        let url = Url::parse(&addr).map_err(|e| {
-            error!("error parsing URL: {:?}", e);
-            ServiceDiscoveryError::NotFound
-        })?;
-        if url.scheme() != "pulsar" && url.scheme() != "pulsar+ssl" {
-            error!("invalid scheme: {}", url.scheme());
-            return Err(Error::ServiceDiscovery(ServiceDiscoveryError::NotFound));
-        }
-        let hostname = url.host().map(|s| s.to_string());
-
-        let tls = match url.scheme() {
-            "pulsar" => false,
-            "pulsar+ssl" => true,
-            s => {
-                error!("invalid scheme: {}", s);
-                return Err(Error::ServiceDiscovery(ServiceDiscoveryError::NotFound));
-            },
-        };
-
-        let address: SocketAddr = match Exe::spawn_blocking(move || {
-            url.socket_addrs(|| match url.scheme() {
-                "pulsar" => Some(6650),
-                "pulsar+ssl" => Some(6651),
-                _ => None,
-            }).map_err(|e| {
-                error!("could not look up address: {:?}", e);
-                e
-            }).ok().and_then(|v| v.get(0).map(|a| *a))
-        }).await {
-            Some(Some(address)) => address,
-            _ => return Err(Error::Custom(format!("could not query address: {}", addr))),
-        };
-
-        let hostname = hostname.unwrap_or_else(|| address.to_string());
-
-        let manager = ConnectionManager::new(address, hostname, auth, tls).await?;
+        let url: String = url.into();
+        let manager = ConnectionManager::new(url, auth).await?;
         let manager = Arc::new(manager);
         let service_discovery = Arc::new(ServiceDiscovery::with_manager(
                 manager.clone(),

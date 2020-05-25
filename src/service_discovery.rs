@@ -1,12 +1,10 @@
-use crate::connection::{Authentication, Connection};
+use crate::connection::Connection;
 use crate::connection_manager::{BrokerAddress, ConnectionManager};
 use crate::error::ServiceDiscoveryError;
 use crate::executor:: Executor;
 use crate::message::proto::{command_lookup_topic_response, CommandLookupTopicResponse};
 use futures::{future::try_join_all, FutureExt};
-use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
-use url::Url;
 
 /// Look up broker addresses for topics and partitioned topics
 ///
@@ -34,7 +32,7 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
     ) -> Result<BrokerAddress, ServiceDiscoveryError> {
         let topic = topic.into();
         let conn_info = self.manager.get_connection_from_url(None).await;
-        let base_address = self.manager.address;
+        let base_url = self.manager.url.clone();
         let authoritative = false;
 
         if let Some((proxied_query, conn)) = conn_info {
@@ -42,7 +40,7 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
                 topic.clone(),
                 proxied_query,
                 conn.clone(),
-                base_address,
+                base_url,
                 authoritative,
             )
             .await
@@ -102,7 +100,7 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
         topic: String,
         mut proxied_query: bool,
         mut conn: Arc<Connection>,
-        base_address: SocketAddr,
+        base_url: String,
         mut is_authoritative: bool,
     ) -> Result<BrokerAddress, ServiceDiscoveryError> {
         loop {
@@ -111,39 +109,28 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
                 .lookup_topic(topic.to_string(), is_authoritative)
                 .await?;
             let LookupResponse {
-                broker_name,
-                broker_hostname,
                 broker_url,
-                broker_port,
+                broker_url_tls,
                 proxy,
                 redirect,
                 authoritative,
-                tls,
             } = convert_lookup_response(&response)?;
             is_authoritative = authoritative;
 
-            // get the IP and port for the broker_name
-            // if going through a proxy, we use the base address,
-            // otherwise we look it up by DNS query
-            let address = if proxied_query || proxy {
-                base_address
+            // use the TLS connection if available
+            let broker_url = broker_url_tls.unwrap_or(broker_url);
+
+            // if going through a proxy, we use the base URL
+            let url = if proxied_query || proxy {
+                base_url.clone()
             } else {
-                match Exe::spawn_blocking(move|| {
-                    (broker_name.as_str(), broker_port).to_socket_addrs().map_err(|e| {
-                        error!("error querying '{}': {:?}", broker_name, e);
-                    }).ok().and_then(|mut it| it.next())
-                }).await {
-                    Some(Some(address)) => address,
-                    _ => return Err(ServiceDiscoveryError::DnsLookupError)
-                }
+                broker_url.clone()
             };
 
             let b = BrokerAddress {
-                address,
-                hostname: broker_hostname,
+                url,
                 broker_url,
                 proxy: proxied_query || proxy,
-                tls,
             };
 
             // if the response indicated a redirect, do another query
@@ -176,14 +163,11 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
 }
 
 struct LookupResponse {
-    pub broker_name: String,
-    pub broker_hostname: String,
     pub broker_url: String,
-    pub broker_port: u16,
+    pub broker_url_tls: Option<String>,
     pub proxy: bool,
     pub redirect: bool,
     pub authoritative: bool,
-    pub tls: bool,
 }
 
 /// extracts information from a lookup response
@@ -204,59 +188,19 @@ fn convert_lookup_response(
     }
 
     let proxy = response.proxy_through_service_url.unwrap_or(false);
-
-    // FIXME: only using the plaintext url for now
-    let url = Url::parse(
-        response.broker_service_url_tls.as_ref().or(
-        response
-            .broker_service_url.as_ref())
-            .ok_or(ServiceDiscoveryError::NotFound)?,
-    )
-    .map_err(|_| ServiceDiscoveryError::NotFound)?;
-
-    let broker_name = url
-        .host_str()
-        .ok_or(ServiceDiscoveryError::NotFound)?
-        .to_string();
-    let broker_url = if url.port().is_some() {
-        format!(
-            "{}:{}",
-            url.host().ok_or(ServiceDiscoveryError::NotFound)?,
-            url.port().ok_or(ServiceDiscoveryError::NotFound)?
-        )
-    } else {
-        url.host()
-            .ok_or(ServiceDiscoveryError::NotFound)?
-            .to_string()
-    };
-    let broker_port = url.port().unwrap_or(match url.scheme() {
-      "pulsar" => 6650,
-      "pulsar+ssl" => 6651,
-      s => {
-          error!("invalid scheme: {}", s);
-          return Err(ServiceDiscoveryError::NotFound);
-      },
-    });
     let authoritative = response.authoritative.unwrap_or(false);
     let redirect =
         response.response == Some(command_lookup_topic_response::LookupType::Redirect as i32);
-    let tls = match url.scheme() {
-      "pulsar" => false,
-      "pulsar+ssl" => true,
-      s => {
-          error!("invalid scheme: {}", s);
-          return Err(ServiceDiscoveryError::NotFound);
-      },
-    };
+
+    if response.broker_service_url.is_none() {
+      return Err(ServiceDiscoveryError::NotFound);
+    }
 
     Ok(LookupResponse {
-        broker_name,
-        broker_hostname: broker_url.clone(),
-        broker_url,
-        broker_port,
+        broker_url: response.broker_service_url.clone().unwrap(),
+        broker_url_tls: response.broker_service_url_tls.clone(),
         proxy,
         redirect,
         authoritative,
-        tls,
     })
 }

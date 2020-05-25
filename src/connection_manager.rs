@@ -2,23 +2,18 @@ use crate::connection::{Authentication, Connection};
 use crate::error::ConnectionError;
 use crate::executor::Executor;
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::marker::PhantomData;
 
 /// holds connection information for a broker
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct BrokerAddress {
-    /// IP and port (using the proxy's if applicable)
-    pub address: SocketAddr,
-    /// hostname
-    pub hostname: String,
+    /// URL we're using for connection (can be the proxy's URL)
+    pub url: String,
     /// pulsar URL for the broker
     pub broker_url: String,
     /// true if we're connecting through a proxy
     pub proxy: bool,
-    /// true if we're connecting with TLS
-    pub tls: bool,
 }
 
 /// Look up broker addresses for topics and partitioned topics
@@ -28,7 +23,7 @@ pub struct BrokerAddress {
 /// or use a proxy, and aggregate broker connections
 #[derive(Clone)]
 pub struct ConnectionManager<Exe: Executor + ?Sized> {
-    pub address: SocketAddr,
+    pub url: String,
     base: Arc<Connection>,
     auth: Option<Authentication>,
     executor: PhantomData<Exe>,
@@ -37,23 +32,21 @@ pub struct ConnectionManager<Exe: Executor + ?Sized> {
 
 impl<Exe: Executor> ConnectionManager<Exe> {
     pub async fn new(
-        addr: SocketAddr,
-        hostname: String,
+        url: String,
         auth: Option<Authentication>,
-        tls: bool,
     ) -> Result<Self, ConnectionError> {
-        let conn = Connection::new::<Exe>(addr.to_string(), hostname, auth.clone(), None, tls).await?;
-        ConnectionManager::from_connection(conn, auth, addr)
+        let conn = Connection::new::<Exe>(url.clone(), auth.clone(), None).await?;
+        ConnectionManager::from_connection(conn, auth, url)
     }
 
     pub fn from_connection(
         connection: Connection,
         auth: Option<Authentication>,
-        address: SocketAddr,
+        url: String,
     ) -> Result<Self, ConnectionError> {
         let base = Arc::new(connection);
         Ok(ConnectionManager {
-            address,
+            url,
             base,
             auth,
             executor: PhantomData,
@@ -120,11 +113,9 @@ impl<Exe: Executor> ConnectionManager<Exe> {
         };
 
         let conn = Connection::new::<Exe>(
-            broker.address.to_string(),
-            broker.hostname.clone(),
+            broker.url.clone(),
             self.auth.clone(),
             proxy_url,
-            broker.tls,
         )
         .await?;
         let c = Arc::new(conn);
