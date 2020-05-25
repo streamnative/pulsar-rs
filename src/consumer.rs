@@ -1143,7 +1143,7 @@ mod tests {
     fn multi_consumer() {
         let _ = log::set_logger(&TEST_LOGGER);
         let _ = log::set_max_level(LevelFilter::Debug);
-        let addr = "127.0.0.1:6650";
+        let addr = "pulsar://127.0.0.1:6650";
         let rt = Runtime::new().unwrap();
 
         let namespace = "public/default";
@@ -1249,7 +1249,7 @@ mod tests {
         use rand::{Rng, distributions::Alphanumeric};
         let _ = log::set_logger(&TEST_LOGGER);
         let _ = log::set_max_level(LevelFilter::Debug);
-        let addr = "127.0.0.1:6650";
+        let addr = "pulsar://127.0.0.1:6650";
         let mut rt = Runtime::new().unwrap();
 
         let topic = "issue_51";
