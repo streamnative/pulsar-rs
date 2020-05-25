@@ -186,10 +186,11 @@ impl SerialId {
 }
 
 /// An owned type that can send messages like a connection
-#[derive(Clone)]
+//#[derive(Clone)]
 pub struct ConnectionSender {
     tx: mpsc::UnboundedSender<Message>,
     registrations: mpsc::UnboundedSender<Register>,
+    receiver_shutdown: Option<oneshot::Sender<()>>,
     request_id: SerialId,
     error: SharedError,
 }
@@ -198,12 +199,14 @@ impl ConnectionSender {
     pub fn new(
         tx: mpsc::UnboundedSender<Message>,
         registrations: mpsc::UnboundedSender<Register>,
+        receiver_shutdown: oneshot::Sender<()>,
         request_id: SerialId,
         error: SharedError,
     ) -> ConnectionSender {
         ConnectionSender {
             tx,
             registrations,
+            receiver_shutdown: Some(receiver_shutdown),
             request_id,
             error,
         }
@@ -427,7 +430,6 @@ impl ConnectionSender {
 pub struct Connection {
     url: Url,
     sender: ConnectionSender,
-    receiver_shutdown: Option<oneshot::Sender<()>>,
 }
 
 impl Connection {
@@ -474,7 +476,7 @@ impl Connection {
         let hostname = hostname.unwrap_or_else(|| address.ip().to_string());
 
         debug!("Connecting to {}: {}", url, address);
-        let (sender, receiver_shutdown_tx) = Connection::prepare_stream::<Exe>(
+        let sender = Connection::prepare_stream::<Exe>(
             address,
             hostname,
             tls,
@@ -484,7 +486,6 @@ impl Connection {
         Ok(Connection {
             url,
             sender,
-            receiver_shutdown: Some(receiver_shutdown_tx),
         })
     }
 
@@ -494,7 +495,7 @@ impl Connection {
         tls: bool,
         auth_data: Option<Authentication>,
         proxy_to_broker_url: Option<String>,
-        ) -> Result<(ConnectionSender, oneshot::Sender<()>), ConnectionError> {
+        ) -> Result<ConnectionSender, ConnectionError> {
         match Exe::kind() {
             #[cfg(feature = "tokio-runtime")]
             ExecutorKind::Tokio => {
@@ -544,7 +545,7 @@ impl Connection {
         mut stream: S,
         auth_data: Option<Authentication>,
         proxy_to_broker_url: Option<String>,
-        ) -> Result<(ConnectionSender, oneshot::Sender<()>), ConnectionError>
+        ) -> Result<ConnectionSender, ConnectionError>
         where
         S: Stream<Item = Result<Message, ConnectionError>>,
         S: Sink<Message, Error = ConnectionError>,
@@ -611,9 +612,9 @@ impl Connection {
                 return Err(ConnectionError::Shutdown);
             }
 
-            let sender = ConnectionSender::new(tx, registrations_tx, SerialId::new(), error);
+            let sender = ConnectionSender::new(tx, registrations_tx, receiver_shutdown_tx, SerialId::new(), error);
 
-            Ok((sender, receiver_shutdown_tx))
+            Ok(sender)
         }
 
     pub fn error(&self) -> Option<ConnectionError> {
@@ -636,7 +637,7 @@ impl Connection {
 
 impl Drop for Connection {
     fn drop(&mut self) {
-        if let Some(shutdown) = self.receiver_shutdown.take() {
+        if let Some(shutdown) = self.sender.receiver_shutdown.take() {
             let _ = shutdown.send(());
         }
     }
