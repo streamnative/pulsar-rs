@@ -25,7 +25,6 @@ pub struct BrokerAddress {
 #[derive(Clone)]
 pub struct ConnectionManager<Exe: Executor + ?Sized> {
     pub url: Url,
-    base: Arc<Connection>,
     auth: Option<Authentication>,
     executor: PhantomData<Exe>,
     connections: Arc<Mutex<HashMap<BrokerAddress, Arc<Connection>>>>,
@@ -56,12 +55,20 @@ impl<Exe: Executor> ConnectionManager<Exe> {
         url: Url,
     ) -> Result<Self, ConnectionError> {
         let base = Arc::new(connection);
+        let broker_address = BrokerAddress {
+          url: url.clone(),
+          broker_url: url.clone(),
+          proxy: false,
+        };
+
+        let mut connections = HashMap::new();
+        connections.insert(broker_address, base);
+
         Ok(ConnectionManager {
             url,
-            base,
             auth,
             executor: PhantomData,
-            connections: Arc::new(Mutex::new(HashMap::new())),
+            connections: Arc::new(Mutex::new(connections)),
         })
     }
 
@@ -69,7 +76,16 @@ impl<Exe: Executor> ConnectionManager<Exe> {
     ///
     /// creates a connection if not available
     pub async fn get_base_connection(&self) -> Result<Arc<Connection>, ConnectionError> {
-        Ok(self.base.clone())
+        let broker_address = BrokerAddress {
+            url: self.url.clone(),
+            broker_url: self.url.clone(),
+            proxy: false,
+        };
+        self
+            .connections
+                .lock()
+                .unwrap()
+                .get(&broker_address).cloned().ok_or(ConnectionError::NotFound)
     }
 
     /// get an active Connection from a broker address
@@ -93,7 +109,22 @@ impl<Exe: Executor> ConnectionManager<Exe> {
         let res = match broker {
             None => {
                 debug!("using the base connection for lookup, not through a proxy");
-                Some((false, self.base.clone()))
+                let broker_address = BrokerAddress {
+                    url: self.url.clone(),
+                    broker_url: self.url.clone(),
+                    proxy: false,
+                };
+
+                if let Some(c) = self
+                    .connections
+                    .lock()
+                    .unwrap()
+                    .get(&broker_address)
+                {
+                    Some((false, c.clone()))
+                } else {
+                    None
+                }
             }
             Some(ref s) => {
                 if let Some((b, c)) = self
