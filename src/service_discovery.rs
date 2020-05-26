@@ -32,24 +32,19 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
         topic: S,
     ) -> Result<BrokerAddress, ServiceDiscoveryError> {
         let topic = topic.into();
-        let conn_info = self.manager.get_connection_from_url(None).await;
+        let proxied_query = false;
+        let conn = self.manager.get_base_connection().await?;
         let base_url = self.manager.url.clone();
         let authoritative = false;
 
-        if let Some((proxied_query, conn)) = conn_info {
-            self.lookup(
-                topic.clone(),
-                proxied_query,
-                conn.clone(),
-                base_url,
-                authoritative,
+        self.lookup(
+            topic.clone(),
+            proxied_query,
+            conn.clone(),
+            base_url,
+            authoritative,
             )
             .await
-        } else {
-            Err(ServiceDiscoveryError::Query(
-                "unknown broker URL".to_string(),
-            ))
-        }
     }
 
     /// get the number of partitions for a partitioned topic
@@ -137,17 +132,11 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
             // if the response indicated a redirect, do another query
             // to the target broker
             let broker_address: BrokerAddress = if redirect {
-                let broker_url = Some(b.broker_url);
-                let conn_info = self.manager.get_connection_from_url(broker_url).await;
-                if let Some((new_proxied_query, new_conn)) = conn_info {
-                    proxied_query = new_proxied_query;
-                    conn = new_conn.clone();
-                    continue;
-                } else {
-                    return Err(ServiceDiscoveryError::Query(
-                        "unknown broker URL".to_string(),
-                    ));
-                }
+                let conn_info = self.manager.get_connection(&b).await;
+                let new_conn = conn_info?;
+                proxied_query = b.proxy;
+                conn = new_conn.clone();
+                continue;
             } else {
                 b
             };
