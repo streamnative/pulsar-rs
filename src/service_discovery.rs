@@ -1,6 +1,6 @@
 use crate::connection::Connection;
 use crate::connection_manager::{BrokerAddress, ConnectionManager};
-use crate::error::ServiceDiscoveryError;
+use crate::error::{ServiceDiscoveryError, ConnectionError};
 use crate::executor:: Executor;
 use crate::message::proto::{command_lookup_topic_response, CommandLookupTopicResponse};
 use futures::{future::try_join_all, FutureExt};
@@ -32,19 +32,64 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
         topic: S,
     ) -> Result<BrokerAddress, ServiceDiscoveryError> {
         let topic = topic.into();
-        let proxied_query = false;
-        let conn = self.manager.get_base_connection().await?;
+        let mut proxied_query = false;
+        let mut conn = self.manager.get_base_connection().await?;
         let base_url = self.manager.url.clone();
-        let authoritative = false;
+        let mut is_authoritative = false;
+        let mut broker_address = self.manager.get_base_address();
 
-        self.lookup(
-            topic.clone(),
-            proxied_query,
-            conn.clone(),
-            base_url,
-            authoritative,
-            )
-            .await
+        loop {
+            let response = match conn.sender().lookup_topic(topic.to_string(), is_authoritative).await {
+                Ok(res) => res,
+                Err(ConnectionError::Disconnected) => {
+                    error!("tried to lookup a topic but connection was closed, reconnecting...");
+                    conn = self.manager.get_connection(&broker_address).await?;
+                    conn.sender().lookup_topic(topic.to_string(), is_authoritative).await?
+                },
+                Err(e) => return Err(e.into()),
+            };
+
+            let LookupResponse {
+                broker_url,
+                broker_url_tls,
+                proxy,
+                redirect,
+                authoritative,
+            } = convert_lookup_response(&response)?;
+            is_authoritative = authoritative;
+
+            // use the TLS connection if available
+            let broker_url = broker_url_tls.unwrap_or(broker_url);
+
+            // if going through a proxy, we use the base URL
+            let url = if proxied_query || proxy {
+                base_url.clone()
+            } else {
+                broker_url.clone()
+            };
+
+            broker_address = BrokerAddress {
+                url,
+                broker_url,
+                proxy: proxied_query || proxy,
+            };
+
+            // if the response indicated a redirect, do another query
+            // to the target broker
+            if redirect {
+                conn = self.manager.get_connection(&broker_address).await?;
+                proxied_query = broker_address.proxy;
+                continue;
+            } else {
+                let res = self
+                    .manager
+                    .get_connection(&broker_address)
+                    .await
+                    .map(|_| broker_address)
+                    .map_err(|e| ServiceDiscoveryError::Connection(e));
+                break res;
+            }
+        }
     }
 
     /// get the number of partitions for a partitioned topic
@@ -89,66 +134,6 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
             })
             .collect::<Vec<_>>();
         try_join_all(topics).await
-    }
-
-    pub async fn lookup(
-        &self,
-        topic: String,
-        mut proxied_query: bool,
-        mut conn: Arc<Connection>,
-        base_url: Url,
-        mut is_authoritative: bool,
-    ) -> Result<BrokerAddress, ServiceDiscoveryError> {
-        loop {
-            let response = conn
-                .sender()
-                .lookup_topic(topic.to_string(), is_authoritative)
-                .await?;
-            let LookupResponse {
-                broker_url,
-                broker_url_tls,
-                proxy,
-                redirect,
-                authoritative,
-            } = convert_lookup_response(&response)?;
-            is_authoritative = authoritative;
-
-            // use the TLS connection if available
-            let broker_url = broker_url_tls.unwrap_or(broker_url);
-
-            // if going through a proxy, we use the base URL
-            let url = if proxied_query || proxy {
-                base_url.clone()
-            } else {
-                broker_url.clone()
-            };
-
-            let b = BrokerAddress {
-                url,
-                broker_url,
-                proxy: proxied_query || proxy,
-            };
-
-            // if the response indicated a redirect, do another query
-            // to the target broker
-            let broker_address: BrokerAddress = if redirect {
-                let conn_info = self.manager.get_connection(&b).await;
-                let new_conn = conn_info?;
-                proxied_query = b.proxy;
-                conn = new_conn.clone();
-                continue;
-            } else {
-                b
-            };
-
-            let res = self
-                .manager
-                .get_connection(&broker_address.clone())
-                .await
-                .map(|_| broker_address)
-                .map_err(|e| ServiceDiscoveryError::Connection(e));
-            break res;
-        }
     }
 }
 

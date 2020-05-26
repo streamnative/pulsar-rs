@@ -5,7 +5,9 @@ use futures::channel::oneshot;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use url::Url;
+use rand::{thread_rng, Rng};
 
 /// holds connection information for a broker
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -58,6 +60,14 @@ impl<Exe: Executor> ConnectionManager<Exe> {
         Ok(manager)
     }
 
+    pub fn get_base_address(&self) -> BrokerAddress {
+        BrokerAddress {
+            url: self.url.clone(),
+            broker_url: self.url.clone(),
+            proxy: false,
+        }
+    }
+
     /// get an active Connection from a broker address
     ///
     /// creates a connection if not available
@@ -108,7 +118,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
     }
 
     async fn connect(&self, broker: BrokerAddress) -> Result<Arc<Connection>, ConnectionError> {
-        info!("ConnectionManager::connect({:?})", broker);
+        debug!("ConnectionManager::connect({:?})", broker);
 
         let rx = {
             match self
@@ -127,13 +137,8 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                         Some(rx)
                     }
                 }
-                ConnectionStatus::Connected(c) => {
-                    info!("already connected");
-                    if c.is_valid() {
-                        return Ok(c.clone());
-                    } else {
-                        None
-                    }
+                ConnectionStatus::Connected(_) => {
+                    None
                 }
             }
         };
@@ -150,7 +155,39 @@ impl<Exe: Executor> ConnectionManager<Exe> {
             None
         };
 
-        let conn = Connection::new::<Exe>(broker.url.clone(), self.auth.clone(), proxy_url).await?;
+        //FIXME: make them configurable
+        let min_backoff = Duration::from_millis(10);
+        let max_backoff = Duration::from_secs(30);
+        let max_retries = 12u32;
+        let mut current_backoff;
+        let mut current_retries = 0u32;
+
+        let start = std::time::Instant::now();
+        //let conn = Connection::new::<Exe>(broker.url.clone(), self.auth.clone(), proxy_url).await?;
+        let conn = loop {
+            match Connection::new::<Exe>(broker.url.clone(), self.auth.clone(), proxy_url.clone()).await {
+                Ok(c) => break c,
+                Err(ConnectionError::Io(e)) => {
+                    if e.kind() != std::io::ErrorKind::ConnectionRefused {
+                        return Err(ConnectionError::Io(e).into());
+                    }
+
+                    if current_retries == max_retries {
+                        return Err(ConnectionError::Io(e).into());
+                    }
+
+                    let jitter = rand::thread_rng().gen_range(0, 10);
+                    current_backoff = std::cmp::min(min_backoff * 2u32.pow(current_retries), max_backoff) + min_backoff * jitter;
+                    current_retries += 1;
+
+                    trace!("current retries: {}, current_backoff(pow = {}): {}ms",
+                      current_retries, 2u32.pow(current_retries - 1), current_backoff.as_millis());
+                    Exe::delay(current_backoff).await;
+                },
+                Err(e) => return Err(e.into()),
+            }
+        };
+        debug!("got the new connection in {}ms", (std::time::Instant::now() - start).as_millis());
         let c = Arc::new(conn);
         let old = self
             .connections
@@ -158,14 +195,14 @@ impl<Exe: Executor> ConnectionManager<Exe> {
             .unwrap()
             .insert(broker, ConnectionStatus::Connected(c.clone()));
         match old {
-            Some(ConnectionStatus::Connected(c)) => {
-                //info!("removing old connection");
-            }
             Some(ConnectionStatus::Connecting(mut v)) => {
                 //info!("was in connecting state({} waiting)", v.len());
                 for tx in v.drain(..) {
                     let _ = tx.send(Ok(c.clone()));
                 }
+            }
+            Some(ConnectionStatus::Connected(c)) => {
+                //info!("removing old connection");
             }
             None => {
                 //info!("setting up new connection");

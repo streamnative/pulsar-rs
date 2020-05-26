@@ -14,6 +14,7 @@ pub trait Executor: Clone + Send + Sync + 'static {
         Res: Send + 'static;
 
     fn interval(duration: std::time::Duration) -> Interval;
+    fn delay(duration: std::time::Duration) -> Delay;
 
     // test at runtime and manually choose the implementation
     // because we cannot (yet) have async trait methods,
@@ -44,6 +45,10 @@ impl Executor for TokioExecutor {
         Interval::Tokio(tokio::time::interval(duration))
     }
 
+    fn delay(duration: std::time::Duration) -> Delay {
+        Delay::Tokio(tokio::time::delay_for(duration))
+    }
+
     fn kind() -> ExecutorKind {
         ExecutorKind::Tokio
     }
@@ -70,6 +75,11 @@ impl Executor for AsyncStdExecutor {
 
     fn interval(duration: std::time::Duration) -> Interval {
         Interval::AsyncStd(async_std::stream::interval(duration))
+    }
+
+    fn delay(duration: std::time::Duration) -> Delay {
+        use async_std::prelude::FutureExt;
+        Delay::AsyncStd(Box::pin(async_std::future::ready(()).delay(duration)))
     }
 
     fn kind() -> ExecutorKind {
@@ -147,6 +157,34 @@ impl Stream for Interval {
                     unimplemented!("please activate one of the following cargo features: tokio-runtime, async-std-runtime")
 
                 }
+            }
+        }
+    }
+}
+
+pub enum Delay {
+    #[cfg(feature = "tokio-runtime")]
+    Tokio(tokio::time::Delay),
+    #[cfg(feature = "async-std-runtime")]
+    AsyncStd(Pin<Box<dyn Future<Output=()>+Send>>),
+}
+
+impl Future for Delay {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context) -> std::task::Poll<Self::Output> {
+        unsafe {
+            match Pin::get_unchecked_mut(self) {
+                #[cfg(feature = "tokio-runtime")]
+                Delay::Tokio(d) => match Pin::new_unchecked(d).poll(cx) {
+                    Poll::Pending => Poll::Pending,
+                    Poll::Ready(_) => Poll::Ready(()),
+                },
+                #[cfg(feature = "async-std-runtime")]
+                Delay::AsyncStd(j) => match Pin::new_unchecked(j).poll(cx) {
+                    Poll::Pending => Poll::Pending,
+                    Poll::Ready(_) => Poll::Ready(()),
+                },
             }
         }
     }
