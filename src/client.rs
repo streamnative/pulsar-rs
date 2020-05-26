@@ -51,6 +51,15 @@ impl SerializeMessage for [u8] {
     }
 }
 
+impl SerializeMessage for Vec<u8> {
+    fn serialize_message(input: &Self) -> Result<producer::Message, Error> {
+        Ok(producer::Message {
+            payload: input.clone(),
+            ..Default::default()
+        })
+    }
+}
+
 impl SerializeMessage for String {
     fn serialize_message(input: &Self) -> Result<producer::Message, Error> {
         let payload = input.as_bytes().to_vec();
