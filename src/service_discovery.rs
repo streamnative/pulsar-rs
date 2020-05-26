@@ -5,6 +5,7 @@ use crate::executor:: Executor;
 use crate::message::proto::{command_lookup_topic_response, CommandLookupTopicResponse};
 use futures::{future::try_join_all, FutureExt};
 use std::sync::Arc;
+use url::Url;
 
 /// Look up broker addresses for topics and partitioned topics
 ///
@@ -100,7 +101,7 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
         topic: String,
         mut proxied_query: bool,
         mut conn: Arc<Connection>,
-        base_url: String,
+        base_url: Url,
         mut is_authoritative: bool,
     ) -> Result<BrokerAddress, ServiceDiscoveryError> {
         loop {
@@ -163,8 +164,8 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
 }
 
 struct LookupResponse {
-    pub broker_url: String,
-    pub broker_url_tls: Option<String>,
+    pub broker_url: Url,
+    pub broker_url_tls: Option<Url>,
     pub proxy: bool,
     pub redirect: bool,
     pub authoritative: bool,
@@ -196,9 +197,22 @@ fn convert_lookup_response(
       return Err(ServiceDiscoveryError::NotFound);
     }
 
+    let broker_url = Url::parse(&response.broker_service_url.clone().unwrap()).map_err(|e| {
+        error!("error parsing URL: {:?}", e);
+        ServiceDiscoveryError::NotFound
+    })?;
+
+    let broker_url_tls = match response.broker_service_url_tls.as_ref() {
+        Some(u) => Some(Url::parse(&u).map_err(|e| {
+            error!("error parsing URL: {:?}", e);
+            ServiceDiscoveryError::NotFound
+        })?),
+        None => None,
+    };
+
     Ok(LookupResponse {
-        broker_url: response.broker_service_url.clone().unwrap(),
-        broker_url_tls: response.broker_service_url_tls.clone(),
+        broker_url,
+        broker_url_tls,
         proxy,
         redirect,
         authoritative,

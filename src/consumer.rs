@@ -14,6 +14,7 @@ use rand;
 use regex::Regex;
 
 use crate::connection:: Connection;
+use crate::connection_manager::ConnectionManager;
 use crate::error::{ConnectionError, ConsumerError, Error};
 use crate::executor::{Executor, Interval};
 use crate::message::{

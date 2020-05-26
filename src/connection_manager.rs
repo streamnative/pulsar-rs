@@ -4,14 +4,15 @@ use crate::executor::Executor;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::marker::PhantomData;
+use url::Url;
 
 /// holds connection information for a broker
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct BrokerAddress {
     /// URL we're using for connection (can be the proxy's URL)
-    pub url: String,
+    pub url: Url,
     /// pulsar URL for the broker
-    pub broker_url: String,
+    pub broker_url: Url,
     /// true if we're connecting through a proxy
     pub proxy: bool,
 }
@@ -23,7 +24,7 @@ pub struct BrokerAddress {
 /// or use a proxy, and aggregate broker connections
 #[derive(Clone)]
 pub struct ConnectionManager<Exe: Executor + ?Sized> {
-    pub url: String,
+    pub url: Url,
     base: Arc<Connection>,
     auth: Option<Authentication>,
     executor: PhantomData<Exe>,
@@ -35,6 +36,16 @@ impl<Exe: Executor> ConnectionManager<Exe> {
         url: String,
         auth: Option<Authentication>,
     ) -> Result<Self, ConnectionError> {
+        let url = Url::parse(&url).map_err(|e| {
+            error!("error parsing URL: {:?}", e);
+            ConnectionError::NotFound
+        })?;
+
+        /*let broker_address = BrokerAddress {
+          url: url,
+          broker_url: url,
+          false,
+        };*/
         let conn = Connection::new::<Exe>(url.clone(), auth.clone(), None).await?;
         ConnectionManager::from_connection(conn, auth, url)
     }
@@ -42,7 +53,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
     pub fn from_connection(
         connection: Connection,
         auth: Option<Authentication>,
-        url: String,
+        url: Url,
     ) -> Result<Self, ConnectionError> {
         let base = Arc::new(connection);
         Ok(ConnectionManager {
@@ -77,7 +88,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
 
     pub async fn get_connection_from_url(
         &self,
-        broker: Option<String>,
+        broker: Option<Url>,
     ) -> Option<(bool, Arc<Connection>)> {
         let res = match broker {
             None => {

@@ -434,14 +434,11 @@ pub struct Connection {
 
 impl Connection {
     pub async fn new<Exe: Executor + ?Sized>(
-        url: String,
+        url: Url,
         auth_data: Option<Authentication>,
-        proxy_to_broker_url: Option<String>,
+        proxy_to_broker_url: Option<Url>,
         ) -> Result<Connection, ConnectionError> {
-        let url = Url::parse(&url).map_err(|e| {
-            error!("error parsing URL: {:?}", e);
-            ConnectionError::NotFound
-        })?;
+
         if url.scheme() != "pulsar" && url.scheme() != "pulsar+ssl" {
             error!("invalid scheme: {}", url.scheme());
             return Err(ConnectionError::NotFound);
@@ -494,7 +491,7 @@ impl Connection {
         hostname: String,
         tls: bool,
         auth_data: Option<Authentication>,
-        proxy_to_broker_url: Option<String>,
+        proxy_to_broker_url: Option<Url>,
         ) -> Result<ConnectionSender, ConnectionError> {
         match Exe::kind() {
             #[cfg(feature = "tokio-runtime")]
@@ -544,7 +541,7 @@ impl Connection {
     pub async fn connect<Exe: Executor+ ?Sized, S>(
         mut stream: S,
         auth_data: Option<Authentication>,
-        proxy_to_broker_url: Option<String>,
+        proxy_to_broker_url: Option<Url>,
         ) -> Result<ConnectionSender, ConnectionError>
         where
         S: Stream<Item = Result<Message, ConnectionError>>,
@@ -552,7 +549,7 @@ impl Connection {
         S: Send + std::marker::Unpin +'static {
             let _ = stream
                 .send({
-                    let msg = messages::connect(auth_data, proxy_to_broker_url);
+                    let msg = messages::connect(auth_data, proxy_to_broker_url.map(|s| s.as_str().to_string()));
                     trace!("connection message: {:?}", msg);
                     msg
                 }).await?;
