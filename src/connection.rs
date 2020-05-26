@@ -408,7 +408,10 @@ impl ConnectionSender {
         let k = key.clone();
         let response = async {
             response.await
-            .map_err(|oneshot::Canceled| ConnectionError::Disconnected)
+            .map_err(|oneshot::Canceled| {
+                self.error.set(ConnectionError::Disconnected);
+                ConnectionError::Disconnected
+            })
             .map(move |message: Message| {
                 trace!("received message(key = {:?}): {:?}", k, message);
                 extract_message(message, extract)

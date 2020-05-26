@@ -81,7 +81,15 @@ impl<Exe: Executor> ConnectionManager<Exe> {
         let rx = {
             match self.connections.lock().unwrap().get_mut(broker) {
                 None => None,
-                Some(ConnectionStatus::Connected(c)) => return Ok(c.clone()),
+                Some(ConnectionStatus::Connected(c)) => {
+                    debug!("already connected");
+                    if c.is_valid() {
+                        debug!("connection is still valid");
+                        return Ok(c.clone());
+                    } else {
+                        None
+                    }
+                },
                 Some(ConnectionStatus::Connecting(ref mut v)) => {
                     let (tx, rx) = oneshot::channel();
                     v.push(tx);
@@ -121,7 +129,11 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                 }
                 ConnectionStatus::Connected(c) => {
                     info!("already connected");
-                    return Ok(c.clone());
+                    if c.is_valid() {
+                        return Ok(c.clone());
+                    } else {
+                        None
+                    }
                 }
             }
         };
