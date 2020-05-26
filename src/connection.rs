@@ -619,7 +619,7 @@ impl Connection {
     }
 
     pub fn is_valid(&self) -> bool {
-        self.sender.error.is_set()
+        !self.sender.error.is_set()
     }
 
     pub fn url(&self) -> &Url {
