@@ -1176,7 +1176,7 @@ mod tests {
 
         let f = async move {
             let client: Pulsar<TokioExecutor> = Pulsar::new(addr, None).await.unwrap();
-            let producer = client.producer(None);
+            let mut producer = client.producer(None);
 
             let send_start = Utc::now();
             producer.send(topic1, data1.clone()).await.unwrap();
@@ -1265,7 +1265,7 @@ mod tests {
             };
 
             {
-                let producer = client.producer(None);
+                let mut producer = client.producer(None);
 
                 producer.send(topic, message.clone()).await.unwrap();
                 println!("producer sends done");

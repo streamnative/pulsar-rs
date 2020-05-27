@@ -300,7 +300,7 @@ impl<Exe: Executor> Pulsar<Exe> {
         producer.send_raw(message).await
     }
 
-    pub fn producer(&self, options: Option<ProducerOptions>) -> Producer {
+    pub fn producer(&self, options: Option<ProducerOptions>) -> Producer<Exe> {
         Producer::new(self.clone(), options.unwrap_or_default())
     }
 }

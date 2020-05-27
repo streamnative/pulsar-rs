@@ -173,7 +173,7 @@ mod tests {
 
             info!("consumer created");
 
-            let producer = pulsar.producer(None);
+            let mut producer = pulsar.producer(None);
             info!("producer created");
 
             info!("will send message");
@@ -223,7 +223,7 @@ mod tests {
         let f = async {
             let addr = "pulsar://127.0.0.1:6650";
             let pulsar: Pulsar<TokioExecutor> = Pulsar::new(addr, None).await.unwrap();
-            let producer = pulsar.producer(None);
+            let mut producer = pulsar.producer(None);
 
             // test &str
             {
@@ -265,8 +265,7 @@ mod tests {
                     .await
                     .unwrap();
 
-                let message = producer::Message { payload: send_data.to_vec(), ..Default::default() };
-                producer.send_message(topic, message).await.unwrap();
+                producer.send(topic, send_data.to_vec()).await.unwrap();
 
                 let msg = consumer.next().await.unwrap().unwrap();
                 consumer.ack(&msg);
@@ -299,7 +298,7 @@ mod tests {
         let f = async move {
             let pulsar: Pulsar<TokioExecutor> = Pulsar::new(addr, None).await.unwrap();
 
-            let producer = pulsar.producer(None);
+            let mut producer = pulsar.producer(None);
 
             let topic: String = std::iter::repeat(())
                 .map(|()| rand::thread_rng().sample(Alphanumeric))

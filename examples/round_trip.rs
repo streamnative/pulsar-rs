@@ -36,7 +36,7 @@ async fn main() -> Result<(), pulsar::Error> {
 
     let addr = "pulsar://127.0.0.1:6650";
     let pulsar: Pulsar<TokioExecutor> = Pulsar::new(addr, None).await?;
-    let producer = pulsar.create_producer("test", Some("my-producer".to_string()), producer::ProducerOptions {
+    let mut producer = pulsar.create_producer("test", Some("my-producer".to_string()), producer::ProducerOptions {
         schema: Some(proto::Schema {
             type_: proto::schema::Type::String as i32,
             ..Default::default()

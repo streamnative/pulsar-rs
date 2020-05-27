@@ -1,15 +1,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::pin::Pin;
 use std::io::Write;
-
-use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use futures::channel::oneshot;
-use futures::{
-    future::try_join_all,
-    Future, FutureExt, Stream,
-    task::{Context, Poll},
-};
 use rand;
 
 use crate::client::SerializeMessage;
@@ -59,28 +51,23 @@ pub struct ProducerOptions {
     pub compression: Option<proto::CompressionType>,
 }
 
-#[derive(Clone)]
-pub struct Producer {
-    message_sender: UnboundedSender<ProducerMessage>,
+pub struct Producer<Exe: Executor + ?Sized> {
+    client: Pulsar<Exe>,
+    producers: BTreeMap<String, TopicProducer<Exe>>,
+    options: ProducerOptions,
 }
 
-impl Producer {
-    pub fn new<Exe: Executor + ?Sized>(pulsar: Pulsar<Exe>, options: ProducerOptions) -> Producer {
-        let (tx, rx) = unbounded();
-        if let Err(_) = Exe::spawn(Box::pin(ProducerEngine {
-            pulsar,
-            inbound: Box::pin(rx),
+impl<Exe: Executor + ?Sized> Producer<Exe> {
+    pub fn new(client: Pulsar<Exe>, options: ProducerOptions) -> Producer<Exe> {
+        Producer {
+            client,
             producers: BTreeMap::new(),
-            new_producers: BTreeMap::new(),
-            producer_options: options,
-        }.map(|res| trace!("ProducerEngine returned {:?}", res)))) {
-            error!("the executor could not spawn the Producer engine future");
+            options,
         }
-        Producer { message_sender: tx }
     }
 
     pub async fn send<T: SerializeMessage + Sized, S: Into<String>>(
-        &self,
+        &mut self,
         topic: S,
         message: T,
     ) -> Result<proto::CommandSendReceipt, Error> {
@@ -91,8 +78,23 @@ impl Producer {
         }
     }
 
+    async fn send_message<S: Into<String>>(
+        &mut self,
+        topic: S,
+        message: Message,
+    ) ->  Result<proto::CommandSendReceipt, Error> {
+        let topic = topic.into();
+        if !self.producers.contains_key(&topic) {
+            let producer = self.client.create_producer(&topic, None, self.options.clone()).await?;
+            self.producers.insert(topic.clone(), producer);
+        }
+
+        let producer = self.producers.get_mut(&topic).unwrap();
+        producer.send_raw(message).await
+    }
+
     pub async fn send_all<'a, 'b, T, S, I>(
-        &self,
+        &mut self,
         topic: S,
         messages: I,
     ) -> Result<Vec<proto::CommandSendReceipt>, Error>
@@ -113,181 +115,14 @@ impl Producer {
             Ok(messages) => {
                 let mut v = vec![];
                 for m in messages.into_iter() {
-                    v.push(self.send_message(topic.clone(), m));
+                    v.push(self.send_message(topic.clone(), m).await?);
                 }
 
-                try_join_all(v).await
+                Ok(v)
             }
             Err(e) => Err(e),
         }
     }
-
-    pub async fn send_message<S: Into<String>>(
-        &self,
-        topic: S,
-        message: Message,
-    ) ->  Result<proto::CommandSendReceipt, Error> {
-        let (resolver, future) = oneshot::channel();
-        match self.message_sender.unbounded_send(ProducerMessage {
-            topic: topic.into(),
-            message,
-            resolver,
-        }) {
-            Ok(_) => {
-                match future.await {
-                    Ok(Ok(data)) => Ok(data),
-                    Ok(Err(e)) => Err(e),
-                    Err(oneshot::Canceled) => Err(ProducerError::Custom(
-                        "Unexpected error: pulsar producer engine unexpectedly dropped".to_owned(),
-                    )
-                    .into()),
-                }
-            },
-            Err(_) => Err(
-                ProducerError::Custom(
-                    "Unexpected error: pulsar producer engine unexpectedly dropped".to_owned(),
-                )
-                .into(),
-            ),
-        }
-    }
-}
-
-struct ProducerEngine<Exe: Executor + ?Sized> {
-    pulsar: Pulsar<Exe>,
-    inbound: Pin<Box<UnboundedReceiver<ProducerMessage>>>,
-    producers: BTreeMap<String, Arc<Mutex<TopicProducer<Exe>>>>,
-    new_producers: BTreeMap<String, Pin<Box<oneshot::Receiver<Result<Arc<Mutex<TopicProducer<Exe>>>, Error>>>>>,
-    producer_options: ProducerOptions,
-}
-
-impl<Exe: Executor> Future for ProducerEngine<Exe> {
-    type Output = Result<(), ()>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), ()>> {
-        if !self.new_producers.is_empty() {
-            let mut resolved_topics = Vec::new();
-            let mut received_producers = vec![];
-            for (topic, producer) in self.new_producers.iter_mut() {
-                match producer.as_mut().poll(cx) {
-                    Poll::Ready(Ok(Ok(producer))) => {
-                        received_producers.push(producer);
-                        resolved_topics.push(topic.clone());
-                    }
-                    Poll::Ready(Ok(Err(_))) | Poll::Ready(Err(_)) => resolved_topics.push(topic.clone()),
-                    Poll::Pending => {}
-                }
-            }
-
-            for producer in received_producers.drain(..) {
-                self.producers.insert(producer.topic().to_owned(), producer);
-            }
-            for topic in resolved_topics {
-                self.new_producers.remove(&topic);
-            }
-        }
-
-        loop {
-            let r = match self.inbound.as_mut().poll_next(cx) {
-              Poll::Pending => return Poll::Pending,
-              Poll::Ready(t) => t,
-            };
-
-            match r {
-                Some(ProducerMessage {
-                    topic,
-                    message,
-                    resolver,
-                }) => {
-                    match self.producers.get(&topic) {
-                        Some(producer) => {
-                            let p = producer.clone();
-                            let f = async move {
-                                p
-                                    .send_raw(message)
-                                    .map(|r| {
-                                        if let Err(res) = resolver.send(r) {
-                                          error!("send_message result receiver was dropped before getting the receipt: {:?}", res);
-                                        }
-                                    }).await;
-                            };
-                            if let Err(_) = Exe::spawn(Box::pin(f)) {
-                                error!("the executor could not spawn the message sending future");
-                            }
-                        }
-                        None => {
-                            let pending = self.new_producers.remove(&topic).unwrap_or_else(|| {
-                                let (tx, rx) = oneshot::channel::<Result<Arc<TopicProducer<Exe>>, Error>>();
-                                let pulsar = self.pulsar.clone();
-                                let topic = topic.clone();
-                                let producer_options = self.producer_options.clone();
-                                let f = async move {
-                                   let r = pulsar
-                                        .create_producer(
-                                            topic,
-                                            None,
-                                            producer_options,
-                                        ).await;
-
-                                   if let Err(_) = tx.send(r.map(Arc::new)) {
-                                       error!("create_producer result receiver was dropped before getting the prducer");
-                                   }
-                                };
-                                if let Err(_) = Exe::spawn(Box::pin(f)) {
-                                    error!("the executor could not spawn the producer creation future");
-                                }
-                                Box::pin(rx)
-                            });
-                            let (tx, rx) = oneshot::channel::<Result<Arc<TopicProducer<Exe>>, Error>>();
-                            let f = async {
-                                match pending
-                                    .await {
-                                    Ok(Ok(producer)) => {
-                                        let _ = tx.send(Ok(producer.clone()));
-                                        let r = producer
-                                            .send_raw(message).await;
-
-                                        if let Err(res) = resolver.send(r) {
-                                          error!("send_message result receiver was dropped before getting the receipt: {:?}", res);
-                                        }
-                                    },
-                                    Ok(Err(e)) => {
-                                        let _ = resolver.send(Err(e));
-                                        // TODO find better error propagation here
-                                        // we send an error to tx to signal that the new producer
-                                        // failed, since tx is added to new_producers in all cases
-                                        let _ = tx.send(Err(Error::Producer(
-                                                    ProducerError::Custom("producer creation failed".to_string()),
-                                                    )));
-                                    }
-                                    Err(_) => {
-                                        let _ = resolver.send(Err(Error::Producer(
-                                                    ProducerError::Custom("producer creation failed".to_string()),
-                                                    )));
-                                        // TODO find better error propagation here
-                                        // we send an error to tx to signal that the new producer
-                                        // failed, since tx is added to new_producers in all cases
-                                        let _ = tx.send(Err(Error::Producer(
-                                                    ProducerError::Custom("()".to_string()),
-                                                    )));
-                                    }
-                                }
-                            };
-                            Exe::spawn(Box::pin(f));
-                            self.new_producers.insert(topic, Box::pin(rx));
-                        }
-                    }
-                }
-                None => return Poll::Ready(Ok(())),
-            }
-        }
-    }
-}
-
-struct ProducerMessage {
-    topic: String,
-    message: Message,
-    resolver: oneshot::Sender<Result<proto::CommandSendReceipt, Error>>,
 }
 
 pub struct TopicProducer<Exe: Executor + ?Sized> {
