@@ -14,7 +14,7 @@ use rand;
 
 use crate::client::SerializeMessage;
 use crate::connection::{Connection, SerialId};
-use crate::error::ProducerError;
+use crate::error::{ProducerError, ConnectionError};
 use crate::executor::Executor;
 use crate::message::proto::{self, EncryptionKeys, Schema, CompressionType};
 use crate::message::BatchedMessage;
@@ -156,8 +156,8 @@ impl Producer {
 struct ProducerEngine<Exe: Executor + ?Sized> {
     pulsar: Pulsar<Exe>,
     inbound: Pin<Box<UnboundedReceiver<ProducerMessage>>>,
-    producers: BTreeMap<String, Arc<TopicProducer>>,
-    new_producers: BTreeMap<String, Pin<Box<oneshot::Receiver<Result<Arc<TopicProducer>, Error>>>>>,
+    producers: BTreeMap<String, Arc<Mutex<TopicProducer<Exe>>>>,
+    new_producers: BTreeMap<String, Pin<Box<oneshot::Receiver<Result<Arc<Mutex<TopicProducer<Exe>>>, Error>>>>>,
     producer_options: ProducerOptions,
 }
 
@@ -217,7 +217,7 @@ impl<Exe: Executor> Future for ProducerEngine<Exe> {
                         }
                         None => {
                             let pending = self.new_producers.remove(&topic).unwrap_or_else(|| {
-                                let (tx, rx) = oneshot::channel::<Result<Arc<TopicProducer>, Error>>();
+                                let (tx, rx) = oneshot::channel::<Result<Arc<TopicProducer<Exe>>, Error>>();
                                 let pulsar = self.pulsar.clone();
                                 let topic = topic.clone();
                                 let producer_options = self.producer_options.clone();
@@ -238,7 +238,7 @@ impl<Exe: Executor> Future for ProducerEngine<Exe> {
                                 }
                                 Box::pin(rx)
                             });
-                            let (tx, rx) = oneshot::channel::<Result<Arc<TopicProducer>, Error>>();
+                            let (tx, rx) = oneshot::channel::<Result<Arc<TopicProducer<Exe>>, Error>>();
                             let f = async {
                                 match pending
                                     .await {
@@ -290,7 +290,8 @@ struct ProducerMessage {
     resolver: oneshot::Sender<Result<proto::CommandSendReceipt, Error>>,
 }
 
-pub struct TopicProducer {
+pub struct TopicProducer<Exe: Executor + ?Sized> {
+    client: Pulsar<Exe>,
     connection: Arc<Connection>,
     id: ProducerId,
     name: ProducerName,
@@ -301,15 +302,17 @@ pub struct TopicProducer {
     batch: Option<Mutex<Batch>>,
     compression: Option<proto::CompressionType>,
     _drop_signal: oneshot::Sender<()>,
+    options: ProducerOptions,
 }
 
-impl TopicProducer {
-    pub async fn from_connection<Exe: Executor, S: Into<String>>(
+impl<Exe: Executor + ?Sized> TopicProducer<Exe> {
+    pub async fn from_connection<S: Into<String>>(
+        client: Pulsar<Exe>,
         connection: Arc<Connection>,
         topic: S,
         name: Option<String>,
         options: ProducerOptions,
-    ) -> Result<TopicProducer, Error> {
+    ) -> Result<TopicProducer<Exe>, Error> {
         let topic = topic.into();
         let producer_id = rand::random();
         let sequence_ids = SerialId::new();
@@ -345,7 +348,7 @@ impl TopicProducer {
         };
 
         let success = sender
-            .create_producer(topic.clone(), producer_id, name, options).await?;
+            .create_producer(topic.clone(), producer_id, name, options.clone()).await?;
 
         // drop_signal will be dropped when the TopicProducer is dropped, then
         // drop_receiver will return, and we can close the producer
@@ -357,6 +360,7 @@ impl TopicProducer {
         }));
 
         Ok(TopicProducer {
+            client,
             connection,
             id: producer_id,
             name: success.producer_name,
@@ -365,6 +369,7 @@ impl TopicProducer {
             batch: batch_size.map(Batch::new).map(Mutex::new),
             compression,
             _drop_signal,
+            options,
         })
     }
 
@@ -384,7 +389,7 @@ impl TopicProducer {
     }
 
     pub async fn send<T: SerializeMessage + Sized>(
-        &self,
+        &mut self,
         message: T,
     ) -> Result<proto::CommandSendReceipt, Error> {
         match T::serialize_message(&message) {
@@ -400,7 +405,7 @@ impl TopicProducer {
     }
 
     pub async fn send_raw(
-        &self,
+        &mut self,
         message: Message,
     ) -> Result<proto::CommandSendReceipt, Error> {
         match self.batch.as_ref() {
@@ -448,7 +453,7 @@ impl TopicProducer {
     }
 
     async fn send_compress(
-        &self,
+        &mut self,
         mut message: Message,
     ) -> Result<proto::CommandSendReceipt, Error> {
         let compressed_message = match self.compression {
@@ -521,15 +526,81 @@ impl TopicProducer {
             },
         };
 
-        self.connection
+        self.send_inner(compressed_message).await
+    }
+
+    async fn send_inner(
+        &mut self,
+        message: Message,
+    ) -> Result<proto::CommandSendReceipt, Error> {
+        let msg = message.clone();
+        match self.connection
             .sender()
             .send(
                 self.id,
                 self.name.clone(),
                 self.message_id.get(),
-                compressed_message,
-                ).await
-            .map_err(|e| ProducerError::Connection(e).into())
+                message,
+                ).await {
+                Ok(receipt) => return Ok(receipt),
+                Err(ConnectionError::Disconnected) => {},
+                Err(e) => {
+                    error!("send_inner got error: {:?}", e);
+                    return Err(ProducerError::Connection(e).into());
+                }
+            };
+
+        error!("send_inner disconnected");
+        self.reconnect().await?;
+
+        match self.connection
+            .sender()
+            .send(
+                self.id,
+                self.name.clone(),
+                self.message_id.get(),
+                msg,
+                ).await {
+                Ok(receipt) => return Ok(receipt),
+                Err(e) => {
+                    error!("send_inner got error: {:?}", e);
+                    return Err(ProducerError::Connection(e).into());
+                }
+            }
+
+    }
+
+    async fn reconnect(&mut self) -> Result<(), Error> {
+        info!("TopicProducer::reconnect()");
+        info!("topic: {}", self.topic);
+        let broker_address = self.client.lookup_topic(&self.topic).await?;
+        info!("broker address: {:?}, reconnecting", broker_address);
+        let conn = self.client.manager.get_connection(&broker_address).await?;
+        info!("got connection");
+
+        self.connection = conn;
+
+        let topic = self.topic.clone();
+        let batch_size = self.options.batch_size.clone();
+
+        let _ = self.connection.sender()
+            .create_producer(topic.clone(), self.id.clone(), Some(self.name.clone()), self.options.clone()).await?;
+
+        // drop_signal will be dropped when the TopicProducer is dropped, then
+        // drop_receiver will return, and we can close the producer
+        let (_drop_signal, drop_receiver) = oneshot::channel::<()>();
+        let batch =  batch_size.map(Batch::new).map(Mutex::new);
+        let conn = self.connection.clone();
+        let producer_id = self.id.clone();
+        let _ = Exe::spawn(Box::pin(async move {
+            let _res = drop_receiver.await;
+             let _ = conn.sender().close_producer(producer_id).await;
+        }));
+
+        self.batch = batch;
+        self._drop_signal = _drop_signal;
+
+        Ok(())
     }
 }
 

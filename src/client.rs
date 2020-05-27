@@ -83,7 +83,7 @@ impl SerializeMessage for str {
 
 #[derive(Clone)]
 pub struct Pulsar<E: Executor + ?Sized> {
-    manager: Arc<ConnectionManager<E>>,
+    pub(crate) manager: Arc<ConnectionManager<E>>,
     service_discovery: Arc<ServiceDiscovery<E>>,
 }
 
@@ -249,21 +249,21 @@ impl<Exe: Executor> Pulsar<Exe> {
         topic: S,
         name: Option<String>,
         options: ProducerOptions,
-    ) -> Result<TopicProducer, Error> {
+    ) -> Result<TopicProducer<Exe>, Error> {
         let manager = self.manager.clone();
         let topic = topic.into();
         let broker_address = self.service_discovery
             .lookup_topic(topic.clone()).await?;
         let conn = manager.get_connection(&broker_address).await?;
 
-        TopicProducer::from_connection::<Exe, _>(conn, topic, name, options).await
+        TopicProducer::from_connection::<_>(self.clone(), conn, topic, name, options).await
     }
 
     pub async fn create_partitioned_producers<S: Into<String>>(
         &self,
         topic: S,
         options: ProducerOptions,
-    ) -> Result<Vec<TopicProducer>, Error> {
+    ) -> Result<Vec<TopicProducer<Exe>>, Error> {
         let manager = self.manager.clone();
 
         let v = self.service_discovery
@@ -272,7 +272,7 @@ impl<Exe: Executor> Pulsar<Exe> {
         let mut res = Vec::new();
         for (topic, broker_address) in v.iter() {
             let conn = manager.get_connection(&broker_address).await?;
-            res.push(TopicProducer::from_connection::<Exe, _>(conn, topic, None, options.clone()));
+            res.push(TopicProducer::from_connection::<_>(self.clone(), conn, topic, None, options.clone()));
         }
 
         future::try_join_all(res).await
@@ -296,7 +296,7 @@ impl<Exe: Executor> Pulsar<Exe> {
         topic: S,
         options: ProducerOptions,
     ) -> Result<CommandSendReceipt, Error> {
-        let producer = self.create_producer(topic, None, options).await?;
+        let mut producer = self.create_producer(topic, None, options).await?;
         producer.send_raw(message).await
     }
 
