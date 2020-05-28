@@ -829,6 +829,7 @@ impl<'a, Exe: Executor> ConsumerBuilder<'a, Set<Regex>, Set<String>, Set<SubType
             subscription_type: Set(sub_type),
             consumer_id,
             consumer_name,
+            consumer_options,
             batch_size,
             topic_refresh,
             namespace,
@@ -854,7 +855,7 @@ impl<'a, Exe: Executor> ConsumerBuilder<'a, Set<Regex>, Set<String>, Set<SubType
             sub_type,
             topic_refresh,
             unacked_message_resend_delay,
-            ConsumerOptions::default(),
+            consumer_options.unwrap_or_else(|| ConsumerOptions::default()),
         )
     }
 }
@@ -1139,7 +1140,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     #[cfg(feature = "tokio-runtime")]
     fn multi_consumer() {
         let _ = log::set_logger(&TEST_LOGGER);
@@ -1193,6 +1193,8 @@ mod tests {
                 .with_subscription("test_sub")
                 .with_subscription_type(SubType::Shared)
                 .with_topic_refresh(Duration::from_secs(1))
+                // get earliest messages
+                .with_options(ConsumerOptions { initial_position: Some(1), ..Default::default() })
                 .build();
 
             let consumer_state = consumer.start_state_stream();
