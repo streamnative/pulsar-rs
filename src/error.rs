@@ -71,6 +71,7 @@ pub enum ConnectionError {
     Encoding(String),
     SocketAddr(String),
     UnexpectedResponse(String),
+    Tls(native_tls::Error),
     Canceled,
     Shutdown,
 }
@@ -78,6 +79,12 @@ pub enum ConnectionError {
 impl From<io::Error> for ConnectionError {
     fn from(err: io::Error) -> Self {
         ConnectionError::Io(err)
+    }
+}
+
+impl From<native_tls::Error> for ConnectionError {
+    fn from(err: native_tls::Error) -> Self {
+        ConnectionError::Tls(err)
     }
 }
 
@@ -90,7 +97,8 @@ impl fmt::Display for ConnectionError {
             ConnectionError::Unexpected(e) => write!(f, "{}", e),
             ConnectionError::Decoding(e) => write!(f, "Error decoding message: {}", e),
             ConnectionError::Encoding(e) => write!(f, "Error encoding message: {}", e),
-            ConnectionError::SocketAddr(e) => write!(f, "Error obtaning socket address: {}", e),
+            ConnectionError::SocketAddr(e) => write!(f, "Error obtaining socket address: {}", e),
+            ConnectionError::Tls(e) => write!(f, "Error connecting TLS stream: {}", e),
             ConnectionError::UnexpectedResponse(e) => {
                 write!(f, "Unexpected response from pulsar: {}", e)
             }

@@ -158,7 +158,7 @@ mod tests {
         let _ = log::set_max_level(LevelFilter::Debug);
 
         let f = async {
-            let addr = "127.0.0.1:6650";
+            let addr = "pulsar://127.0.0.1:6650";
             let pulsar: Pulsar<TokioExecutor> = Pulsar::new(addr, None).await.unwrap();
 
             let mut consumer: Consumer<TestData> = pulsar
@@ -221,7 +221,7 @@ mod tests {
         let mut runtime = Runtime::new().unwrap();
 
         let f = async {
-            let addr = "127.0.0.1:6650";
+            let addr = "pulsar://127.0.0.1:6650";
             let pulsar: Pulsar<TokioExecutor> = Pulsar::new(addr, None).await.unwrap();
             let producer = pulsar.producer(None);
 
@@ -288,7 +288,7 @@ mod tests {
         let _ = log::set_max_level(LevelFilter::Debug);
         let runtime = Runtime::new().unwrap();
 
-        let addr = "127.0.0.1:6650";
+        let addr = "pulsar://127.0.0.1:6650";
         let (tx, rx) = std::sync::mpsc::channel();
 
         let mut seen = BTreeSet::new();

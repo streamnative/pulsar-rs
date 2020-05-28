@@ -437,8 +437,10 @@ pub struct Connection {
 impl Connection {
     pub async fn new<Exe: Executor + ?Sized>(
         addr: String,
+        host: String,
         auth_data: Option<Authentication>,
         proxy_to_broker_url: Option<String>,
+        tls: bool,
     ) -> Result<Connection, ConnectionError> {
         let address = SocketAddr::from_str(&addr)
             .map_err(|e| ConnectionError::SocketAddr(e.to_string()))?;
@@ -446,10 +448,21 @@ impl Connection {
         match Exe::kind() {
             #[cfg(feature = "tokio-runtime")]
             ExecutorKind::Tokio => {
-                let stream = tokio::net::TcpStream::connect(&address).await
-                    .map(|stream| tokio_util::codec::Framed::new(stream, Codec))?;
+                if tls {
+                    let stream = tokio::net::TcpStream::connect(&address).await?;
 
-                Connection::from_stream::<Exe, _>(addr, stream, auth_data, proxy_to_broker_url).await
+                    let cx = native_tls::TlsConnector::builder().build()?;
+                    let cx = tokio_native_tls::TlsConnector::from(cx);
+                    let stream = cx.connect(&host, stream).await
+                        .map(|stream| tokio_util::codec::Framed::new(stream, Codec))?;
+
+                    Connection::from_stream::<Exe, _>(addr, stream, auth_data, proxy_to_broker_url).await
+                } else {
+                    let stream = tokio::net::TcpStream::connect(&address).await
+                        .map(|stream| tokio_util::codec::Framed::new(stream, Codec))?;
+
+                    Connection::from_stream::<Exe, _>(addr, stream, auth_data, proxy_to_broker_url).await
+                }
             },
             #[cfg(not(feature = "tokio_runtime"))]
             ExecutorKind::Tokio => {
@@ -457,10 +470,18 @@ impl Connection {
             }
             #[cfg(feature = "async-std-runtime")]
             ExecutorKind::AsyncStd => {
-                let stream = async_std::net::TcpStream::connect(&address).await
-                    .map(|stream| futures_codec::Framed::new(stream, Codec))?;
+                if tls {
+                    let stream = async_std::net::TcpStream::connect(&address).await?;
+                    let stream = async_native_tls::connect(&host, stream).await
+                        .map(|stream| futures_codec::Framed::new(stream, Codec))?;
 
-                Connection::from_stream::<Exe, _>(addr, stream, auth_data, proxy_to_broker_url).await
+                    Connection::from_stream::<Exe, _>(addr, stream, auth_data, proxy_to_broker_url).await
+                } else {
+                    let stream = async_std::net::TcpStream::connect(&address).await
+                        .map(|stream| futures_codec::Framed::new(stream, Codec))?;
+
+                    Connection::from_stream::<Exe, _>(addr, stream, auth_data, proxy_to_broker_url).await
+                }
             }
             #[cfg(not(feature = "async-std-runtime"))]
             ExecutorKind::AsyncStd => {

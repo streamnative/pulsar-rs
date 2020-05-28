@@ -4,11 +4,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future;
+use url::Url;
 
 use crate::connection::Authentication;
 use crate::connection_manager::{BrokerAddress, ConnectionManager};
 use crate::consumer::{Consumer, ConsumerBuilder, ConsumerOptions, MultiTopicConsumer, Unset};
-use crate::error::Error;
+use crate::error::{Error, ServiceDiscoveryError};
 use crate::executor::Executor;
 use crate::message::proto::{self, command_subscribe::SubType, CommandSendReceipt};
 use crate::message::Payload;
@@ -94,32 +95,42 @@ impl<Exe: Executor> Pulsar<Exe> {
         auth: Option<Authentication>,
     ) -> Result<Self, Error> {
         let addr: String = addr.into();
+        let url = Url::parse(&addr).map_err(|e| {
+            error!("error parsing URL: {:?}", e);
+            ServiceDiscoveryError::NotFound
+        })?;
+        if url.scheme() != "pulsar" && url.scheme() != "pulsar+ssl" {
+            error!("invalid scheme: {}", url.scheme());
+            return Err(Error::ServiceDiscovery(ServiceDiscoveryError::NotFound));
+        }
+        let hostname = url.host().map(|s| s.to_string());
 
-        let address: SocketAddr = match addr.parse::<SocketAddr>() {
-            Ok(a) => a,
-            Err(_) => {
-                let a = addr.clone();
-                match Exe::spawn_blocking(move|| {
-                    let res = if a.contains(':') {
-                        a.to_socket_addrs()
-                    } else {
-                        (a.as_str(), 6650u16).to_socket_addrs()
-                    };
-
-                    res.map_err(|e| {
-                        error!("error querying '{}': {:?}", a, e);
-
-                    }).ok().and_then(|mut it| it.next())
-                }).await {
-                    Some(Some(address)) => {
-                        address
-                    },
-                    _ => return Err(Error::Custom(format!("could not query address: {}", addr))),
-                }
-            }
+        let tls = match url.scheme() {
+            "pulsar" => false,
+            "pulsar+ssl" => true,
+            s => {
+                error!("invalid scheme: {}", s);
+                return Err(Error::ServiceDiscovery(ServiceDiscoveryError::NotFound));
+            },
         };
 
-        let manager = ConnectionManager::new(address, auth).await?;
+        let address: SocketAddr = match Exe::spawn_blocking(move || {
+            url.socket_addrs(|| match url.scheme() {
+                "pulsar" => Some(6650),
+                "pulsar+ssl" => Some(6651),
+                _ => None,
+            }).map_err(|e| {
+                error!("could not look up address: {:?}", e);
+                e
+            }).ok().and_then(|v| v.get(0).map(|a| *a))
+        }).await {
+            Some(Some(address)) => address,
+            _ => return Err(Error::Custom(format!("could not query address: {}", addr))),
+        };
+
+        let hostname = hostname.unwrap_or_else(|| address.to_string());
+
+        let manager = ConnectionManager::new(address, hostname, auth, tls).await?;
         let manager = Arc::new(manager);
         let service_discovery = Arc::new(ServiceDiscovery::with_manager(
                 manager.clone(),
