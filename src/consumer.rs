@@ -38,14 +38,19 @@ pub struct ConsumerOptions {
     pub initial_position: Option<i32>,
 }
 
-pub struct Consumer<T: DeserializeMessage> {
+pub struct Consumer<T: DeserializeMessage, Exe: Executor + ?Sized> {
+    client: Pulsar<Exe>,
     connection: Arc<Connection>,
     topic: String,
+    subscription: String,
+    sub_type: SubType,
     id: u64,
+    name: Option<String>,
     messages: Pin<Box<mpsc::UnboundedReceiver<RawMessage>>>,
     nack_handler: UnboundedSender<NackMessage>,
     batch_size: u32,
     remaining_messages: u32,
+    unacked_message_redelivery_delay: Option<Duration>,
     #[allow(unused)]
     data_type: PhantomData<fn(Payload) -> T::Output>,
     options: ConsumerOptions,
@@ -53,8 +58,9 @@ pub struct Consumer<T: DeserializeMessage> {
     _drop_signal: oneshot::Sender<()>,
 }
 
-impl<T: DeserializeMessage> Consumer<T> {
-    pub async fn from_connection<Exe: Executor>(
+impl<T: DeserializeMessage, Exe: Executor + ?Sized> Consumer<T, Exe> {
+    pub async fn from_connection(
+        client: Pulsar<Exe>,
         connection: Arc<Connection>,
         topic: String,
         subscription: String,
@@ -64,7 +70,7 @@ impl<T: DeserializeMessage> Consumer<T> {
         batch_size: Option<u32>,
         unacked_message_redelivery_delay: Option<Duration>,
         options: ConsumerOptions,
-    ) -> Result<Consumer<T>, Error> {
+    ) -> Result<Consumer<T, Exe>, Error> {
         let consumer_id = consumer_id.unwrap_or_else(rand::random);
         let (resolver, messages) = mpsc::unbounded();
         let batch_size = batch_size.unwrap_or(1000);
@@ -73,7 +79,7 @@ impl<T: DeserializeMessage> Consumer<T> {
             .subscribe(
                 resolver,
                 topic.clone(),
-                subscription,
+                subscription.clone(),
                 sub_type,
                 consumer_id,
                 consumer_name.clone(),
@@ -98,6 +104,7 @@ impl<T: DeserializeMessage> Consumer<T> {
         let (_drop_signal, drop_receiver) = oneshot::channel::<()>();
         let conn = connection.clone();
         let ack_sender = nack_handler.clone();
+        let name = consumer_name.clone();
         let _ = Exe::spawn(Box::pin(async move {
             let _res = drop_receiver.await;
             ack_sender.close_channel();
@@ -107,18 +114,81 @@ impl<T: DeserializeMessage> Consumer<T> {
         }));
 
         Ok(Consumer {
+            client,
             connection,
             topic,
             id: consumer_id,
+            name,
+            subscription,
+            sub_type,
             messages: Box::pin(messages),
             nack_handler,
             batch_size,
+            unacked_message_redelivery_delay,
             remaining_messages: batch_size,
             data_type: PhantomData,
             options,
             current_message: None,
             _drop_signal,
         })
+    }
+
+    async fn reconnect(&mut self) -> Result<(), Error> {
+        info!("Consumer::reconnect()");
+        info!("topic: {}", self.topic);
+        let broker_address = self.client.lookup_topic(&self.topic).await?;
+        info!("broker address: {:?}, reconnecting", broker_address);
+        let conn = self.client.manager.get_connection(&broker_address).await?;
+        info!("got connection");
+
+        self.connection = conn;
+
+        let topic = self.topic.clone();
+        let (resolver, messages) = mpsc::unbounded();
+
+        self.connection.sender()
+            .subscribe(
+                resolver,
+                topic.clone(),
+                self.subscription.clone(),
+                self.sub_type,
+                self.id,
+                self.name.clone(),
+                self.options.clone(),
+            ).await.map_err(Error::Connection)?;
+
+        self.connection.sender()
+            .send_flow(self.id, self.batch_size)
+            .map_err(|e| Error::Consumer(ConsumerError::Connection(e)))?;
+
+        self.messages = Box::pin(messages);
+        //TODO this should be shared among all consumers when using the client
+        //TODO make tick_delay configurable
+        let tick_delay = Duration::from_millis(500);
+        let nack_handler = NackHandler::new::<Exe>(
+            self.connection.clone(),
+            self.unacked_message_redelivery_delay,
+            tick_delay,
+        );
+
+        // drop_signal will be dropped when Consumer is dropped, then
+        // drop_receiver will return, and we can close the consumer
+        let (_drop_signal, drop_receiver) = oneshot::channel::<()>();
+        let conn = self.connection.clone();
+        let ack_sender = nack_handler.clone();
+        let name = self.name.clone();
+        let id = self.id;
+        let _ = Exe::spawn(Box::pin(async move {
+            let _res = drop_receiver.await;
+            ack_sender.close_channel();
+            if let Err(e) = conn.sender().close_consumer(id).await {
+              error!("could not close consumer {:?}({}): {:?}", name, id, e);
+            }
+        }));
+        self._drop_signal = _drop_signal;
+        self.nack_handler = nack_handler;
+
+        Ok(())
     }
 
     pub fn topic(&self) -> &str {
@@ -427,7 +497,7 @@ impl Iterator for BatchedMessageIterator {
     }
 }
 
-impl<T: DeserializeMessage> Stream for Consumer<T> {
+impl<T: DeserializeMessage, Exe: Executor + ?Sized> Stream for Consumer<T, Exe> {
     type Item = Result<Message<T>, Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -793,7 +863,7 @@ impl<'a, Topic, Subscription, SubscriptionType, Exe: Executor + ?Sized>
 }
 
 impl<'a, Exe: Executor> ConsumerBuilder<'a, Set<String>, Set<String>, Set<SubType>, Exe> {
-    pub async fn build<T: DeserializeMessage>(self) -> Result<Consumer<T>, Error> {
+    pub async fn build<T: DeserializeMessage>(self) -> Result<Consumer<T, Exe>, Error> {
         let ConsumerBuilder {
             pulsar,
             topic: Set(topic),
@@ -868,14 +938,147 @@ pub struct ConsumerState {
     pub messages_received: u64,
 }
 
+/*
+pub struct MultiTopicConsumer2<T: DeserializeMessage> {
+        ack_tx: UnboundedSender<MessageData>,
+        message_rx: UnboundedReceiver<(String, Result<Message<T>, Error>)>,
+}
+
+impl<T: DeserializeMessage + Send> MultiTopicConsumer2<T> {
+    pub fn new<S1, S2, Exe: Executor>(
+        client: Pulsar<Exe>,
+        namespace: S1,
+        topic_regex: Regex,
+        subscription: S2,
+        sub_type: SubType,
+        topic_refresh: Duration,
+        unacked_message_resend_delay: Option<Duration>,
+        options: ConsumerOptions,
+    ) -> Self
+    where
+        S1: Into<String>,
+        S2: Into<String>,
+    {
+        let (ack_tx, ack_rx) = unbounded();
+        let (message_tx, message_rx) = unbounded();
+        let namespace = namespace.into();
+        let subscription = subscription.into();
+
+        Exe::spawn(Box::pin(async move {
+            MultiTopicConsumer2::start(
+                client,
+                namespace,
+                topic_regex,
+                subscription,
+                sub_type,
+                topic_refresh,
+                unacked_message_resend_delay,
+                options,
+                ack_rx,
+                message_tx).map(|e| {
+                error!("multitopic consumer stopped: {:?}", e);
+            }).await
+        }));
+
+        MultiTopicConsumer2 { ack_tx, message_rx }
+    }
+
+    pub fn ack(&self, msg: &Message<T>) -> Result<(), ConnectionError> {
+        self.ack_tx.send(msg.message_id.clone());
+        Ok(())
+    }
+
+    pub async fn start<Exe: Executor>(
+        client: Pulsar<Exe>,
+        namespace: String,
+        regex: Regex,
+        subscription: String,
+        sub_type: SubType,
+        topic_refresh: Duration,
+        unacked_message_resend_delay: Option<Duration>,
+        options: ConsumerOptions,
+        ack_rx: UnboundedReceiver<MessageData>,
+        mut message_tx: UnboundedSender<(String, Result<Message<T>, Error>)>,
+        ) -> Result<(), Error> {
+
+        let refresh = Box::pin(Exe::interval(topic_refresh).map(|_| MultiConsumerStream::Interval));
+        let mut select: futures::stream::SelectAll<Pin<Box<dyn Stream<Item = MultiConsumerStream<T>>>>> =
+            futures::stream::select_all(vec![]);
+        select.push(Box::pin(refresh));
+            //futures::stream::select_all(vec![Box::pin(refresh)]);
+        let mut existing_topics = HashSet::new();
+        let mut creating_topics = HashSet::new();
+
+        while let Some(res) = select.next().await {
+            match res {
+                MultiConsumerStream::Interval => {
+                    let topics: Vec<String> = match client
+                        .get_topics_of_namespace(namespace.clone(), proto::get_topics::Mode::All).await {
+                            Ok(topics) => topics,
+                            Err(e) => {
+                                error!("could not get the list of topics: {:?}", e);
+                                continue;
+                            }
+                        };
+                    trace!("fetched topics: {:?}", &topics);
+                    for topic in topics {
+                        if !existing_topics.contains(&topic)
+                            && !creating_topics.contains(&topic)
+                                && regex.is_match(topic.as_str()) {
+                                    trace!("creating consumer for topic {}", topic);
+                                    //let pulsar = pulsar.clone();
+                                    let subscription = subscription.clone();
+                                    select.push(Box::pin(client.create_consumer(
+                                                topic.clone(),
+                                                subscription,
+                                                sub_type,
+                                                None,
+                                                None,
+                                                None,
+                                                unacked_message_resend_delay,
+                                                options.clone(),
+                                                ).map(MultiConsumerStream::Consumer).into_stream()));
+                                    creating_topics.insert(topic);
+                                }
+                    }
+                },
+                MultiConsumerStream::Consumer(consumer_res) => {
+                    match consumer_res {
+                        Ok(consumer) => {
+                            let topic = consumer.topic().to_string();
+                            creating_topics.remove(&topic);
+                            existing_topics.insert(topic.clone());
+                            let stream = consumer.map(move |msg_res| MultiConsumerStream::Message((topic.clone(), msg_res)));
+                            select.push(Box::pin(stream));
+                        },
+                        Err(error) => {
+                            error!("could not create consumer: {:?}", error);
+                        }
+                    }
+                },
+                MultiConsumerStream::Message(message) => {
+                    message_tx.send(message);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+enum MultiConsumerStream<T: DeserializeMessage> {
+    Interval,
+    Consumer(Result<Consumer<T>, Error>),
+    Message((String, Result<Message<T>, Error>)),
+}*/
+
 pub struct MultiTopicConsumer<T: DeserializeMessage, Exe: Executor> {
     namespace: String,
     topic_regex: Regex,
     pulsar: Pulsar<Exe>,
     unacked_message_resend_delay: Option<Duration>,
-    consumers: BTreeMap<String, Pin<Box<Consumer<T>>>>,
+    consumers: BTreeMap<String, Pin<Box<Consumer<T, Exe>>>>,
     topics: VecDeque<String>,
-    new_consumers: Option<Pin<Box<dyn Future<Output = Result<Vec<Consumer<T>>, Error>> + Send>>>,
+    new_consumers: Option<Pin<Box<dyn Future<Output = Result<Vec<Consumer<T, Exe>>, Error>> + Send>>>,
     refresh: Pin<Box<dyn Stream<Item = ()> + Send>>,
     subscription: String,
     sub_type: SubType,
@@ -946,7 +1149,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
         self.send_state();
     }
 
-    fn add_consumers<I: IntoIterator<Item = Consumer<T>>>(&mut self, consumers: I) {
+    fn add_consumers<I: IntoIterator<Item = Consumer<T, Exe>>>(&mut self, consumers: I) {
         for consumer in consumers {
             let topic = consumer.topic().to_owned();
             self.consumers.insert(topic.clone(), Box::pin(consumer));

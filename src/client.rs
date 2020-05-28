@@ -181,7 +181,7 @@ impl<Exe: Executor> Pulsar<Exe> {
         consumer_id: Option<u64>,
         unacked_message_redelivery_delay: Option<Duration>,
         options: ConsumerOptions,
-    ) -> Result<Consumer<T>, Error>
+    ) -> Result<Consumer<T, Exe>, Error>
     where
         T: DeserializeMessage,
         S1: Into<String>,
@@ -193,7 +193,8 @@ impl<Exe: Executor> Pulsar<Exe> {
         let broker_address = self.service_discovery
             .lookup_topic(topic.clone()).await?;
         let conn = manager.get_connection(&broker_address).await?;
-        Consumer::from_connection::<Exe>(
+        Consumer::from_connection(
+            self.clone(),
             conn,
             topic,
             subscription.into(),
@@ -216,7 +217,7 @@ impl<Exe: Executor> Pulsar<Exe> {
         subscription: S2,
         sub_type: SubType,
         options: ConsumerOptions,
-    ) -> Result<Vec<Consumer<T>>, Error> {
+    ) -> Result<Vec<Consumer<T, Exe>>, Error> {
         let manager = self.manager.clone();
 
         let v = self.service_discovery
@@ -228,7 +229,8 @@ impl<Exe: Executor> Pulsar<Exe> {
                 let options = options.clone();
 
                 let conn = manager.get_connection(&broker_address).await?;
-                res.push(Consumer::from_connection::<Exe>(
+                res.push(Consumer::from_connection(
+                    self.clone(),
                     conn,
                     topic.to_string(),
                     subscription.into(),
