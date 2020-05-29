@@ -72,7 +72,7 @@ async fn main() -> Result<(), pulsar::Error> {
 
     let mut counter = 0usize;
     while let Some(msg) = consumer.try_next().await? {
-        consumer.ack(&msg)?;
+        consumer.ack(&msg).await?;
         let data = msg.deserialize().unwrap();
         if data.data.as_str() != "data" {
             panic!("Unexpected payload: {}", &data.data);

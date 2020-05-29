@@ -50,7 +50,6 @@ mod tests {
     use message::proto::command_subscribe::SubType;
 
     use crate::client::SerializeMessage;
-    use crate::consumer::Message;
     use crate::message::Payload;
     use crate::Error as PulsarError;
     #[cfg(feature = "tokio-runtime")]
@@ -192,7 +191,7 @@ mod tests {
             while let Ok(Some(msg)) = consumer.try_next().await {
             //let res =  consumer.next().await.unwrap();
                 //let msg = res.unwrap();
-                consumer.ack(&msg);
+                consumer.ack(&msg).await;
                 let data = msg.deserialize().unwrap();
                 if data.data.as_str() != "data" {
                     panic!("Unexpected payload: {}", &data.data);
@@ -242,7 +241,7 @@ mod tests {
                 producer.send(topic, send_data.to_string()).await.unwrap();
 
                 let msg = consumer.next().await.unwrap().unwrap();
-                consumer.ack(&msg);
+                consumer.ack(&msg).await;
 
                 let data = msg.deserialize().unwrap();
                 if data.as_str() != send_data {
@@ -268,7 +267,7 @@ mod tests {
                 producer.send(topic, send_data.to_vec()).await.unwrap();
 
                 let msg = consumer.next().await.unwrap().unwrap();
-                consumer.ack(&msg);
+                consumer.ack(&msg).await;
                 let data = msg.deserialize();
                 if data.as_slice() != send_data {
                     panic!("Unexpected payload in &[u8] test: {:?}", &data);
@@ -336,7 +335,7 @@ mod tests {
                     seen.insert(data.data.clone());
                 } else {
                     //ack the second time around
-                    consumer.ack(&message);
+                    consumer.ack(&message).await;
                 }
 
                 count += 1;

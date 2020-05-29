@@ -37,8 +37,7 @@ pub struct ConsumerOptions {
     pub initial_position: Option<i32>,
 }
 
-pub struct Consumer<T: DeserializeMessage, Exe: Executor + ?Sized> {
-    client: Pulsar<Exe>,
+pub struct Consumer<T: DeserializeMessage> {
     connection: Arc<Connection>,
     topic: String,
     id: u64,
@@ -49,8 +48,8 @@ pub struct Consumer<T: DeserializeMessage, Exe: Executor + ?Sized> {
     options: ConsumerOptions,
 }
 
-impl<T: DeserializeMessage, Exe: Executor + ?Sized> Consumer<T, Exe> {
-    pub async fn from_connection(
+impl<T: DeserializeMessage> Consumer<T> {
+    pub async fn from_connection<Exe: Executor + ?Sized>(
         client: Pulsar<Exe>,
         connection: Arc<Connection>,
         topic: String,
@@ -99,7 +98,7 @@ impl<T: DeserializeMessage, Exe: Executor + ?Sized> Consumer<T, Exe> {
         let name = consumer_name.clone();
         let _ = Exe::spawn(Box::pin(async move {
             let _res = drop_receiver.await;
-            info!("_drop_signal returned: {:?}", _res);
+            // if we receive a message, it indicates we want to stop this task
             if _res.is_err() {
                 ack_sender.close_channel();
                 if let Err(e) = conn.sender().close_consumer(consumer_id).await {
@@ -133,7 +132,6 @@ impl<T: DeserializeMessage, Exe: Executor + ?Sized> Consumer<T, Exe> {
         Exe::spawn(Box::pin(f));
 
         Ok(Consumer {
-            client,
             connection,
             topic,
             id: consumer_id,
@@ -201,7 +199,6 @@ impl<T: DeserializeMessage, Exe: Executor + ?Sized> Stream for Consumer<T, Exe> 
         match self.messages.as_mut().poll_next(cx) {
             Poll::Pending => return Poll::Pending,
             Poll::Ready(None) => {
-                info!("Consumer: messages::poll_next: returning Disconnected");
                 return Poll::Ready(Some(Err(Error::Connection(ConnectionError::Disconnected))));
             }
             Poll::Ready(Some(Ok((id, payload )))) => {
@@ -229,11 +226,6 @@ pub struct ConsumerEngine<Exe: Executor + ?Sized> {
     unacked_message_redelivery_delay: Option<Duration>,
     options: ConsumerOptions,
     _drop_signal: oneshot::Sender<()>,
-}
-
-enum SelectItem {
-    Message(RawMessage),
-    Ack(MessageData, bool),
 }
 
 impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
@@ -276,7 +268,7 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
     }
 
     async fn engine(&mut self) -> Result<(), Error> {
-        info!("starting the consumer engine for topic {}", self.topic);
+        debug!("starting the consumer engine for topic {}", self.topic);
         loop {
             if !self.connection.is_valid() {
                 if let Some(err) = self.connection.error() {
@@ -323,7 +315,7 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
                 Either::Right(((ack_opt, ack_rx), messages_rx)) => {
                     self.messages_rx = messages_rx.into_inner();
                     self.ack_rx = Some(ack_rx);
-                    info!("got ack: {:?}", ack_opt);
+                    //info!("got ack: {:?}", ack_opt);
 
                     if let Some((message_id, cumulative)) = ack_opt {
                         let res = self
@@ -528,7 +520,7 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
         let id = self.id;
         let _ = Exe::spawn(Box::pin(async move {
             let _res = drop_receiver.await;
-            info!("_drop_signal returned: {:?}", _res);
+            // if we receive a message, it indicates we want to stop this task
             if _res.is_err() {
                 ack_sender.close_channel();
                 if let Err(e) = conn.sender().close_consumer(id).await {
@@ -1530,7 +1522,7 @@ mod tests {
             while let Some(res) = consumer.next().await {
                 match res {
                     Ok(message) => {
-                        consumer.ack(&message);
+                        consumer.ack(&message).await;
                         let msg = message.deserialize().unwrap();
                         if !data.contains(&msg) {
                             panic!("Unexpected message: {:?}", &msg);
@@ -1617,7 +1609,7 @@ mod tests {
                 let msg = consumer.next().await.unwrap().unwrap();
                 println!("got message: {:?}", msg.payload);
                 assert_eq!(message, msg.deserialize().unwrap(), "we probably receive a message from a previous run of the test");
-                consumer.ack(&msg);
+                consumer.ack(&msg).await;
             }
 
             {
@@ -1639,7 +1631,7 @@ mod tests {
                     let msg = val.unwrap().unwrap();
                     println!("got message: {:?}", msg.payload);
                     // cleanup for the next test
-                    consumer.ack(&msg);
+                    consumer.ack(&msg).await;
                     // we should not receive a different message anyway
                     assert_eq!(message, msg.deserialize().unwrap());
                 }

@@ -7,7 +7,7 @@ use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use url::Url;
-use rand::{thread_rng, Rng};
+use rand::Rng;
 
 /// holds connection information for a broker
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -92,9 +92,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
             match self.connections.lock().unwrap().get_mut(broker) {
                 None => None,
                 Some(ConnectionStatus::Connected(c)) => {
-                    debug!("already connected");
                     if c.is_valid() {
-                        debug!("connection is still valid");
                         return Ok(c.clone());
                     } else {
                         None

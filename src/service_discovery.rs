@@ -1,4 +1,3 @@
-use crate::connection::Connection;
 use crate::connection_manager::{BrokerAddress, ConnectionManager};
 use crate::error::{ServiceDiscoveryError, ConnectionError};
 use crate::executor:: Executor;
