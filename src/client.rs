@@ -181,7 +181,7 @@ impl<Exe: Executor> Pulsar<Exe> {
         consumer_id: Option<u64>,
         unacked_message_redelivery_delay: Option<Duration>,
         options: ConsumerOptions,
-    ) -> Result<Consumer<T, Exe>, Error>
+    ) -> Result<Consumer<T>, Error>
     where
         T: DeserializeMessage,
         S1: Into<String>,
@@ -217,7 +217,7 @@ impl<Exe: Executor> Pulsar<Exe> {
         subscription: S2,
         sub_type: SubType,
         options: ConsumerOptions,
-    ) -> Result<Vec<Consumer<T, Exe>>, Error> {
+    ) -> Result<Vec<Consumer<T>>, Error> {
         let manager = self.manager.clone();
 
         let v = self.service_discovery
