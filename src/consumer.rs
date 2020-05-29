@@ -325,7 +325,10 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
                                 self.id,
                                 vec![message_id.id.clone()],
                                 cumulative);
-                        info!("sent ack: {:?}", res);
+                        //info!("sent ack: {:?}", res);
+                    } else {
+                      trace!("ack channel was closed");
+                      return Ok(());
                     }
                 }
             };
@@ -454,11 +457,19 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
             Some(_) => {
                 let it = BatchedMessageIterator::new(message.message_id, payload)?;
                 for (id, payload) in it {
-                    self.tx.send(Ok((id, payload))).await.unwrap();
+                    self.tx.send(Ok((id, payload))).await
+                    .map_err(|e| {
+                        error!("tx returned {:?}", e);
+                        Error::Custom("tx closed".to_string())
+                    })?;
                 }
             }
             None => {
-                self.tx.send(Ok((message.message_id, payload))).await.unwrap();
+                self.tx.send(Ok((message.message_id, payload))).await
+                    .map_err(|e| {
+                        error!("tx returned {:?}", e);
+                        Error::Custom("tx closed".to_string())
+                    })?;
             }
         }
 
@@ -492,14 +503,6 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
         self.connection.sender()
             .send_flow(self.id, self.batch_size)
             .map_err(|e| Error::Consumer(ConsumerError::Connection(e)))?;
-
-        /*let (old_messages_rx, ack_rx) = stream::Select::into_inner(self.select_rx.take().unwrap());
-        self.select_rx = Some(futures::stream::select(
-                    messages.map(SelectItem::Message),
-                    ack_rx.map(|(id, cumulative)| SelectItem::Ack(id, cumulative)),
-                    ));*/
-        /*self.select_rx.push(Box::pin(messages.map(SelectItem::Message)));
-        */
 
         self.messages_rx = Some(messages);
         //TODO this should be shared among all consumers when using the client
