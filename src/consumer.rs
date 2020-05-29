@@ -7,14 +7,13 @@ use std::pin::Pin;
 
 use chrono::{DateTime, Utc};
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
-use futures::{channel::{mpsc, oneshot}, Future, FutureExt, Stream, StreamExt};
-use futures::future::{try_join_all};
+use futures::{channel::{mpsc, oneshot}, Future, FutureExt, Stream, StreamExt, SinkExt};
+use futures::future::try_join_all;
 use futures::task::{Context, Poll};
 use rand;
 use regex::Regex;
 
 use crate::connection:: Connection;
-use crate::connection_manager::ConnectionManager;
 use crate::error::{ConnectionError, ConsumerError, Error};
 use crate::executor::{Executor, Interval};
 use crate::message::{
@@ -46,7 +45,7 @@ pub struct Consumer<T: DeserializeMessage, Exe: Executor + ?Sized> {
     sub_type: SubType,
     id: u64,
     name: Option<String>,
-    messages: Pin<Box<mpsc::UnboundedReceiver<RawMessage>>>,
+    messages: Pin<Box<mpsc::Receiver<Result<(proto::MessageIdData,Payload), Error>>>>,
     nack_handler: UnboundedSender<NackMessage>,
     batch_size: u32,
     remaining_messages: u32,
@@ -113,6 +112,22 @@ impl<T: DeserializeMessage, Exe: Executor + ?Sized> Consumer<T, Exe> {
             }
         }));
 
+        let (tx, rx) = mpsc::channel(1000);
+        let f = consumer_engine(
+            client.clone(),
+            connection.clone(),
+            topic.clone(),
+            subscription.clone(),
+            sub_type.clone(),
+            consumer_id,
+            name.clone(),
+            tx,
+            messages,
+            batch_size).map(|res| {
+            debug!("consumer engine stopped: {:?}", res);
+        });
+        Exe::spawn(Box::pin(f));
+
         Ok(Consumer {
             client,
             connection,
@@ -121,7 +136,7 @@ impl<T: DeserializeMessage, Exe: Executor + ?Sized> Consumer<T, Exe> {
             name,
             subscription,
             sub_type,
-            messages: Box::pin(messages),
+            messages: Box::pin(rx),
             nack_handler,
             batch_size,
             unacked_message_redelivery_delay,
@@ -248,19 +263,194 @@ impl<T: DeserializeMessage, Exe: Executor + ?Sized> Consumer<T, Exe> {
             _phantom: PhantomData,
         }
     }
+}
 
-    fn poll_current_message(&mut self) -> Poll<Message<T>> {
-        if let Some(mut iterator) = self.current_message.take() {
-            match iterator.next() {
-                Some((id, payload)) => {
-                    self.current_message = Some(iterator);
-                    let message = self.create_message(id, payload);
-                    Poll::Ready(message)
-                }
-                None => Poll::Pending,
+async fn consumer_engine<Exe: Executor>(
+    client: Pulsar<Exe>,
+    connection: Arc<Connection>,
+    topic: String,
+    subscription: String,
+    sub_type: SubType,
+    id: u64,
+    name: Option<String>,
+    mut tx: mpsc::Sender<Result<(proto::MessageIdData,Payload), Error>>,
+    mut messages_rx: mpsc::UnboundedReceiver<RawMessage>,
+    batch_size: u32,
+    )
+-> Result<(), Error> {
+    let mut remaining_messages = batch_size;
+    info!("starting the consumer engine for topic {}", topic);
+    loop {
+        if !connection.is_valid() {
+            if let Some(err) = connection.error() {
+                error!("Consumer: connection is not valid: {:?}", err);
+                //return Poll::Ready(Some(Err(Error::Consumer(ConsumerError::Connection(err)))));
+                //let f = self.reconnect();
+                //self.reconnecting = Some(Box::pin(f));
+                return Err(Error::Consumer(ConsumerError::Connection(err)).into());
             }
-        } else {
-            Poll::Pending
+        }
+
+        if remaining_messages < batch_size / 2 {
+            connection
+                .sender()
+                .send_flow(id, batch_size - remaining_messages)?;
+            remaining_messages = batch_size;
+        }
+
+        let message: Option<Option<(proto::CommandMessage, Payload)>> = match messages_rx.next().await {
+            None => {
+                error!("Consumer: messages::next: returning Disconnected");
+                return Err(Error::Consumer(ConsumerError::Connection(ConnectionError::Disconnected)).into());
+            },
+            Some(RawMessage { command, payload }) => {
+                Some(command
+                     .message
+                     .and_then(move |msg| payload.map(move |payload| (msg, payload))))
+            }
+        };
+
+        if message.is_some() {
+            remaining_messages -= 1;
+        }
+
+        let (message, mut payload) = match message {
+            Some(Some((message, payload))) => (message, payload),
+            Some(None) => return Err(Error::Consumer(ConsumerError::MissingPayload(format!(
+                            "Missing payload for message {:?}",
+                            message
+                            ))).into()),
+            None => unimplemented!(),
+        };
+
+        let compression = payload.metadata.compression;
+
+        let payload = match compression {
+            None | Some(0) => payload,
+            // LZ4
+            Some(1) => {
+                #[cfg(not(feature = "lz4"))]
+                {
+                    //FIXME: send an error on tx
+
+                    return Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
+                                    std::io::ErrorKind::Other,
+                                    "got a LZ4 compressed message but 'lz4' cargo feature is deactivated"))).into());
+                }
+
+                #[cfg(feature = "lz4")]
+                {
+                    use std::io::Read;
+
+                    let mut decompressed_payload = Vec::new();
+                    let mut decoder = lz4::Decoder::new(&payload.data[..]).map_err(ConsumerError::Io)?;
+                    decoder.read_to_end(&mut decompressed_payload).map_err(ConsumerError::Io)?;
+
+                    payload.data = decompressed_payload;
+                    payload
+                }
+            },
+            // zlib
+            Some(2) => {
+                #[cfg(not(feature = "flate2"))]
+                {
+                    //FIXME: send an error on tx
+
+                    return Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
+                                    std::io::ErrorKind::Other,
+                                    "got a zlib compressed message but 'flate2' cargo feature is deactivated"))).into());
+                }
+
+                #[cfg(feature = "flate2")]
+                {
+                    use std::io::Read;
+                    use flate2::read::ZlibDecoder;
+
+                    let mut d = ZlibDecoder::new(&payload.data[..]);
+                    let mut decompressed_payload = Vec::new();
+                    d.read_to_end(&mut decompressed_payload).map_err(ConsumerError::Io)?;
+
+                    payload.data = decompressed_payload;
+                    payload
+                }
+            },
+            // zstd
+            Some(3) => {
+                #[cfg(not(feature = "zstd"))]
+                {
+                    //FIXME: send an error on tx
+
+                    return Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
+                                    std::io::ErrorKind::Other,
+                                    "got a zstd compressed message but 'zstd' cargo feature is deactivated"))).into());
+                }
+
+                #[cfg(feature = "zstd")]
+                {
+                    let decompressed_payload = zstd::decode_all(&payload.data[..]).map_err(ConsumerError::Io)?;
+
+                    payload.data = decompressed_payload;
+                    payload
+                }
+            },
+            //Snappy
+            Some(4) => {
+                #[cfg(not(feature = "snap"))]
+                {
+                    //FIXME: send an error on tx
+                    return Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
+                                    std::io::ErrorKind::Other,
+                                    "got a Snappy compressed message but 'snap' cargo feature is deactivated"))).into());
+                }
+
+                #[cfg(feature = "snap")]
+                {
+                    use std::io::Read;
+
+                    let mut decompressed_payload = Vec::new();
+                    let mut decoder = snap::read::FrameDecoder::new(&payload.data[..]);
+                    decoder.read_to_end(&mut decompressed_payload).map_err(ConsumerError::Io)?;
+
+                    payload.data = decompressed_payload;
+                    payload
+                }
+            },
+            Some(i) => {
+                error!("unknown compression type: {}", i);
+                //FIXME: send an error on tx
+                continue;
+            }
+        };
+
+        match payload.metadata.num_messages_in_batch {
+            Some(_) => {
+                let it = BatchedMessageIterator::new(message.message_id, payload)?;
+                for (id, payload) in it {
+                    tx.send(Ok((id, payload))).await.unwrap();
+                }
+            }
+            None => {
+                tx.send(Ok((message.message_id, payload))).await.unwrap();
+            }
+        }
+
+    }
+}
+
+impl<T: DeserializeMessage, Exe: Executor + ?Sized> Stream for Consumer<T, Exe> {
+    type Item = Result<Message<T>, Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.messages.as_mut().poll_next(cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(None) => {
+                info!("Consumer: messages::poll_next: returning Disconnected");
+                return Poll::Ready(Some(Err(Error::Connection(ConnectionError::Disconnected))));
+            }
+            Poll::Ready(Some(Ok((id, payload )))) => {
+                Poll::Ready(Some(Ok(self.create_message(id, payload))))
+            }
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
         }
     }
 }
@@ -493,162 +683,6 @@ impl Iterator for BatchedMessageIterator {
             Some((id, payload))
         } else {
             None
-        }
-    }
-}
-
-impl<T: DeserializeMessage, Exe: Executor + ?Sized> Stream for Consumer<T, Exe> {
-    type Item = Result<Message<T>, Error>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if let Poll::Ready(message) = self.poll_current_message() {
-            return Poll::Ready(Some(Ok(message)));
-        }
-
-        if !self.connection.is_valid() {
-            if let Some(err) = self.connection.error() {
-                return Poll::Ready(Some(Err(Error::Consumer(ConsumerError::Connection(err)))));
-            }
-        }
-
-        if self.remaining_messages < self.batch_size / 2 {
-            self.connection
-                .sender()
-                .send_flow(self.id, self.batch_size - self.remaining_messages)?;
-            self.remaining_messages = self.batch_size;
-        }
-
-        let message: Option<Option<(proto::CommandMessage, Payload)>> = match self
-            .messages.as_mut()
-            .poll_next(cx) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(None) => {
-                  return Poll::Ready(Some(Err(Error::Connection(ConnectionError::Disconnected))));
-                }
-                Poll::Ready(Some(RawMessage { command, payload })) => {
-                    Some(command
-                        .message
-                        .and_then(move |msg| payload.map(move |payload| (msg, payload))))
-                }
-            };
-
-        if message.is_some() {
-            self.remaining_messages -= 1;
-        }
-
-        let (message, mut payload) = match message {
-            Some(Some((message, payload))) => (message, payload),
-            Some(None) => return Poll::Ready(Some(Err(Error::Consumer(ConsumerError::MissingPayload(format!(
-                "Missing payload for message {:?}",
-                message
-            )))))),
-            None => return Poll::Ready(None),
-        };
-
-        let compression = payload.metadata.compression;
-
-        let payload = match compression {
-          None | Some(0) => payload,
-          // LZ4
-          Some(1) => {
-              #[cfg(not(feature = "lz4"))]
-              {
-                  return Poll::Ready(Some(Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
-                                  std::io::ErrorKind::Other,
-                                  "got a LZ4 compressed message but 'lz4' cargo feature is deactivated"))))));
-              }
-
-              #[cfg(feature = "lz4")]
-              {
-                  use std::io::Read;
-
-                  let mut decompressed_payload = Vec::new();
-                  let mut decoder = lz4::Decoder::new(&payload.data[..]).map_err(ConsumerError::Io)?;
-                  decoder.read_to_end(&mut decompressed_payload).map_err(ConsumerError::Io)?;
-
-                  payload.data = decompressed_payload;
-                  payload
-              }
-          },
-          // zlib
-          Some(2) => {
-              #[cfg(not(feature = "flate2"))]
-              {
-                  return Poll::Ready(Some(Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
-                                  std::io::ErrorKind::Other,
-                                  "got a zlib compressed message but 'flate2' cargo feature is deactivated"))))));
-              }
-
-              #[cfg(feature = "flate2")]
-              {
-                  use std::io::Read;
-                  use flate2::read::ZlibDecoder;
-
-                  let mut d = ZlibDecoder::new(&payload.data[..]);
-                  let mut decompressed_payload = Vec::new();
-                  d.read_to_end(&mut decompressed_payload).map_err(ConsumerError::Io)?;
-
-                  payload.data = decompressed_payload;
-                  payload
-              }
-          },
-          // zstd
-          Some(3) => {
-              #[cfg(not(feature = "zstd"))]
-              {
-                  return Poll::Ready(Some(Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
-                                  std::io::ErrorKind::Other,
-                                  "got a zstd compressed message but 'zstd' cargo feature is deactivated"))))));
-              }
-
-              #[cfg(feature = "zstd")]
-              {
-                  let decompressed_payload = zstd::decode_all(&payload.data[..]).map_err(ConsumerError::Io)?;
-
-                  payload.data = decompressed_payload;
-                  payload
-              }
-          },
-          //Snappy
-          Some(4) => {
-              #[cfg(not(feature = "snap"))]
-              {
-                  return Poll::Ready(Some(Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
-                                  std::io::ErrorKind::Other,
-                                  "got a Snappy compressed message but 'snap' cargo feature is deactivated"))))));
-              }
-
-              #[cfg(feature = "snap")]
-              {
-                  use std::io::Read;
-
-                  let mut decompressed_payload = Vec::new();
-                  let mut decoder = snap::read::FrameDecoder::new(&payload.data[..]);
-                  decoder.read_to_end(&mut decompressed_payload).map_err(ConsumerError::Io)?;
-
-                  payload.data = decompressed_payload;
-                  payload
-              }
-          },
-          Some(i) => {
-              error!("unknown compression type: {}", i);
-              return Poll::Ready(None);
-          }
-        };
-
-        match payload.metadata.num_messages_in_batch {
-            Some(_) => {
-                self.current_message =
-                    Some(BatchedMessageIterator::new(message.message_id, payload)?);
-                if let Poll::Ready(message) = self.poll_current_message() {
-                    Poll::Ready(Some(Ok(message)))
-                } else {
-                    Poll::Pending
-                }
-            }
-            None => Poll::Ready(Some(
-                    Ok(self.create_message(message.message_id, payload)),
-                    )),
         }
     }
 }
