@@ -273,18 +273,24 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
             if !self.connection.is_valid() {
                 if let Some(err) = self.connection.error() {
                     error!("Consumer: connection is not valid: {:?}", err);
-                    //return Poll::Ready(Some(Err(Error::Consumer(ConsumerError::Connection(err)))));
-                    //let f = self.reconnect();
-                    //self.reconnecting = Some(Box::pin(f));
-                    //return Err(Error::Consumer(ConsumerError::Connection(err)).into());
                     self.reconnect().await?;
                 }
             }
 
             if self.remaining_messages < self.batch_size / 2 {
-                self.connection
+                match self.connection
                     .sender()
-                    .send_flow(self.id, self.batch_size - self.remaining_messages)?;
+                    .send_flow(self.id, self.batch_size - self.remaining_messages) {
+                        Ok(()) => {},
+                        Err(ConnectionError::Disconnected) => {
+                            self.reconnect().await?;
+                            self.connection
+                                .sender()
+                                .send_flow(self.id, self.batch_size - self.remaining_messages)?;
+                        },
+                        Err(e) => return Err(e.into()),
+
+                    }
                 self.remaining_messages = self.batch_size;
             }
 
