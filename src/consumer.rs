@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque, HashMap, HashSet};
 use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use std::pin::Pin;
 
 use chrono::{DateTime, Utc};
-use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
+use futures::channel::mpsc::{unbounded, UnboundedSender};
 use futures::{channel::{mpsc, oneshot}, Future, FutureExt, Stream, StreamExt, SinkExt};
 use futures::future::{Either, try_join_all};
 use futures::task::{Context, Poll};
@@ -15,16 +15,13 @@ use regex::Regex;
 
 use crate::connection:: Connection;
 use crate::error::{ConnectionError, ConsumerError, Error};
-use crate::executor::{Executor, Interval};
+use crate::executor::Executor;
 use crate::message::{
     parse_batched_message,
     proto::{self, command_subscribe::SubType, MessageIdData, Schema},
     BatchedMessage, Message as RawMessage, Metadata, Payload,
 };
 use crate::{DeserializeMessage, Pulsar};
-use bit_vec::BitVec;
-use nom::lib::std::cmp::Ordering;
-use nom::lib::std::collections::BinaryHeap;
 
 #[derive(Clone, Default, Debug)]
 pub struct ConsumerOptions {
@@ -80,33 +77,32 @@ impl<T: DeserializeMessage> Consumer<T> {
             .send_flow(consumer_id, batch_size)
             .map_err(|e| Error::Consumer(ConsumerError::Connection(e)))?;
 
-        //TODO this should be shared among all consumers when using the client
-        //TODO make tick_delay configurable
-        let tick_delay = Duration::from_millis(500);
-        let nack_handler = NackHandler::new::<Exe>(
-            connection.clone(),
-            unacked_message_redelivery_delay,
-            tick_delay,
-            );
-
         let (ack_tx, ack_rx) = unbounded();
         // drop_signal will be dropped when Consumer is dropped, then
         // drop_receiver will return, and we can close the consumer
         let (_drop_signal, drop_receiver) = oneshot::channel::<()>();
         let conn = connection.clone();
-        let ack_sender = nack_handler.clone();
+        //let ack_sender = nack_handler.clone();
         let name = consumer_name.clone();
         let _ = Exe::spawn(Box::pin(async move {
             let _res = drop_receiver.await;
             // if we receive a message, it indicates we want to stop this task
             if _res.is_err() {
-                ack_sender.close_channel();
                 if let Err(e) = conn.sender().close_consumer(consumer_id).await {
                   error!("could not close consumer {:?}({}): {:?}", consumer_name, consumer_id, e);
                 }
             }
         }));
 
+        if let Some(_) = unacked_message_redelivery_delay {
+            let mut redelivery_tx = ack_tx.clone();
+            let mut interval = Exe::interval(Duration::from_millis(500));
+            Exe::spawn(Box::pin(async move {
+              while let Some(_) = interval.next().await {
+                  redelivery_tx.send(AckMessage::UnackedRedelivery).await;
+              }
+            }));
+        }
         let (tx, rx) = mpsc::channel(1000);
         let mut c = ConsumerEngine::new(
             client.clone(),
@@ -122,7 +118,6 @@ impl<T: DeserializeMessage> Consumer<T> {
             batch_size,
             unacked_message_redelivery_delay.clone(),
             options.clone(),
-            nack_handler,
             _drop_signal);
         let f = async move {
             c.engine().map(|res| {
@@ -217,10 +212,10 @@ pub struct ConsumerEngine<Exe: Executor + ?Sized> {
     tx: mpsc::Sender<Result<(proto::MessageIdData,Payload), Error>>,
     messages_rx: Option<mpsc::UnboundedReceiver<RawMessage>>,
     ack_rx: Option<mpsc::UnboundedReceiver<AckMessage>>,
-    nack_handler: UnboundedSender<NackMessage>,
     batch_size: u32,
     remaining_messages: u32,
     unacked_message_redelivery_delay: Option<Duration>,
+    unacked_messages: HashMap<MessageIdData, Instant>,
     options: ConsumerOptions,
     _drop_signal: oneshot::Sender<()>,
 }
@@ -228,6 +223,7 @@ pub struct ConsumerEngine<Exe: Executor + ?Sized> {
 enum AckMessage {
     Ack(MessageData, bool),
     Nack(MessageData),
+    UnackedRedelivery,
 }
 
 impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
@@ -245,7 +241,6 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
         batch_size: u32,
         unacked_message_redelivery_delay: Option<Duration>,
         options: ConsumerOptions,
-        nack_handler: UnboundedSender<NackMessage>,
         _drop_signal: oneshot::Sender<()>,
         ) -> ConsumerEngine<Exe> {
 
@@ -263,8 +258,8 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
             batch_size,
             remaining_messages: batch_size,
             unacked_message_redelivery_delay,
+            unacked_messages: HashMap::new(),
             options,
-            nack_handler,
             _drop_signal,
         }
     }
@@ -331,6 +326,8 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
                             return Ok(());
                         },
                         Some(AckMessage::Ack(message_id, cumulative)) => {
+                            //FIXME: this does not handle cumulative acks
+                            self.unacked_messages.remove(&message_id.id);
                             let res = self
                                 .connection
                                 .sender()
@@ -348,6 +345,30 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
                                 .sender()
                                 .send_redeliver_unacknowleged_messages(self.id, vec![message_id.id.clone()]);
                             //info!("nack result for id {:?}: {:?}", message_id, send_result);
+                        },
+                        Some(AckMessage::UnackedRedelivery) => {
+                            let mut h = HashSet::new();
+                            let now = Instant::now();
+                            //info!("unacked messages length: {}", self.unacked_messages.len());
+                            for (id, t) in self.unacked_messages.iter() {
+                                //info!("comparing {:?} < {:?} for id {:?}", *t, now, id);
+                                if *t < now {
+                                    h.insert(id.clone());
+                                }
+                            }
+
+                            for i in h.iter() {
+                                self.unacked_messages.remove(&i);
+                            }
+
+                            let ids: Vec<_> = h.drain().collect();
+                            if !ids.is_empty() {
+                                //info!("will unack ids: {:?}", ids);
+                                let send_result = self
+                                    .connection
+                                    .sender()
+                                    .send_redeliver_unacknowleged_messages(self.id, ids);
+                            }
                         },
                     }
                 }
@@ -476,20 +497,29 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
         match payload.metadata.num_messages_in_batch {
             Some(_) => {
                 let it = BatchedMessageIterator::new(message.message_id, payload)?;
+                let now = Instant::now();
                 for (id, payload) in it {
-                    self.tx.send(Ok((id, payload))).await
+                    self.tx.send(Ok((id.clone(), payload))).await
                     .map_err(|e| {
                         error!("tx returned {:?}", e);
                         Error::Custom("tx closed".to_string())
                     })?;
+                    if let Some(duration) = self.unacked_message_redelivery_delay {
+                        self.unacked_messages.insert(id, now + duration);
+                    }
                 }
             }
             None => {
-                self.tx.send(Ok((message.message_id, payload))).await
+                self.tx.send(Ok((message.message_id.clone(), payload))).await
                     .map_err(|e| {
                         error!("tx returned {:?}", e);
                         Error::Custom("tx closed".to_string())
                     })?;
+                if let Some(duration) = self.unacked_message_redelivery_delay {
+                    //info!("inserting id {:?} to trigger unack at {:?}",
+                    //      message.message_id, Instant::now()+duration);
+                    self.unacked_messages.insert(message.message_id, Instant::now() + duration);
+                }
             }
         }
 
@@ -528,24 +558,17 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
         //TODO this should be shared among all consumers when using the client
         //TODO make tick_delay configurable
         let tick_delay = Duration::from_millis(500);
-        let nack_handler = NackHandler::new::<Exe>(
-            self.connection.clone(),
-            self.unacked_message_redelivery_delay,
-            tick_delay,
-            );
 
         // drop_signal will be dropped when Consumer is dropped, then
         // drop_receiver will return, and we can close the consumer
         let (_drop_signal, drop_receiver) = oneshot::channel::<()>();
         let conn = self.connection.clone();
-        let ack_sender = nack_handler.clone();
         let name = self.name.clone();
         let id = self.id;
         let _ = Exe::spawn(Box::pin(async move {
             let _res = drop_receiver.await;
             // if we receive a message, it indicates we want to stop this task
             if _res.is_err() {
-                ack_sender.close_channel();
                 if let Err(e) = conn.sender().close_consumer(id).await {
                     error!("could not close consumer {:?}({}): {:?}", name, id, e);
                 }
@@ -553,182 +576,16 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
         }));
         let old_signal = std::mem::replace(&mut self._drop_signal, _drop_signal);
         old_signal.send(());
-        self.nack_handler = nack_handler;
 
         Ok(())
     }
 
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct MessageData {
     id: proto::MessageIdData,
     batch_size: Option<i32>,
-}
-
-struct NackMessage {
-    consumer_id: u64,
-    message_ids: Vec<MessageData>,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct MessageResend {
-    when: Instant,
-    consumer_id: u64,
-    message_ids: Vec<MessageIdData>,
-}
-
-impl PartialOrd for MessageResend {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-// Ordering is defined for use in a BinaryHeap (a max heap), so ordering is reversed to cause
-// earlier `when`s to be at the front of the queue
-impl Ord for MessageResend {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.when.cmp(&other.when).reverse()
-    }
-}
-
-struct NackHandler {
-    pending_nacks: BinaryHeap<MessageResend>,
-    conn: Arc<Connection>,
-    inbound: Option<Pin<Box<UnboundedReceiver<NackMessage>>>>,
-    unack_redelivery_delay: Option<Duration>,
-    tick_timer: Pin<Box<Interval>>,
-    batch_messages: BTreeMap<MessageIdData, (bool, BitVec)>,
-}
-
-impl NackHandler {
-    /// Create and spawn a new NackHandler future, which will run until the connection fails, or all
-    /// inbound senders are dropped and any pending redelivery messages have been sent
-    pub fn new<Exe: Executor + ?Sized>(
-        conn: Arc<Connection>,
-        redelivery_delay: Option<Duration>,
-        tick_delay: Duration,
-    ) -> UnboundedSender<NackMessage> {
-        let (tx, rx) = mpsc::unbounded();
-
-        if let Err(_) = Exe::spawn(Box::pin(NackHandler {
-            pending_nacks: BinaryHeap::new(),
-            conn,
-            inbound: Some(Box::pin(rx)),
-            unack_redelivery_delay: redelivery_delay,
-            tick_timer: Box::pin(Exe::interval(tick_delay)),
-            batch_messages: BTreeMap::new(),
-        }.map(|res| trace!("AckHandler returned {:?}", res)))) {
-            error!("the executor could not spawn the AckHandler future");
-        }
-        tx
-    }
-    fn next_ready_resend(&mut self) -> Option<MessageResend> {
-        if let Some(resend) = self.pending_nacks.peek() {
-            if resend.when <= Instant::now() {
-                return self.pending_nacks.pop();
-            }
-        }
-        None
-    }
-    fn next_inbound(&mut self, cx: &mut Context<'_>) -> Option<NackMessage> {
-        if let Some(inbound) = &mut self.inbound {
-            match inbound.as_mut().poll_next(cx) {
-                Poll::Ready(Some(msg)) => Some(msg),
-                Poll::Pending => None,
-                Poll::Ready(None) => {
-                    self.inbound = None;
-                    None
-                }
-            }
-        } else {
-            None
-        }
-    }
-
-    fn should_nack(&mut self, message_data: MessageData) -> Option<proto::MessageIdData> {
-        let MessageData { mut id, batch_size } = message_data;
-        let batch_index = id.batch_index.take();
-
-        match (batch_index, batch_size) {
-            (Some(index), Some(size)) if index >= 0 && size > 1 => {
-                let (is_nacked, seen_messages) = self
-                    .batch_messages
-                    .entry(id.clone())
-                    .or_insert_with(|| (false, BitVec::from_elem(size as usize, false)));
-
-                seen_messages.set(index as usize, true);
-                let should_nack = !*is_nacked;
-                *is_nacked = true;
-                if seen_messages.all() {
-                    self.batch_messages.remove(&id);
-                }
-
-                if should_nack {
-                    Some(id)
-                } else {
-                    None
-                }
-            }
-            _ => Some(id),
-        }
-    }
-}
-
-impl Future for NackHandler {
-    type Output = Result<(), ()>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        while let Some(NackMessage { consumer_id, message_ids }) = self.next_inbound(cx) {
-            // if timeout is not set, messages will only be redelivered on reconnect,
-            // so we don't manually send redelivery request
-            let ids: Vec<proto::MessageIdData> = message_ids
-                .into_iter()
-                .filter_map(|message| self.should_nack(message))
-                .collect();
-            if let Some(nack_timeout) = self.unack_redelivery_delay {
-                if !ids.is_empty() {
-                    self.pending_nacks.push(MessageResend {
-                        consumer_id,
-                        when: Instant::now() + nack_timeout,
-                        message_ids: ids,
-                    });
-                }
-            }
-        }
-
-        loop {
-            match self.tick_timer.as_mut().poll_next(cx) {
-                Poll::Ready(Some(_)) => {
-                    let mut resends: BTreeMap<u64, Vec<MessageIdData>> = BTreeMap::new();
-                    while let Some(ready) = self.next_ready_resend() {
-                        resends
-                            .entry(ready.consumer_id)
-                            .or_insert_with(Vec::new)
-                            .extend(ready.message_ids);
-                    }
-                    for (consumer_id, message_ids) in resends {
-                        //TODO this should be resilient to reconnects
-                        let send_result = self
-                            .conn
-                            .sender()
-                            .send_redeliver_unacknowleged_messages(consumer_id, message_ids);
-                        if send_result.is_err() {
-                            return Poll::Ready(Err(()));
-                        }
-                    }
-                }
-                Poll::Pending => {
-                    if self.inbound.is_none() && self.pending_nacks.is_empty() {
-                        return Poll::Ready(Ok(()));
-                    } else {
-                        return Poll::Pending;
-                    }
-                }
-                Poll::Ready(None) => return Poll::Ready(Err(())),
-            }
-        }
-    }
 }
 
 struct BatchedMessageIterator {
