@@ -7,7 +7,7 @@ use std::pin::Pin;
 
 use chrono::{DateTime, Utc};
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
-use futures::{channel::{mpsc, oneshot}, stream, Future, FutureExt, Stream, StreamExt, SinkExt};
+use futures::{channel::{mpsc, oneshot}, Future, FutureExt, Stream, StreamExt, SinkExt};
 use futures::future::{Either, try_join_all};
 use futures::task::{Context, Poll};
 use rand;
@@ -42,7 +42,7 @@ pub struct Consumer<T: DeserializeMessage> {
     topic: String,
     id: u64,
     messages: Pin<Box<mpsc::Receiver<Result<(proto::MessageIdData,Payload), Error>>>>,
-    ack_tx: mpsc::UnboundedSender<(MessageData, bool)>,
+    ack_tx: mpsc::UnboundedSender<AckMessage>,
     #[allow(unused)]
     data_type: PhantomData<fn(Payload) -> T::Output>,
     options: ConsumerOptions,
@@ -158,21 +158,18 @@ impl<T: DeserializeMessage> Consumer<T> {
     }
 
     pub async fn ack(&mut self, msg: &Message<T>) -> Result<(), ConnectionError> {
-        self.ack_tx.send((msg.message_id.clone(), false)).await;
+        self.ack_tx.send(AckMessage::Ack(msg.message_id.clone(), false)).await;
         Ok(())
     }
 
     pub async fn cumulative_ack(&mut self, msg: &Message<T>) -> Result<(), ConnectionError> {
-        self.ack_tx.send((msg.message_id.clone(), true)).await;
+        self.ack_tx.send(AckMessage::Ack(msg.message_id.clone(), true)).await;
         Ok(())
     }
 
-    pub fn nack(&self, msg: &Message<T>) {
-        /*let _ = self.nack_handler.unbounded_send(NackMessage {
-            consumer_id: self.id,
-            message_ids: vec![msg.message_id.clone()],
-        });
-        */
+    pub async fn nack(&mut self, msg: &Message<T>) {
+        self.ack_tx.send(AckMessage::Nack(msg.message_id.clone())).await;
+        //Ok(())
     }
 
     fn create_message(
@@ -219,13 +216,18 @@ pub struct ConsumerEngine<Exe: Executor + ?Sized> {
     name: Option<String>,
     tx: mpsc::Sender<Result<(proto::MessageIdData,Payload), Error>>,
     messages_rx: Option<mpsc::UnboundedReceiver<RawMessage>>,
-    ack_rx: Option<mpsc::UnboundedReceiver<(MessageData, bool)>>,
+    ack_rx: Option<mpsc::UnboundedReceiver<AckMessage>>,
     nack_handler: UnboundedSender<NackMessage>,
     batch_size: u32,
     remaining_messages: u32,
     unacked_message_redelivery_delay: Option<Duration>,
     options: ConsumerOptions,
     _drop_signal: oneshot::Sender<()>,
+}
+
+enum AckMessage {
+    Ack(MessageData, bool),
+    Nack(MessageData),
 }
 
 impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
@@ -239,7 +241,7 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
         name: Option<String>,
         tx: mpsc::Sender<Result<(proto::MessageIdData,Payload), Error>>,
         messages_rx: mpsc::UnboundedReceiver<RawMessage>,
-        ack_rx: mpsc::UnboundedReceiver<(MessageData, bool)>,
+        ack_rx: mpsc::UnboundedReceiver<AckMessage>,
         batch_size: u32,
         unacked_message_redelivery_delay: Option<Duration>,
         options: ConsumerOptions,
@@ -323,18 +325,30 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
                     self.ack_rx = Some(ack_rx);
                     //info!("got ack: {:?}", ack_opt);
 
-                    if let Some((message_id, cumulative)) = ack_opt {
-                        let res = self
-                            .connection
-                            .sender()
-                            .send_ack(
-                                self.id,
-                                vec![message_id.id.clone()],
-                                cumulative);
-                        //info!("sent ack: {:?}", res);
-                    } else {
-                      trace!("ack channel was closed");
-                      return Ok(());
+                    match ack_opt {
+                        None => {
+                            trace!("ack channel was closed");
+                            return Ok(());
+                        },
+                        Some(AckMessage::Ack(message_id, cumulative)) => {
+                            let res = self
+                                .connection
+                                .sender()
+                                .send_ack(
+                                    self.id,
+                                    vec![message_id.id.clone()],
+                                    cumulative);
+                            if res.is_err() {
+                                error!("ack error: {:?}", res);
+                            }
+                        },
+                        Some(AckMessage::Nack(message_id)) => {
+                            let send_result = self
+                                .connection
+                                .sender()
+                                .send_redeliver_unacknowleged_messages(self.id, vec![message_id.id.clone()]);
+                            //info!("nack result for id {:?}: {:?}", message_id, send_result);
+                        },
                     }
                 }
             };
