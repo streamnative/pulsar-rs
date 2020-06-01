@@ -310,7 +310,10 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
                             //return Err(Error::Consumer(ConsumerError::Connection(ConnectionError::Disconnected)).into());
                         },
                         Some(message) => {
-                            self.process_message(message).await?;
+                            self.remaining_messages -= 1;
+                            if let Err(e) = self.process_message(message).await {
+                                self.tx.send(Err(e)).await;
+                            }
                         }
 
                     }
@@ -375,20 +378,21 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
 
     async fn process_message(&mut self, message: RawMessage) -> Result<(), Error> {
         let RawMessage { command, payload } = message;
-        let message = Some(command
-                           .message
-                           .and_then(move |msg| payload.map(move |payload| (msg, payload))));
-        if message.is_some() {
-            self.remaining_messages -= 1;
-        }
+        let (message, mut payload) = match (command.message.clone(), payload) {
+            (Some(message), Some(payload)) => (message, payload),
+            (Some(message), None) => {
+                return Err(Error::Consumer(ConsumerError::MissingPayload(
+                                format!("expecting payload with {:?}", message))).into());
+            }
+            (None, Some(_)) => {
+                return Err(Error::Consumer(ConsumerError::MissingPayload(
+                                format!("expecting 'message' command in {:?}", command))).into());
 
-        let (message, mut payload) = match message {
-            Some(Some((message, payload))) => (message, payload),
-            Some(None) => return Err(Error::Consumer(ConsumerError::MissingPayload(format!(
-                            "Missing payload for message {:?}",
-                            message
-                            ))).into()),
-            None => unimplemented!(),
+            }
+            (None, None) => {
+                return Err(Error::Consumer(ConsumerError::MissingPayload(
+                                format!("expecting 'message' command and payload in {:?}", command))).into());
+            }
         };
 
         let compression = payload.metadata.compression;
@@ -399,8 +403,6 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
             Some(1) => {
                 #[cfg(not(feature = "lz4"))]
                 {
-                    //FIXME: send an error on tx
-
                     return Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
                                     std::io::ErrorKind::Other,
                                     "got a LZ4 compressed message but 'lz4' cargo feature is deactivated"))).into());
@@ -422,8 +424,6 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
             Some(2) => {
                 #[cfg(not(feature = "flate2"))]
                 {
-                    //FIXME: send an error on tx
-
                     return Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
                                     std::io::ErrorKind::Other,
                                     "got a zlib compressed message but 'flate2' cargo feature is deactivated"))).into());
@@ -446,8 +446,6 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
             Some(3) => {
                 #[cfg(not(feature = "zstd"))]
                 {
-                    //FIXME: send an error on tx
-
                     return Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
                                     std::io::ErrorKind::Other,
                                     "got a zstd compressed message but 'zstd' cargo feature is deactivated"))).into());
@@ -465,7 +463,6 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
             Some(4) => {
                 #[cfg(not(feature = "snap"))]
                 {
-                    //FIXME: send an error on tx
                     return Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
                                     std::io::ErrorKind::Other,
                                     "got a Snappy compressed message but 'snap' cargo feature is deactivated"))).into());
@@ -485,9 +482,9 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
             },
             Some(i) => {
                 error!("unknown compression type: {}", i);
-                //FIXME: send an error on tx
-                //continue;
-                panic!();
+                return Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
+                                std::io::ErrorKind::Other,
+                                format!("unknown compression type: {}", i)))).into());
             }
         };
 
