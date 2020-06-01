@@ -96,9 +96,18 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
         &self,
         topic: S,
     ) -> Result<u32, ServiceDiscoveryError> {
-        let connection = self.manager.get_base_connection().await?;
+        let mut connection = self.manager.get_base_connection().await?;
+        let topic = topic.into();
 
-        let response = connection.sender().lookup_partitioned_topic(topic).await?;
+        let response = match connection.sender().lookup_partitioned_topic(&topic).await {
+            Ok(res) => res,
+            Err(ConnectionError::Disconnected) => {
+                error!("tried to lookup a topic but connection was closed, reconnecting...");
+                connection = self.manager.get_base_connection().await?;
+                connection.sender().lookup_partitioned_topic(&topic).await?
+            },
+            Err(e) => return Err(e.into()),
+        };
 
         match response.partitions {
             Some(partitions) => Ok(partitions),
