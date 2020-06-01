@@ -1,6 +1,7 @@
 use std::string::FromUtf8Error;
 use std::sync::Arc;
 use std::time::Duration;
+use std::marker::PhantomData;
 
 use futures::future;
 
@@ -103,6 +104,15 @@ impl<Exe: Executor> Pulsar<Exe> {
             manager,
             service_discovery,
         })
+    }
+
+    pub fn builder<S: Into<String>>(url: S) -> PulsarBuilder<Exe> {
+        PulsarBuilder {
+            url: url.into(),
+            auth: None,
+            back_off_parameters: None,
+            executor: PhantomData,
+        }
     }
 
     pub async fn lookup_topic<S: Into<String>>(
@@ -309,5 +319,37 @@ impl<Exe: Executor> Pulsar<Exe> {
 
     pub fn create_multi_topic_producer(&self, options: Option<ProducerOptions>) -> MultiTopicProducer<Exe> {
         MultiTopicProducer::new(self.clone(), options.unwrap_or_default())
+    }
+}
+
+pub struct PulsarBuilder<Exe> {
+    url: String,
+    auth: Option<Authentication>,
+    back_off_parameters: Option<BackOffParameters>,
+    executor: PhantomData<Exe>,
+}
+
+impl<Exe: Executor> PulsarBuilder<Exe> {
+    pub fn with_auth(self, auth: Authentication) -> Self {
+        PulsarBuilder {
+            url: self.url,
+            auth: Some(auth),
+            back_off_parameters: self.back_off_parameters,
+            executor: self.executor,
+        }
+    }
+
+    pub fn with_back_off_parameters(self, back_off_parameters: BackOffParameters) -> Self {
+        PulsarBuilder {
+            url: self.url,
+            auth: self.auth,
+            back_off_parameters: Some(back_off_parameters),
+            executor: self.executor,
+        }
+    }
+
+    pub async fn build(self) -> Result<Pulsar<Exe>, Error> {
+        let PulsarBuilder { url, auth, back_off_parameters, executor } = self;
+        Pulsar::new(url, auth, back_off_parameters).await
     }
 }
