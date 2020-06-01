@@ -51,15 +51,15 @@ pub struct ProducerOptions {
     pub compression: Option<proto::CompressionType>,
 }
 
-pub struct Producer<Exe: Executor + ?Sized> {
+pub struct MultiTopicProducer<Exe: Executor + ?Sized> {
     client: Pulsar<Exe>,
-    producers: BTreeMap<String, TopicProducer<Exe>>,
+    producers: BTreeMap<String, Producer<Exe>>,
     options: ProducerOptions,
 }
 
-impl<Exe: Executor + ?Sized> Producer<Exe> {
-    pub fn new(client: Pulsar<Exe>, options: ProducerOptions) -> Producer<Exe> {
-        Producer {
+impl<Exe: Executor + ?Sized> MultiTopicProducer<Exe> {
+    pub fn new(client: Pulsar<Exe>, options: ProducerOptions) -> MultiTopicProducer<Exe> {
+        MultiTopicProducer {
             client,
             producers: BTreeMap::new(),
             options,
@@ -133,7 +133,7 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
     }
 }
 
-pub struct TopicProducer<Exe: Executor + ?Sized> {
+pub struct Producer<Exe: Executor + ?Sized> {
     client: Pulsar<Exe>,
     connection: Arc<Connection>,
     id: ProducerId,
@@ -148,14 +148,14 @@ pub struct TopicProducer<Exe: Executor + ?Sized> {
     options: ProducerOptions,
 }
 
-impl<Exe: Executor + ?Sized> TopicProducer<Exe> {
+impl<Exe: Executor + ?Sized> Producer<Exe> {
     pub async fn from_connection<S: Into<String>>(
         client: Pulsar<Exe>,
         connection: Arc<Connection>,
         topic: S,
         name: Option<String>,
         options: ProducerOptions,
-    ) -> Result<TopicProducer<Exe>, Error> {
+    ) -> Result<Producer<Exe>, Error> {
         let topic = topic.into();
         let producer_id = rand::random();
         let sequence_ids = SerialId::new();
@@ -202,7 +202,7 @@ impl<Exe: Executor + ?Sized> TopicProducer<Exe> {
              let _ = conn.sender().close_producer(producer_id).await;
         }));
 
-        Ok(TopicProducer {
+        Ok(Producer {
             client,
             connection,
             id: producer_id,

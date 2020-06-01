@@ -24,7 +24,7 @@ pub use executor::TokioExecutor;
 pub use executor::AsyncStdExecutor;
 pub use message::proto;
 pub use message::proto::command_subscribe::SubType;
-pub use producer::{Producer, ProducerOptions, TopicProducer};
+pub use producer::{Producer, ProducerOptions, MultiTopicProducer};
 pub use service_discovery::ServiceDiscovery;
 
 mod client;
@@ -172,13 +172,12 @@ mod tests {
 
             info!("consumer created");
 
-            let mut producer = pulsar.producer(None);
+            let mut producer = pulsar.create_producer("test", None, ProducerOptions::default()).await.unwrap();
             info!("producer created");
 
             info!("will send message");
             for _ in 0u16..5000 {
                 producer.send(
-                    "test",
                     TestData {
                         data: "data".to_string(),
                     },
@@ -222,7 +221,7 @@ mod tests {
         let f = async {
             let addr = "pulsar://127.0.0.1:6650";
             let pulsar: Pulsar<TokioExecutor> = Pulsar::new(addr, None, None).await.unwrap();
-            let mut producer = pulsar.producer(None);
+            let mut producer = pulsar.create_multi_topic_producer(None);
 
             // test &str
             {
@@ -297,12 +296,12 @@ mod tests {
         let f = async move {
             let pulsar: Pulsar<TokioExecutor> = Pulsar::new(addr, None, None).await.unwrap();
 
-            let mut producer = pulsar.producer(None);
 
             let topic: String = std::iter::repeat(())
                 .map(|()| rand::thread_rng().sample(Alphanumeric))
                 .take(7)
                 .collect();
+            let mut producer = pulsar.create_producer(&topic, None, ProducerOptions::default()).await.unwrap();
 
             let mut consumer: Consumer<TestData> = pulsar
                 .consumer()
@@ -318,7 +317,6 @@ mod tests {
 
             for i in 0u8..message_count {
                 producer.send(
-                    topic.clone(),
                     TestData {
                         data: i.to_string(),
                     },

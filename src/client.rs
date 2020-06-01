@@ -11,7 +11,7 @@ use crate::error::Error;
 use crate::executor::Executor;
 use crate::message::proto::{self, command_subscribe::SubType, CommandSendReceipt};
 use crate::message::Payload;
-use crate::producer::{self, Producer, ProducerOptions, TopicProducer};
+use crate::producer::{self, Producer, ProducerOptions, MultiTopicProducer};
 use crate::service_discovery::ServiceDiscovery;
 
 /// Helper trait for consumer deserialization
@@ -252,21 +252,21 @@ impl<Exe: Executor> Pulsar<Exe> {
         topic: S,
         name: Option<String>,
         options: ProducerOptions,
-    ) -> Result<TopicProducer<Exe>, Error> {
+    ) -> Result<Producer<Exe>, Error> {
         let manager = self.manager.clone();
         let topic = topic.into();
         let broker_address = self.service_discovery
             .lookup_topic(topic.clone()).await?;
         let conn = manager.get_connection(&broker_address).await?;
 
-        TopicProducer::from_connection::<_>(self.clone(), conn, topic, name, options).await
+        Producer::from_connection::<_>(self.clone(), conn, topic, name, options).await
     }
 
     pub async fn create_partitioned_producers<S: Into<String>>(
         &self,
         topic: S,
         options: ProducerOptions,
-    ) -> Result<Vec<TopicProducer<Exe>>, Error> {
+    ) -> Result<Vec<Producer<Exe>>, Error> {
         let manager = self.manager.clone();
 
         let v = self.service_discovery
@@ -275,7 +275,7 @@ impl<Exe: Executor> Pulsar<Exe> {
         let mut res = Vec::new();
         for (topic, broker_address) in v.iter() {
             let conn = manager.get_connection(&broker_address).await?;
-            res.push(TopicProducer::from_connection::<_>(self.clone(), conn, topic, None, options.clone()));
+            res.push(Producer::from_connection::<_>(self.clone(), conn, topic, None, options.clone()));
         }
 
         future::try_join_all(res).await
@@ -303,7 +303,7 @@ impl<Exe: Executor> Pulsar<Exe> {
         producer.send_raw(message).await
     }
 
-    pub fn producer(&self, options: Option<ProducerOptions>) -> Producer<Exe> {
-        Producer::new(self.clone(), options.unwrap_or_default())
+    pub fn create_multi_topic_producer(&self, options: Option<ProducerOptions>) -> MultiTopicProducer<Exe> {
+        MultiTopicProducer::new(self.clone(), options.unwrap_or_default())
     }
 }
