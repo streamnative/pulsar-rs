@@ -6,7 +6,7 @@ use std::marker::PhantomData;
 use futures::future;
 
 use crate::connection::Authentication;
-use crate::connection_manager::{BrokerAddress, ConnectionManager, BackOffParameters};
+use crate::connection_manager::{BrokerAddress, ConnectionManager, BackOffOptions};
 use crate::consumer::{Consumer, ConsumerBuilder, ConsumerOptions, MultiTopicConsumer, Unset};
 use crate::error::Error;
 use crate::executor::Executor;
@@ -92,7 +92,7 @@ impl<Exe: Executor> Pulsar<Exe> {
     pub async fn new<S: Into<String>>(
         url: S,
         auth: Option<Authentication>,
-        backoff_parameters: Option<BackOffParameters>,
+        backoff_parameters: Option<BackOffOptions>,
     ) -> Result<Self, Error> {
         let url: String = url.into();
         let manager = ConnectionManager::new(url, auth, backoff_parameters).await?;
@@ -110,7 +110,7 @@ impl<Exe: Executor> Pulsar<Exe> {
         PulsarBuilder {
             url: url.into(),
             auth: None,
-            back_off_parameters: None,
+            back_off_options: None,
             executor: PhantomData,
         }
     }
@@ -325,7 +325,7 @@ impl<Exe: Executor> Pulsar<Exe> {
 pub struct PulsarBuilder<Exe> {
     url: String,
     auth: Option<Authentication>,
-    back_off_parameters: Option<BackOffParameters>,
+    back_off_options: Option<BackOffOptions>,
     executor: PhantomData<Exe>,
 }
 
@@ -334,22 +334,22 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
         PulsarBuilder {
             url: self.url,
             auth: Some(auth),
-            back_off_parameters: self.back_off_parameters,
+            back_off_options: self.back_off_options,
             executor: self.executor,
         }
     }
 
-    pub fn with_back_off_parameters(self, back_off_parameters: BackOffParameters) -> Self {
+    pub fn with_back_off_options(self, back_off_options: BackOffOptions) -> Self {
         PulsarBuilder {
             url: self.url,
             auth: self.auth,
-            back_off_parameters: Some(back_off_parameters),
+            back_off_options: Some(back_off_options),
             executor: self.executor,
         }
     }
 
     pub async fn build(self) -> Result<Pulsar<Exe>, Error> {
-        let PulsarBuilder { url, auth, back_off_parameters, executor } = self;
-        Pulsar::new(url, auth, back_off_parameters).await
+        let PulsarBuilder { url, auth, back_off_options, executor } = self;
+        Pulsar::new(url, auth, back_off_options).await
     }
 }
