@@ -11,7 +11,7 @@ use crate::error::Error;
 use crate::executor::Executor;
 use crate::message::proto::{self, command_subscribe::SubType, CommandSendReceipt};
 use crate::message::Payload;
-use crate::producer::{self, Producer, ProducerOptions, MultiTopicProducer};
+use crate::producer::{self, Producer, ProducerOptions, MultiTopicProducer, ProducerBuilder};
 use crate::service_discovery::ServiceDiscovery;
 
 /// Helper trait for consumer deserialization
@@ -245,6 +245,10 @@ impl<Exe: Executor> Pulsar<Exe> {
         }
 
         future::try_join_all(res).await
+    }
+
+    pub fn producer(&self) -> ProducerBuilder<Unset, Exe> {
+        ProducerBuilder::new(self)
     }
 
     pub async fn create_producer<S: Into<String>>(

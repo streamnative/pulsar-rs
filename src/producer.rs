@@ -476,6 +476,81 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
     }
 }
 
+pub struct ProducerBuilder<'a, Topic, Exe: Executor + ?Sized> {
+    pulsar: &'a Pulsar<Exe>,
+    topic: Topic,
+    name: Option<String>,
+    producer_options: Option<ProducerOptions>,
+}
+
+use crate::consumer::{Set, Unset};
+impl<'a, Exe: Executor + ?Sized> ProducerBuilder<'a, Unset, Exe> {
+    pub fn new(pulsar: &'a Pulsar<Exe>) -> Self {
+        ProducerBuilder {
+            pulsar,
+            topic: Unset,
+            name: None,
+            producer_options: None,
+        }
+    }
+}
+
+impl<'a, Exe: Executor + ?Sized> ProducerBuilder<'a, Unset, Exe> {
+    pub fn with_topic<S: Into<String>>(
+        self,
+        topic: S,
+        ) -> ProducerBuilder<'a, Set<String>, Exe> {
+        ProducerBuilder {
+            pulsar: self.pulsar,
+            topic: Set(topic.into()),
+            name: self.name,
+            producer_options: self.producer_options,
+        }
+    }
+}
+
+impl<'a, Topic, Exe: Executor + ?Sized> ProducerBuilder<'a, Topic, Exe> {
+    pub fn with_name<S: Into<String>>(
+        self,
+        name: S,
+        ) -> ProducerBuilder<'a, Topic, Exe> {
+        ProducerBuilder {
+            pulsar: self.pulsar,
+            topic: self.topic,
+            name: Some(name.into()),
+            producer_options: self.producer_options,
+        }
+    }
+}
+
+impl<'a, Topic, Exe: Executor + ?Sized> ProducerBuilder<'a, Topic, Exe> {
+    pub fn with_options(
+        self,
+        options: ProducerOptions,
+        ) -> ProducerBuilder<'a, Topic, Exe> {
+        ProducerBuilder {
+            pulsar: self.pulsar,
+            topic: self.topic,
+            name: self.name,
+            producer_options: Some(options),
+        }
+    }
+}
+
+impl<'a, Exe: Executor + ?Sized> ProducerBuilder<'a, Set<String>, Exe> {
+    pub async fn build(self) -> Result<Producer<Exe>, Error> {
+        let ProducerBuilder {
+            pulsar,
+            topic: Set(topic),
+            name,
+            producer_options,
+        } = self;
+
+        pulsar.create_producer(topic, name, producer_options.unwrap_or_default()).await
+
+    }
+}
+
 struct Batch {
   pub length: u32,
   // put it in a mutex because the design of Producer requires an immutable TopicProducer,

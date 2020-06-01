@@ -172,7 +172,10 @@ mod tests {
 
             info!("consumer created");
 
-            let mut producer = pulsar.create_producer("test", None, ProducerOptions::default()).await.unwrap();
+            let mut producer = pulsar.producer()
+                .with_topic("test")
+                .build()
+                .await.unwrap();
             info!("producer created");
 
             info!("will send message");

@@ -640,7 +640,7 @@ impl Iterator for BatchedMessageIterator {
     }
 }
 
-pub struct Set<T>(T);
+pub struct Set<T>(pub T);
 
 pub struct Unset;
 
