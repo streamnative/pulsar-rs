@@ -6,6 +6,7 @@ use std::sync::{
     Arc,
 };
 use std::pin::Pin;
+use native_tls::Certificate;
 
 use futures::{
     self,
@@ -440,6 +441,7 @@ impl Connection {
         url: Url,
         auth_data: Option<Authentication>,
         proxy_to_broker_url: Option<Url>,
+        certificate_chain: &[Certificate],
         ) -> Result<Connection, ConnectionError> {
 
         if url.scheme() != "pulsar" && url.scheme() != "pulsar+ssl" {
@@ -481,7 +483,8 @@ impl Connection {
             hostname,
             tls,
             auth_data,
-            proxy_to_broker_url).await?;
+            proxy_to_broker_url,
+            certificate_chain).await?;
 
         Ok(Connection {
             url,
@@ -495,6 +498,7 @@ impl Connection {
         tls: bool,
         auth_data: Option<Authentication>,
         proxy_to_broker_url: Option<Url>,
+        certificate_chain: &[Certificate],
         ) -> Result<ConnectionSender, ConnectionError> {
         match Exe::kind() {
             #[cfg(feature = "tokio-runtime")]
@@ -502,7 +506,11 @@ impl Connection {
                 if tls {
                     let stream = tokio::net::TcpStream::connect(&address).await?;
 
-                    let cx = native_tls::TlsConnector::builder().build()?;
+                    let mut builder = native_tls::TlsConnector::builder();
+                    for certificate in certificate_chain {
+                        builder.add_root_certificate(certificate.clone());
+                    }
+                    let cx = builder.build()?;
                     let cx = tokio_native_tls::TlsConnector::from(cx);
                     let stream = cx.connect(&hostname, stream).await
                         .map(|stream| tokio_util::codec::Framed::new(stream, Codec))?;
@@ -523,7 +531,11 @@ impl Connection {
             ExecutorKind::AsyncStd => {
                 if tls {
                     let stream = async_std::net::TcpStream::connect(&address).await?;
-                    let stream = async_native_tls::connect(&hostname, stream).await
+                    let mut connector = async_native_tls::TlsConnector::new();
+                    for certificate in certificate_chain {
+                        connector = connector.add_root_certificate(certificate.clone());
+                    }
+                    let stream = connector.connect(&hostname, stream).await
                         .map(|stream| futures_codec::Framed::new(stream, Codec))?;
 
                     Connection::connect::<Exe, _>(stream, auth_data, proxy_to_broker_url).await

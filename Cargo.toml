@@ -34,6 +34,7 @@ regex = "1.1.7"
 bit-vec = "0.6"
 futures-io = "0.3"
 native-tls = "0.2"
+pem = "0.7"
 tokio = { version = "0.2", features = ["rt-threaded", "blocking", "full"], optional = true }
 tokio-util = { version = "0.3", features = ["codec"], optional = true }
 tokio-native-tls = { version = "0.1", optional = true }

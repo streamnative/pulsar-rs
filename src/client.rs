@@ -6,7 +6,7 @@ use std::marker::PhantomData;
 use futures::future;
 
 use crate::connection::Authentication;
-use crate::connection_manager::{BrokerAddress, ConnectionManager, BackOffOptions};
+use crate::connection_manager::{BrokerAddress, ConnectionManager, BackOffOptions, TlsOptions};
 use crate::consumer::{Consumer, ConsumerBuilder, ConsumerOptions, MultiTopicConsumer, Unset};
 use crate::error::Error;
 use crate::executor::Executor;
@@ -93,9 +93,10 @@ impl<Exe: Executor> Pulsar<Exe> {
         url: S,
         auth: Option<Authentication>,
         backoff_parameters: Option<BackOffOptions>,
+        tls_options: Option<TlsOptions>,
     ) -> Result<Self, Error> {
         let url: String = url.into();
-        let manager = ConnectionManager::new(url, auth, backoff_parameters).await?;
+        let manager = ConnectionManager::new(url, auth, backoff_parameters, tls_options).await?;
         let manager = Arc::new(manager);
         let service_discovery = Arc::new(ServiceDiscovery::with_manager(
                 manager.clone(),
@@ -111,6 +112,7 @@ impl<Exe: Executor> Pulsar<Exe> {
             url: url.into(),
             auth: None,
             back_off_options: None,
+            tls_options: None,
             executor: PhantomData,
         }
     }
@@ -326,6 +328,7 @@ pub struct PulsarBuilder<Exe> {
     url: String,
     auth: Option<Authentication>,
     back_off_options: Option<BackOffOptions>,
+    tls_options: Option<TlsOptions>,
     executor: PhantomData<Exe>,
 }
 
@@ -335,6 +338,7 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
             url: self.url,
             auth: Some(auth),
             back_off_options: self.back_off_options,
+            tls_options: self.tls_options,
             executor: self.executor,
         }
     }
@@ -344,12 +348,35 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
             url: self.url,
             auth: self.auth,
             back_off_options: Some(back_off_options),
+            tls_options: self.tls_options,
             executor: self.executor,
         }
     }
 
+    pub fn with_certificate_chain(self, certificate_chain: Vec<u8>) -> Self {
+        PulsarBuilder {
+            url: self.url,
+            auth: self.auth,
+            back_off_options: self.back_off_options,
+            tls_options: Some(TlsOptions {
+                certificate_chain: Some(certificate_chain)
+            }),
+            executor: self.executor,
+        }
+    }
+
+    pub fn with_certificate_chain_file<P: AsRef<std::path::Path>>(self, path: P) -> Result<Self, std::io::Error> {
+        use std::io::Read;
+
+        let mut file = std::fs::File::open(path)?;
+        let mut v = vec![];
+        file.read_to_end(&mut v)?;
+
+        Ok(self.with_certificate_chain(v))
+    }
+
     pub async fn build(self) -> Result<Pulsar<Exe>, Error> {
-        let PulsarBuilder { url, auth, back_off_options, executor } = self;
-        Pulsar::new(url, auth, back_off_options).await
+        let PulsarBuilder { url, auth, back_off_options, tls_options, executor } = self;
+        Pulsar::new(url, auth, back_off_options, tls_options).await
     }
 }

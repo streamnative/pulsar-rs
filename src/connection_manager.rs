@@ -1,13 +1,15 @@
 use crate::connection::{Authentication, Connection};
 use crate::error::ConnectionError;
 use crate::executor::Executor;
-use futures::channel::oneshot;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+use futures::channel::oneshot;
 use url::Url;
 use rand::Rng;
+use native_tls::Certificate;
 
 /// holds connection information for a broker
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -38,6 +40,12 @@ impl std::default::Default for BackOffOptions {
     }
 }
 
+/// configuration for TLS connections
+#[derive(Debug, Clone, Default)]
+pub struct TlsOptions {
+    pub certificate_chain: Option<Vec<u8>>,
+}
+
 enum ConnectionStatus {
     Connected(Arc<Connection>),
     Connecting(Vec<oneshot::Sender<Result<Arc<Connection>, ConnectionError>>>),
@@ -55,19 +63,36 @@ pub struct ConnectionManager<Exe: Executor + ?Sized> {
     executor: PhantomData<Exe>,
     connections: Arc<Mutex<HashMap<BrokerAddress, ConnectionStatus>>>,
     back_off_options: BackOffOptions,
-
+    tls_options: TlsOptions,
+    certificate_chain: Vec<native_tls::Certificate>,
 }
 
 impl<Exe: Executor> ConnectionManager<Exe> {
     pub async fn new(
         url: String,
         auth: Option<Authentication>,
-        backoff: Option<BackOffOptions>) -> Result<Self, ConnectionError> {
+        backoff: Option<BackOffOptions>,
+        tls: Option<TlsOptions>,
+        ) -> Result<Self, ConnectionError> {
         let back_off_options = backoff.unwrap_or_default();
+        let tls_options = tls.unwrap_or_default();
         let url = Url::parse(&url).map_err(|e| {
             error!("error parsing URL: {:?}", e);
             ConnectionError::NotFound
         })?;
+
+        let certificate_chain = match tls_options.certificate_chain.as_ref() {
+            None => vec![],
+            Some(certificate_chain) => {
+                let mut v = vec![];
+                for cert in pem::parse_many(&certificate_chain).iter().rev() {
+                    v.push(Certificate::from_der(&cert.contents[..])
+                           .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?);
+                }
+                v
+            },
+        };
+
 
         let manager = ConnectionManager {
             url: url.clone(),
@@ -75,6 +100,8 @@ impl<Exe: Executor> ConnectionManager<Exe> {
             executor: PhantomData,
             connections: Arc::new(Mutex::new(HashMap::new())),
             back_off_options,
+            tls_options,
+            certificate_chain,
         };
         let broker_address = BrokerAddress {
             url: url.clone(),
@@ -182,9 +209,13 @@ impl<Exe: Executor> ConnectionManager<Exe> {
         let mut current_retries = 0u32;
 
         let start = std::time::Instant::now();
-        //let conn = Connection::new::<Exe>(broker.url.clone(), self.auth.clone(), proxy_url).await?;
         let conn = loop {
-            match Connection::new::<Exe>(broker.url.clone(), self.auth.clone(), proxy_url.clone()).await {
+            match Connection::new::<Exe>(
+                broker.url.clone(),
+                self.auth.clone(),
+                proxy_url.clone(),
+                &self.certificate_chain,
+                ).await {
                 Ok(c) => break c,
                 Err(ConnectionError::Io(e)) => {
                     if e.kind() != std::io::ErrorKind::ConnectionRefused {

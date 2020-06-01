@@ -59,7 +59,7 @@ async fn main() -> Result<(), pulsar::Error> {
         }
     });
 
-    let pulsar2: Pulsar<TokioExecutor> = Pulsar::new(addr, None, None).await?;
+    let pulsar2: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await?;
 
     let mut consumer: Consumer<TestData> = pulsar2
         .consumer()

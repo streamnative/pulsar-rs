@@ -158,7 +158,7 @@ mod tests {
 
         let f = async {
             let addr = "pulsar://127.0.0.1:6650";
-            let pulsar: Pulsar<TokioExecutor> = Pulsar::new(addr, None, None).await.unwrap();
+            let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await.unwrap();
 
             let mut consumer: Consumer<TestData> = pulsar
                 .consumer()
@@ -223,7 +223,7 @@ mod tests {
 
         let f = async {
             let addr = "pulsar://127.0.0.1:6650";
-            let pulsar: Pulsar<TokioExecutor> = Pulsar::new(addr, None, None).await.unwrap();
+            let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await.unwrap();
             let mut producer = pulsar.create_multi_topic_producer(None);
 
             // test &str
@@ -297,8 +297,7 @@ mod tests {
 
         let message_count = 10;
         let f = async move {
-            let pulsar: Pulsar<TokioExecutor> = Pulsar::new(addr, None, None).await.unwrap();
-
+            let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await.unwrap();
 
             let topic: String = std::iter::repeat(())
                 .map(|()| rand::thread_rng().sample(Alphanumeric))
