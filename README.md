@@ -1,101 +1,146 @@
 ## Pulsar
-#### Future-based Rust bindings for [Apache Pulsar](https://pulsar.apache.org/)
+#### Future-based Rust client for [Apache Pulsar](https://pulsar.apache.org/)
 
 [Documentation](https://docs.rs/pulsar)
 
-Current status: Simple functionality, but expect API to change. Major API changes will come simultaneous with async-await stability, so look for that.
+This is a pure Rust client for Apache Pulsar that does not depend on the
+C++ Pulsar library. It provides an async/await based API, compatible with
+[Tokio](https://tokio.rs/) and [async-std](https://async.rs/).
+
+Features:
+- URL based (`pulsar://` and `pulsar+ssl://`) connections with DNS lookup
+- multi topic consumers (based on a regex)
+- TLS connection
+- configurable executor (Tokio or async-std)
+- automatic reconnection with exponential back off
+- message batching
+- compression with LZ4, zlib, zstd or Snappy (can be deactivated with Cargo features)
+
 ### Getting Started
 Cargo.toml
 ```toml
-futures = "0.1.23"
+futures = "0.3"
 pulsar = "0.3.0"
-tokio = "0.1.11"
+tokio = "0.2"
 ```
 #### Producing
 ```rust
-    use pulsar::{self, Pulsar, SerializeMessage, ProducerError, producer};
-    use tokio::prelude::*;
+#[macro_use]
+extern crate serde;
+use pulsar::{
+    message::proto, producer, Error as PulsarError, Pulsar, SerializeMessage, TokioExecutor,
+};
 
-    #[derive(Debug)]
-    pub struct SomeData {
+#[derive(Serialize, Deserialize)]
+struct TestData {
+    data: String,
+}
 
-    }
-
-    impl SerializeMessage for SomeData {
-        fn serialize_message(input: &Self) -> Result<producer::Message, pulsar::Error> {
-            unimplemented!()
-        }
-    }
-
-    fn run() {
-        let addr = "127.0.0.1:6650".parse().unwrap();
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-
-        let pulsar: Pulsar = Pulsar::new(addr, None, runtime.executor())
-            .wait().unwrap();
-
-        let producer = pulsar.producer(None);
-
-        let message = SomeData {};
-
-        runtime.executor().spawn({
-            producer.send("some_topic", &message)
-                .map(drop)
-                .map_err(|e| eprintln!("Error handling! {}", e))
-        });
-    }
-```
-#### Consuming
-```rust
-    use pulsar::{Pulsar, Consumer, SubType, DeserializeMessage, consumer, message};
-    use tokio::prelude::*;
-
-    #[derive(Debug)]
-    pub struct SomeData {
-
-    }
-
-    impl DeserializeMessage for SomeData {
-        type Output = Result<Self, ()>;
-
-        fn deserialize_message(payload: message::Payload) -> Self::Output {
-            unimplemented!()
-        }
-    }
-
-    fn run() {
-        let addr = "127.0.0.1:6650".parse().unwrap();
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-
-        let pulsar: Pulsar = Pulsar::new(addr, None, runtime.executor())
-            .wait().unwrap();
-
-        let consumer: Consumer<SomeData> = pulsar.consumer()
-            .with_topic("some_topic")
-            .with_consumer_name("some_consumer_name")
-            .with_subscription_type(SubType::Exclusive)
-            .with_subscription("some_subscription")
-            .build()
-            .wait()
-            .unwrap();
-
-        runtime.executor().spawn({
-            consumer
-                .for_each(move |consumer::Message { payload, ack, .. }| {
-                    ack.ack(); // or maybe not ack unless Ok - whatever makes sense in your use case
-                    match payload {
-                        Ok(data) => {
-                            //process data
-                        },
-                        Err(e) => {
-                            // handle error
-                        }
-                    }
-                    Ok(()) // or Err if you want the consumer to shutdown
-                })
-                .map_err(|_| { /* handle connection errors, etc */ })
+impl SerializeMessage for TestData {
+    fn serialize_message(input: &Self) -> Result<producer::Message, PulsarError> {
+        let payload = serde_json::to_vec(input).map_err(|e| PulsarError::Custom(e.to_string()))?;
+        Ok(producer::Message {
+            payload,
+            ..Default::default()
         })
     }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), pulsar::Error> {
+    env_logger::init();
+
+    let addr = "pulsar://127.0.0.1:6650";
+    let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await?;
+    let mut producer = pulsar
+        .producer()
+        .with_topic("non-persistent://public/default/test")
+        .with_name("my producer")
+        .with_options(producer::ProducerOptions {
+            schema: Some(proto::Schema {
+                type_: proto::schema::Type::String as i32,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .build()
+        .await?;
+
+    let mut counter = 0usize;
+    loop {
+        producer
+            .send(TestData {
+                data: "data".to_string(),
+            })
+            .await?;
+
+        counter += 1;
+        println!("{} messages", counter);
+        tokio::time::delay_for(std::time::Duration::from_millis(2000)).await;
+    }
+}
+```
+
+#### Consuming
+```rust
+#[macro_use]
+extern crate serde;
+use futures::TryStreamExt;
+use pulsar::{
+    message::proto::command_subscribe::SubType, message::Payload, Consumer, DeserializeMessage,
+    Pulsar, TokioExecutor,
+};
+
+#[derive(Serialize, Deserialize)]
+struct TestData {
+    data: String,
+}
+
+impl DeserializeMessage for TestData {
+    type Output = Result<TestData, serde_json::Error>;
+
+    fn deserialize_message(payload: &Payload) -> Self::Output {
+        serde_json::from_slice(&payload.data)
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), pulsar::Error> {
+    env_logger::init();
+
+    let addr = "pulsar://127.0.0.1:6650";
+    let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await?;
+
+    let mut consumer: Consumer<TestData> = pulsar
+        .consumer()
+        .with_topic("test")
+        .with_consumer_name("test_consumer")
+        .with_subscription_type(SubType::Exclusive)
+        .with_subscription("test_subscription")
+        .build()
+        .await?;
+
+    let mut counter = 0usize;
+    while let Some(msg) = consumer.try_next().await? {
+        consumer.ack(&msg).await?;
+        let data = match msg.deserialize() {
+            Ok(data) => data,
+            Err(e) => {
+                log::error!("could not deserialize message: {:?}", e);
+                break;
+            }
+        };
+
+        if data.data.as_str() != "data" {
+            log::error!("Unexpected payload: {}", &data.data);
+            break;
+        }
+        counter += 1;
+        log::info!("got {} messages", counter);
+    }
+
+    Ok(())
+}
 ```
 
 ### License
