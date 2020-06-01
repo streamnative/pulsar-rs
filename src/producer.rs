@@ -228,6 +228,10 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
         &self.options
     }
 
+    pub fn create_message(&mut self) -> MessageBuilder<Unset, Exe> {
+        MessageBuilder::new(self)
+    }
+
     pub async fn check_connection(&self) -> Result<(), Error> {
         self.connection
             .sender()
@@ -496,10 +500,7 @@ impl<'a, Exe: Executor + ?Sized> ProducerBuilder<'a, Unset, Exe> {
 }
 
 impl<'a, Exe: Executor + ?Sized> ProducerBuilder<'a, Unset, Exe> {
-    pub fn with_topic<S: Into<String>>(
-        self,
-        topic: S,
-        ) -> ProducerBuilder<'a, Set<String>, Exe> {
+    pub fn with_topic<S: Into<String>>(self, topic: S) -> ProducerBuilder<'a, Set<String>, Exe> {
         ProducerBuilder {
             pulsar: self.pulsar,
             topic: Set(topic.into()),
@@ -510,10 +511,7 @@ impl<'a, Exe: Executor + ?Sized> ProducerBuilder<'a, Unset, Exe> {
 }
 
 impl<'a, Topic, Exe: Executor + ?Sized> ProducerBuilder<'a, Topic, Exe> {
-    pub fn with_name<S: Into<String>>(
-        self,
-        name: S,
-        ) -> ProducerBuilder<'a, Topic, Exe> {
+    pub fn with_name<S: Into<String>>(self, name: S) -> ProducerBuilder<'a, Topic, Exe> {
         ProducerBuilder {
             pulsar: self.pulsar,
             topic: self.topic,
@@ -524,10 +522,7 @@ impl<'a, Topic, Exe: Executor + ?Sized> ProducerBuilder<'a, Topic, Exe> {
 }
 
 impl<'a, Topic, Exe: Executor + ?Sized> ProducerBuilder<'a, Topic, Exe> {
-    pub fn with_options(
-        self,
-        options: ProducerOptions,
-        ) -> ProducerBuilder<'a, Topic, Exe> {
+    pub fn with_options(self, options: ProducerOptions) -> ProducerBuilder<'a, Topic, Exe> {
         ProducerBuilder {
             pulsar: self.pulsar,
             topic: self.topic,
@@ -546,52 +541,125 @@ impl<'a, Exe: Executor + ?Sized> ProducerBuilder<'a, Set<String>, Exe> {
             producer_options,
         } = self;
 
-        pulsar.create_producer(topic, name, producer_options.unwrap_or_default()).await
-
+        pulsar
+            .create_producer(topic, name, producer_options.unwrap_or_default())
+            .await
     }
 }
 
 struct Batch {
-  pub length: u32,
-  // put it in a mutex because the design of Producer requires an immutable TopicProducer,
-  // so we cannot have a mutable Batch in a send_raw(&mut self, ...)
-  pub storage: Mutex<VecDeque<(oneshot::Sender<proto::CommandSendReceipt>, BatchedMessage)>>,
+    pub length: u32,
+    // put it in a mutex because the design of Producer requires an immutable TopicProducer,
+    // so we cannot have a mutable Batch in a send_raw(&mut self, ...)
+    pub storage: Mutex<VecDeque<(oneshot::Sender<proto::CommandSendReceipt>, BatchedMessage)>>,
 }
 
 impl Batch {
-  pub fn new(length: u32) -> Batch {
-    Batch {
-      length,
-      storage: Mutex::new(VecDeque::with_capacity(length as usize)),
+    pub fn new(length: u32) -> Batch {
+        Batch {
+            length,
+            storage: Mutex::new(VecDeque::with_capacity(length as usize)),
+        }
     }
-  }
 
-  pub fn is_full(&self) -> bool {
-    self.storage.lock().unwrap().len() >= self.length as usize
-  }
+    pub fn is_full(&self) -> bool {
+        self.storage.lock().unwrap().len() >= self.length as usize
+    }
 
-  pub fn push_back(&self, msg: (oneshot::Sender<proto::CommandSendReceipt>, Message)) {
-      let (tx, message) = msg;
+    pub fn push_back(&self, msg: (oneshot::Sender<proto::CommandSendReceipt>, Message)) {
+        let (tx, message) = msg;
 
-      let properties = message
-          .properties
-          .into_iter()
-          .map(|(key, value)| proto::KeyValue { key, value })
-          .collect();
+        let properties = message
+            .properties
+            .into_iter()
+            .map(|(key, value)| proto::KeyValue { key, value })
+            .collect();
 
-      let batched = BatchedMessage {
-        metadata: proto::SingleMessageMetadata {
-          properties,
-          partition_key: message.partition_key,
-          payload_size: message.payload.len() as i32,
-          ..Default::default()
-        },
-        payload: message.payload,
-      };
-      self.storage.lock().unwrap().push_back((tx, batched))
-  }
+        let batched = BatchedMessage {
+            metadata: proto::SingleMessageMetadata {
+                properties,
+                partition_key: message.partition_key,
+                payload_size: message.payload.len() as i32,
+                ..Default::default()
+            },
+            payload: message.payload,
+        };
+        self.storage.lock().unwrap().push_back((tx, batched))
+    }
 
-  pub fn get_messages(&self) -> Vec<(oneshot::Sender<proto::CommandSendReceipt>, BatchedMessage)> {
-      self.storage.lock().unwrap().drain(..).collect()
-  }
+    pub fn get_messages(
+        &self,
+    ) -> Vec<(oneshot::Sender<proto::CommandSendReceipt>, BatchedMessage)> {
+        self.storage.lock().unwrap().drain(..).collect()
+    }
+}
+
+pub struct MessageBuilder<'a, Content, Exe: Executor + ?Sized> {
+    producer: &'a mut Producer<Exe>,
+    properties: HashMap<String, String>,
+    partition_key: Option<String>,
+    content: Content,
+}
+
+impl<'a, Exe: Executor + ?Sized> MessageBuilder<'a, Unset, Exe> {
+    pub fn new(producer: &'a mut Producer<Exe>) -> Self {
+        MessageBuilder {
+            producer,
+            properties: HashMap::new(),
+            partition_key: None,
+            content: Unset,
+        }
+    }
+}
+
+impl<'a, Exe: Executor + ?Sized> MessageBuilder<'a, Unset, Exe> {
+    pub fn with_content<T>(self, content: T) -> MessageBuilder<'a, Set<T>, Exe> {
+        MessageBuilder {
+            producer: self.producer,
+            properties: self.properties,
+            partition_key: self.partition_key,
+            content: Set(content),
+        }
+    }
+}
+
+impl<'a, Content, Exe: Executor + ?Sized> MessageBuilder<'a, Content, Exe> {
+    pub fn with_partition_key<S: Into<String>>(
+        self,
+        partition_key: S,
+    ) -> MessageBuilder<'a, Content, Exe> {
+        MessageBuilder {
+            producer: self.producer,
+            properties: self.properties,
+            partition_key: Some(partition_key.into()),
+            content: self.content,
+        }
+    }
+}
+
+impl<'a, Content, Exe: Executor + ?Sized> MessageBuilder<'a, Content, Exe> {
+    pub fn with_property<S1: Into<String>, S2: Into<String>>(
+        mut self,
+        key: S1,
+        value: S2,
+    ) -> MessageBuilder<'a, Content, Exe> {
+        self.properties.insert(key.into(), value.into());
+        self
+    }
+}
+
+impl<'a, T: SerializeMessage + Sized, Exe: Executor + ?Sized> MessageBuilder<'a, Set<T>, Exe> {
+    pub async fn send(self) -> Result<proto::CommandSendReceipt, Error> {
+        let MessageBuilder {
+            producer,
+            properties,
+            partition_key,
+            content: Set(content),
+        } = self;
+
+        let mut message = T::serialize_message(&content)?;
+        message.properties = properties;
+        message.partition_key = partition_key;
+        producer.send_raw(message).await
+    }
 }
