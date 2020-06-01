@@ -406,12 +406,9 @@ impl<Exe: Executor + ?Sized> TopicProducer<Exe> {
     }
 
     async fn reconnect(&mut self) -> Result<(), Error> {
-        info!("TopicProducer::reconnect()");
-        info!("topic: {}", self.topic);
+        debug!("reconnecting producer for topic: {}", self.topic);
         let broker_address = self.client.lookup_topic(&self.topic).await?;
-        info!("broker address: {:?}, reconnecting", broker_address);
         let conn = self.client.manager.get_connection(&broker_address).await?;
-        info!("got connection");
 
         self.connection = conn;
 

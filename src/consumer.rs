@@ -318,7 +318,6 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
                 Either::Right(((ack_opt, ack_rx), messages_rx)) => {
                     self.messages_rx = messages_rx.into_inner();
                     self.ack_rx = Some(ack_rx);
-                    //info!("got ack: {:?}", ack_opt);
 
                     match ack_opt {
                         None => {
@@ -344,14 +343,12 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
                                 .connection
                                 .sender()
                                 .send_redeliver_unacknowleged_messages(self.id, vec![message_id.id.clone()]);
-                            //info!("nack result for id {:?}: {:?}", message_id, send_result);
                         },
                         Some(AckMessage::UnackedRedelivery) => {
                             let mut h = HashSet::new();
                             let now = Instant::now();
                             //info!("unacked messages length: {}", self.unacked_messages.len());
                             for (id, t) in self.unacked_messages.iter() {
-                                //info!("comparing {:?} < {:?} for id {:?}", *t, now, id);
                                 if *t < now {
                                     h.insert(id.clone());
                                 }
@@ -527,12 +524,9 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
     }
 
     async fn reconnect(&mut self) -> Result<(), Error> {
-        info!("Consumer::reconnect()");
-        info!("topic: {}", self.topic);
+        debug!("reconnecting producer for topic: {}", self.topic);
         let broker_address = self.client.lookup_topic(&self.topic).await?;
-        info!("broker address: {:?}, reconnecting", broker_address);
         let conn = self.client.manager.get_connection(&broker_address).await?;
-        info!("got connection");
 
         self.connection = conn;
 
