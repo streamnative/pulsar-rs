@@ -35,8 +35,8 @@ async fn main() -> Result<(), pulsar::Error> {
     env_logger::init();
 
     let addr = "pulsar://127.0.0.1:6650";
-    let pulsar: Pulsar<TokioExecutor> = Pulsar::new(addr, None).await?;
-    let producer = pulsar.create_producer("test", Some("my-producer".to_string()), producer::ProducerOptions {
+    let pulsar: Pulsar<TokioExecutor> = Pulsar::new(addr, None, None).await?;
+    let mut producer = pulsar.create_producer("test", Some("my-producer".to_string()), producer::ProducerOptions {
         schema: Some(proto::Schema {
             type_: proto::schema::Type::String as i32,
             ..Default::default()
@@ -59,7 +59,7 @@ async fn main() -> Result<(), pulsar::Error> {
         }
     });
 
-    let pulsar2: Pulsar<TokioExecutor> = Pulsar::new(addr, None).await?;
+    let pulsar2: Pulsar<TokioExecutor> = Pulsar::new(addr, None, None).await?;
 
     let mut consumer: Consumer<TestData> = pulsar2
         .consumer()
@@ -72,7 +72,7 @@ async fn main() -> Result<(), pulsar::Error> {
 
     let mut counter = 0usize;
     while let Some(msg) = consumer.try_next().await? {
-        consumer.ack(&msg)?;
+        consumer.ack(&msg).await?;
         let data = msg.deserialize().unwrap();
         if data.data.as_str() != "data" {
             panic!("Unexpected payload: {}", &data.data);

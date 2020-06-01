@@ -72,6 +72,7 @@ pub enum ConnectionError {
     SocketAddr(String),
     UnexpectedResponse(String),
     Tls(native_tls::Error),
+    NotFound,
     Canceled,
     Shutdown,
 }
@@ -102,6 +103,7 @@ impl fmt::Display for ConnectionError {
             ConnectionError::UnexpectedResponse(e) => {
                 write!(f, "Unexpected response from pulsar: {}", e)
             }
+            ConnectionError::NotFound => write!(f, "error looking up URL"),
             ConnectionError::Canceled => write!(f, "canceled request"),
             ConnectionError::Shutdown => write!(f, "The connection was shut down"),
         }

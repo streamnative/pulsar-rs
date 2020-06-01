@@ -50,7 +50,6 @@ mod tests {
     use message::proto::command_subscribe::SubType;
 
     use crate::client::SerializeMessage;
-    use crate::consumer::Message;
     use crate::message::Payload;
     use crate::Error as PulsarError;
     #[cfg(feature = "tokio-runtime")]
@@ -159,7 +158,7 @@ mod tests {
 
         let f = async {
             let addr = "pulsar://127.0.0.1:6650";
-            let pulsar: Pulsar<TokioExecutor> = Pulsar::new(addr, None).await.unwrap();
+            let pulsar: Pulsar<TokioExecutor> = Pulsar::new(addr, None, None).await.unwrap();
 
             let mut consumer: Consumer<TestData> = pulsar
                 .consumer()
@@ -173,7 +172,7 @@ mod tests {
 
             info!("consumer created");
 
-            let producer = pulsar.producer(None);
+            let mut producer = pulsar.producer(None);
             info!("producer created");
 
             info!("will send message");
@@ -192,7 +191,7 @@ mod tests {
             while let Ok(Some(msg)) = consumer.try_next().await {
             //let res =  consumer.next().await.unwrap();
                 //let msg = res.unwrap();
-                consumer.ack(&msg);
+                consumer.ack(&msg).await;
                 let data = msg.deserialize().unwrap();
                 if data.data.as_str() != "data" {
                     panic!("Unexpected payload: {}", &data.data);
@@ -222,8 +221,8 @@ mod tests {
 
         let f = async {
             let addr = "pulsar://127.0.0.1:6650";
-            let pulsar: Pulsar<TokioExecutor> = Pulsar::new(addr, None).await.unwrap();
-            let producer = pulsar.producer(None);
+            let pulsar: Pulsar<TokioExecutor> = Pulsar::new(addr, None, None).await.unwrap();
+            let mut producer = pulsar.producer(None);
 
             // test &str
             {
@@ -242,7 +241,7 @@ mod tests {
                 producer.send(topic, send_data.to_string()).await.unwrap();
 
                 let msg = consumer.next().await.unwrap().unwrap();
-                consumer.ack(&msg);
+                consumer.ack(&msg).await;
 
                 let data = msg.deserialize().unwrap();
                 if data.as_str() != send_data {
@@ -265,11 +264,10 @@ mod tests {
                     .await
                     .unwrap();
 
-                let message = producer::Message { payload: send_data.to_vec(), ..Default::default() };
-                producer.send_message(topic, message).await.unwrap();
+                producer.send(topic, send_data.to_vec()).await.unwrap();
 
                 let msg = consumer.next().await.unwrap().unwrap();
-                consumer.ack(&msg);
+                consumer.ack(&msg).await;
                 let data = msg.deserialize();
                 if data.as_slice() != send_data {
                     panic!("Unexpected payload in &[u8] test: {:?}", &data);
@@ -297,9 +295,9 @@ mod tests {
 
         let message_count = 10;
         let f = async move {
-            let pulsar: Pulsar<TokioExecutor> = Pulsar::new(addr, None).await.unwrap();
+            let pulsar: Pulsar<TokioExecutor> = Pulsar::new(addr, None, None).await.unwrap();
 
-            let producer = pulsar.producer(None);
+            let mut producer = pulsar.producer(None);
 
             let topic: String = std::iter::repeat(())
                 .map(|()| rand::thread_rng().sample(Alphanumeric))
@@ -337,7 +335,7 @@ mod tests {
                     seen.insert(data.data.clone());
                 } else {
                     //ack the second time around
-                    consumer.ack(&message);
+                    consumer.ack(&message).await;
                 }
 
                 count += 1;

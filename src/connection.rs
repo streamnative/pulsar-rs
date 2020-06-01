@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::net::SocketAddr;
-use std::str::FromStr;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -14,10 +13,7 @@ use futures::{
     task::{Poll, Context},
     Future, FutureExt, Sink, SinkExt, Stream, StreamExt,
 };
-#[cfg(feature = "tokio-runtime")]
-use tokio::net::TcpStream;
-#[cfg(feature = "tokio-runtime")]
-use tokio_util;
+use url::Url;
 
 use crate::consumer::ConsumerOptions;
 use crate::error::{ConnectionError, SharedError};
@@ -190,10 +186,11 @@ impl SerialId {
 }
 
 /// An owned type that can send messages like a connection
-#[derive(Clone)]
+//#[derive(Clone)]
 pub struct ConnectionSender {
     tx: mpsc::UnboundedSender<Message>,
     registrations: mpsc::UnboundedSender<Register>,
+    receiver_shutdown: Option<oneshot::Sender<()>>,
     request_id: SerialId,
     error: SharedError,
 }
@@ -202,12 +199,14 @@ impl ConnectionSender {
     pub fn new(
         tx: mpsc::UnboundedSender<Message>,
         registrations: mpsc::UnboundedSender<Register>,
+        receiver_shutdown: oneshot::Sender<()>,
         request_id: SerialId,
         error: SharedError,
     ) -> ConnectionSender {
         ConnectionSender {
             tx,
             registrations,
+            receiver_shutdown: Some(receiver_shutdown),
             request_id,
             error,
         }
@@ -409,7 +408,10 @@ impl ConnectionSender {
         let k = key.clone();
         let response = async {
             response.await
-            .map_err(|oneshot::Canceled| ConnectionError::Disconnected)
+            .map_err(|oneshot::Canceled| {
+                self.error.set(ConnectionError::Disconnected);
+                ConnectionError::Disconnected
+            })
             .map(move |message: Message| {
                 trace!("received message(key = {:?}): {:?}", k, message);
                 extract_message(message, extract)
@@ -429,22 +431,71 @@ impl ConnectionSender {
 }
 
 pub struct Connection {
-    addr: String,
+    url: Url,
     sender: ConnectionSender,
-    receiver_shutdown: Option<oneshot::Sender<()>>,
 }
 
 impl Connection {
     pub async fn new<Exe: Executor + ?Sized>(
-        addr: String,
-        host: String,
+        url: Url,
         auth_data: Option<Authentication>,
-        proxy_to_broker_url: Option<String>,
-        tls: bool,
-    ) -> Result<Connection, ConnectionError> {
-        let address = SocketAddr::from_str(&addr)
-            .map_err(|e| ConnectionError::SocketAddr(e.to_string()))?;
+        proxy_to_broker_url: Option<Url>,
+        ) -> Result<Connection, ConnectionError> {
 
+        if url.scheme() != "pulsar" && url.scheme() != "pulsar+ssl" {
+            error!("invalid scheme: {}", url.scheme());
+            return Err(ConnectionError::NotFound);
+        }
+        let hostname = url.host().map(|s| s.to_string());
+
+        let tls = match url.scheme() {
+            "pulsar" => false,
+            "pulsar+ssl" => true,
+            s => {
+                error!("invalid scheme: {}", s);
+                return Err(ConnectionError::NotFound);
+            },
+        };
+
+        let u = url.clone();
+        let address: SocketAddr = match Exe::spawn_blocking(move || {
+            u.socket_addrs(|| match u.scheme() {
+                "pulsar" => Some(6650),
+                "pulsar+ssl" => Some(6651),
+                _ => None,
+            }).map_err(|e| {
+                error!("could not look up address: {:?}", e);
+                e
+            }).ok().and_then(|v| v.get(0).map(|a| *a))
+        }).await {
+            Some(Some(address)) => address,
+            _ => //return Err(Error::Custom(format!("could not query address: {}", url))),
+            return Err(ConnectionError::NotFound),
+        };
+
+        let hostname = hostname.unwrap_or_else(|| address.ip().to_string());
+
+        debug!("Connecting to {}: {}", url, address);
+        let sender = Connection::prepare_stream::<Exe>(
+            address,
+            hostname,
+            tls,
+            auth_data,
+            proxy_to_broker_url).await?;
+
+        Ok(Connection {
+            url,
+            sender,
+        })
+    }
+
+    async fn prepare_stream<Exe: Executor + ?Sized>(
+        address: SocketAddr,
+        hostname: String,
+        tls: bool,
+        auth_data: Option<Authentication>,
+        proxy_to_broker_url: Option<Url>,
+        ) -> Result<ConnectionSender, ConnectionError> {
         match Exe::kind() {
             #[cfg(feature = "tokio-runtime")]
             ExecutorKind::Tokio => {
@@ -453,15 +504,15 @@ impl Connection {
 
                     let cx = native_tls::TlsConnector::builder().build()?;
                     let cx = tokio_native_tls::TlsConnector::from(cx);
-                    let stream = cx.connect(&host, stream).await
+                    let stream = cx.connect(&hostname, stream).await
                         .map(|stream| tokio_util::codec::Framed::new(stream, Codec))?;
 
-                    Connection::from_stream::<Exe, _>(addr, stream, auth_data, proxy_to_broker_url).await
+                    Connection::connect::<Exe, _>(stream, auth_data, proxy_to_broker_url).await
                 } else {
                     let stream = tokio::net::TcpStream::connect(&address).await
                         .map(|stream| tokio_util::codec::Framed::new(stream, Codec))?;
 
-                    Connection::from_stream::<Exe, _>(addr, stream, auth_data, proxy_to_broker_url).await
+                    Connection::connect::<Exe, _>(stream, auth_data, proxy_to_broker_url).await
                 }
             },
             #[cfg(not(feature = "tokio_runtime"))]
@@ -472,15 +523,15 @@ impl Connection {
             ExecutorKind::AsyncStd => {
                 if tls {
                     let stream = async_std::net::TcpStream::connect(&address).await?;
-                    let stream = async_native_tls::connect(&host, stream).await
+                    let stream = async_native_tls::connect(&hostname, stream).await
                         .map(|stream| futures_codec::Framed::new(stream, Codec))?;
 
-                    Connection::from_stream::<Exe, _>(addr, stream, auth_data, proxy_to_broker_url).await
+                    Connection::connect::<Exe, _>(stream, auth_data, proxy_to_broker_url).await
                 } else {
                     let stream = async_std::net::TcpStream::connect(&address).await
                         .map(|stream| futures_codec::Framed::new(stream, Codec))?;
 
-                    Connection::from_stream::<Exe, _>(addr, stream, auth_data, proxy_to_broker_url).await
+                    Connection::connect::<Exe, _>(stream, auth_data, proxy_to_broker_url).await
                 }
             }
             #[cfg(not(feature = "async-std-runtime"))]
@@ -490,97 +541,92 @@ impl Connection {
         }
     }
 
-    pub async fn from_stream<Exe: Executor+ ?Sized, S>(
-        addr: String,
+    pub async fn connect<Exe: Executor+ ?Sized, S>(
         mut stream: S,
         auth_data: Option<Authentication>,
-        proxy_to_broker_url: Option<String>,
-    ) -> Result<Connection, ConnectionError>
-    where
-      S: Stream<Item = Result<Message, ConnectionError>>,
-      S: Sink<Message, Error = ConnectionError>,
-      S: Send + std::marker::Unpin +'static {
-        let _ = stream
-            .send({
-                let msg = messages::connect(auth_data, proxy_to_broker_url);
-                trace!("connection message: {:?}", msg);
-                msg
-            }).await?;
+        proxy_to_broker_url: Option<Url>,
+        ) -> Result<ConnectionSender, ConnectionError>
+        where
+        S: Stream<Item = Result<Message, ConnectionError>>,
+        S: Sink<Message, Error = ConnectionError>,
+        S: Send + std::marker::Unpin +'static {
+            let _ = stream
+                .send({
+                    let msg = messages::connect(auth_data, proxy_to_broker_url.map(|s| s.as_str().to_string()));
+                    trace!("connection message: {:?}", msg);
+                    msg
+                }).await?;
 
-        let msg = stream.next().await;
-        match msg {
-            Some(Ok(Message {
-                command:
-                    proto::BaseCommand {
-                        error: Some(error), ..
-                    },
-                    ..
-            })) => Err(ConnectionError::PulsarError(format!("{:?}", error))),
-            Some(Ok(msg)) => {
-                let cmd = msg.command.clone();
-                trace!("received connection response: {:?}", msg);
-                msg.command
-                    .connected
-                    .ok_or_else(|| {
-                        ConnectionError::PulsarError(format!(
-                                "Unexpected message from pulsar: {:?}",
-                                cmd
-                                ))
-                    })
-            }
-            Some(Err(e)) => Err(e),
-            None => Err(ConnectionError::Disconnected),
-        }?;
-
-        let (mut sink, stream) = stream.split();
-        let (tx, mut rx) = mpsc::unbounded();
-        let (registrations_tx, registrations_rx) = mpsc::unbounded();
-        let error = SharedError::new();
-        let (receiver_shutdown_tx, receiver_shutdown_rx) = oneshot::channel();
-
-        if let Err(_) = Exe::spawn(Box::pin(Receiver::new(
-                    stream,
-                    tx.clone(),
-                    error.clone(),
-                    registrations_rx,
-                    receiver_shutdown_rx,
-                    ).map(|_| ()))) {
-            error!("the executor could not spawn the Receiver future");
-            return Err(ConnectionError::Shutdown);
-        }
-
-        let err = error.clone();
-        if let Err(_) = Exe::spawn(Box::pin(async move {
-            while let Some(msg) = rx.next().await {
-                if let Err(e) = sink.send(msg).await {
-                    err.set(e);
-                    break;
+            let msg = stream.next().await;
+            match msg {
+                Some(Ok(Message {
+                    command:
+                        proto::BaseCommand {
+                            error: Some(error), ..
+                        },
+                        ..
+                })) => Err(ConnectionError::PulsarError(format!("{:?}", error))),
+                Some(Ok(msg)) => {
+                    let cmd = msg.command.clone();
+                    trace!("received connection response: {:?}", msg);
+                    msg.command
+                        .connected
+                        .ok_or_else(|| {
+                            ConnectionError::PulsarError(format!(
+                                    "Unexpected message from pulsar: {:?}",
+                                    cmd
+                                    ))
+                        })
                 }
+                Some(Err(e)) => Err(e),
+                None => Err(ConnectionError::Disconnected),
+            }?;
+
+            let (mut sink, stream) = stream.split();
+            let (tx, mut rx) = mpsc::unbounded();
+            let (registrations_tx, registrations_rx) = mpsc::unbounded();
+            let error = SharedError::new();
+            let (receiver_shutdown_tx, receiver_shutdown_rx) = oneshot::channel();
+
+            if let Err(_) = Exe::spawn(Box::pin(Receiver::new(
+                        stream,
+                        tx.clone(),
+                        error.clone(),
+                        registrations_rx,
+                        receiver_shutdown_rx,
+                        ).map(|_| ()))) {
+                error!("the executor could not spawn the Receiver future");
+                return Err(ConnectionError::Shutdown);
             }
-        })) {
-            error!("the executor could not spawn the Receiver future");
-            return Err(ConnectionError::Shutdown);
+
+            let err = error.clone();
+            if let Err(_) = Exe::spawn(Box::pin(async move {
+                while let Some(msg) = rx.next().await {
+                    if let Err(e) = sink.send(msg).await {
+                        err.set(e);
+                        break;
+                    }
+                }
+            })) {
+                error!("the executor could not spawn the Receiver future");
+                return Err(ConnectionError::Shutdown);
+            }
+
+            let sender = ConnectionSender::new(tx, registrations_tx, receiver_shutdown_tx, SerialId::new(), error);
+
+            Ok(sender)
         }
-
-        let sender = ConnectionSender::new(tx, registrations_tx, SerialId::new(), error);
-
-        Ok(Connection {
-            addr,
-            sender,
-            receiver_shutdown: Some(receiver_shutdown_tx),
-        })
-    }
 
     pub fn error(&self) -> Option<ConnectionError> {
         self.sender.error.remove()
     }
 
     pub fn is_valid(&self) -> bool {
-        self.sender.error.is_set()
+        !self.sender.error.is_set()
     }
 
-    pub fn addr(&self) -> &str {
-        &self.addr
+    pub fn url(&self) -> &Url {
+        &self.url
     }
 
     /// Chain to send a message, e.g. conn.sender().send_ping()
@@ -591,7 +637,7 @@ impl Connection {
 
 impl Drop for Connection {
     fn drop(&mut self) {
-        if let Some(shutdown) = self.receiver_shutdown.take() {
+        if let Some(shutdown) = self.sender.receiver_shutdown.take() {
             let _ = shutdown.send(());
         }
     }

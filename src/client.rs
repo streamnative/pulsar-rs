@@ -1,15 +1,13 @@
-use std::net::{SocketAddr, ToSocketAddrs};
 use std::string::FromUtf8Error;
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future;
-use url::Url;
 
 use crate::connection::Authentication;
-use crate::connection_manager::{BrokerAddress, ConnectionManager};
+use crate::connection_manager::{BrokerAddress, ConnectionManager, BackOffParameters};
 use crate::consumer::{Consumer, ConsumerBuilder, ConsumerOptions, MultiTopicConsumer, Unset};
-use crate::error::{Error, ServiceDiscoveryError};
+use crate::error::Error;
 use crate::executor::Executor;
 use crate::message::proto::{self, command_subscribe::SubType, CommandSendReceipt};
 use crate::message::Payload;
@@ -85,52 +83,18 @@ impl SerializeMessage for str {
 
 #[derive(Clone)]
 pub struct Pulsar<E: Executor + ?Sized> {
-    manager: Arc<ConnectionManager<E>>,
+    pub(crate) manager: Arc<ConnectionManager<E>>,
     service_discovery: Arc<ServiceDiscovery<E>>,
 }
 
 impl<Exe: Executor> Pulsar<Exe> {
     pub async fn new<S: Into<String>>(
-        addr: S,
+        url: S,
         auth: Option<Authentication>,
+        backoff_parameters: Option<BackOffParameters>,
     ) -> Result<Self, Error> {
-        let addr: String = addr.into();
-        let url = Url::parse(&addr).map_err(|e| {
-            error!("error parsing URL: {:?}", e);
-            ServiceDiscoveryError::NotFound
-        })?;
-        if url.scheme() != "pulsar" && url.scheme() != "pulsar+ssl" {
-            error!("invalid scheme: {}", url.scheme());
-            return Err(Error::ServiceDiscovery(ServiceDiscoveryError::NotFound));
-        }
-        let hostname = url.host().map(|s| s.to_string());
-
-        let tls = match url.scheme() {
-            "pulsar" => false,
-            "pulsar+ssl" => true,
-            s => {
-                error!("invalid scheme: {}", s);
-                return Err(Error::ServiceDiscovery(ServiceDiscoveryError::NotFound));
-            },
-        };
-
-        let address: SocketAddr = match Exe::spawn_blocking(move || {
-            url.socket_addrs(|| match url.scheme() {
-                "pulsar" => Some(6650),
-                "pulsar+ssl" => Some(6651),
-                _ => None,
-            }).map_err(|e| {
-                error!("could not look up address: {:?}", e);
-                e
-            }).ok().and_then(|v| v.get(0).map(|a| *a))
-        }).await {
-            Some(Some(address)) => address,
-            _ => return Err(Error::Custom(format!("could not query address: {}", addr))),
-        };
-
-        let hostname = hostname.unwrap_or_else(|| address.to_string());
-
-        let manager = ConnectionManager::new(address, hostname, auth, tls).await?;
+        let url: String = url.into();
+        let manager = ConnectionManager::new(url, auth, backoff_parameters).await?;
         let manager = Arc::new(manager);
         let service_discovery = Arc::new(ServiceDiscovery::with_manager(
                 manager.clone(),
@@ -230,7 +194,8 @@ impl<Exe: Executor> Pulsar<Exe> {
         let broker_address = self.service_discovery
             .lookup_topic(topic.clone()).await?;
         let conn = manager.get_connection(&broker_address).await?;
-        Consumer::from_connection::<Exe>(
+        Consumer::from_connection(
+            self.clone(),
             conn,
             topic,
             subscription.into(),
@@ -265,7 +230,8 @@ impl<Exe: Executor> Pulsar<Exe> {
                 let options = options.clone();
 
                 let conn = manager.get_connection(&broker_address).await?;
-                res.push(Consumer::from_connection::<Exe>(
+                res.push(Consumer::from_connection(
+                    self.clone(),
                     conn,
                     topic.to_string(),
                     subscription.into(),
@@ -286,21 +252,21 @@ impl<Exe: Executor> Pulsar<Exe> {
         topic: S,
         name: Option<String>,
         options: ProducerOptions,
-    ) -> Result<TopicProducer, Error> {
+    ) -> Result<TopicProducer<Exe>, Error> {
         let manager = self.manager.clone();
         let topic = topic.into();
         let broker_address = self.service_discovery
             .lookup_topic(topic.clone()).await?;
         let conn = manager.get_connection(&broker_address).await?;
 
-        TopicProducer::from_connection::<Exe, _>(conn, topic, name, options).await
+        TopicProducer::from_connection::<_>(self.clone(), conn, topic, name, options).await
     }
 
     pub async fn create_partitioned_producers<S: Into<String>>(
         &self,
         topic: S,
         options: ProducerOptions,
-    ) -> Result<Vec<TopicProducer>, Error> {
+    ) -> Result<Vec<TopicProducer<Exe>>, Error> {
         let manager = self.manager.clone();
 
         let v = self.service_discovery
@@ -309,7 +275,7 @@ impl<Exe: Executor> Pulsar<Exe> {
         let mut res = Vec::new();
         for (topic, broker_address) in v.iter() {
             let conn = manager.get_connection(&broker_address).await?;
-            res.push(TopicProducer::from_connection::<Exe, _>(conn, topic, None, options.clone()));
+            res.push(TopicProducer::from_connection::<_>(self.clone(), conn, topic, None, options.clone()));
         }
 
         future::try_join_all(res).await
@@ -333,11 +299,11 @@ impl<Exe: Executor> Pulsar<Exe> {
         topic: S,
         options: ProducerOptions,
     ) -> Result<CommandSendReceipt, Error> {
-        let producer = self.create_producer(topic, None, options).await?;
+        let mut producer = self.create_producer(topic, None, options).await?;
         producer.send_raw(message).await
     }
 
-    pub fn producer(&self, options: Option<ProducerOptions>) -> Producer {
+    pub fn producer(&self, options: Option<ProducerOptions>) -> Producer<Exe> {
         Producer::new(self.clone(), options.unwrap_or_default())
     }
 }
