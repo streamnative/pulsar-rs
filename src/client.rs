@@ -5,7 +5,7 @@ use std::time::Duration;
 use futures::future;
 
 use crate::connection::Authentication;
-use crate::connection_manager::{BrokerAddress, ConnectionManager};
+use crate::connection_manager::{BrokerAddress, ConnectionManager, BackOffParameters};
 use crate::consumer::{Consumer, ConsumerBuilder, ConsumerOptions, MultiTopicConsumer, Unset};
 use crate::error::Error;
 use crate::executor::Executor;
@@ -91,9 +91,10 @@ impl<Exe: Executor> Pulsar<Exe> {
     pub async fn new<S: Into<String>>(
         url: S,
         auth: Option<Authentication>,
+        backoff_parameters: Option<BackOffParameters>,
     ) -> Result<Self, Error> {
         let url: String = url.into();
-        let manager = ConnectionManager::new(url, auth).await?;
+        let manager = ConnectionManager::new(url, auth, backoff_parameters).await?;
         let manager = Arc::new(manager);
         let service_discovery = Arc::new(ServiceDiscovery::with_manager(
                 manager.clone(),

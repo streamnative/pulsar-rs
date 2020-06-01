@@ -1241,7 +1241,7 @@ mod tests {
         let succ = successes.clone();
 
         let f = async move {
-            let client: Pulsar<TokioExecutor> = Pulsar::new(addr, None).await.unwrap();
+            let client: Pulsar<TokioExecutor> = Pulsar::new(addr, None, None).await.unwrap();
             let mut producer = client.producer(None);
 
             let send_start = Utc::now();
@@ -1324,7 +1324,7 @@ mod tests {
         let topic = "issue_51";
 
         let f = async move {
-            let client: Pulsar<TokioExecutor> = Pulsar::new(addr, None).await.unwrap();
+            let client: Pulsar<TokioExecutor> = Pulsar::new(addr, None, None).await.unwrap();
 
             let message = TestData {
                 topic: std::iter::repeat(()).map(|()| rand::thread_rng().sample(Alphanumeric))

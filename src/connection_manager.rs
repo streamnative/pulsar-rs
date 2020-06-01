@@ -20,6 +20,24 @@ pub struct BrokerAddress {
     pub proxy: bool,
 }
 
+/// configuration for reconnection exponential back off
+#[derive(Debug, Clone)]
+pub struct BackOffParameters {
+    pub min_backoff: Duration,
+    pub max_backoff: Duration,
+    pub max_retries: u32,
+}
+
+impl std::default::Default for BackOffParameters {
+    fn default() -> Self {
+        BackOffParameters {
+            min_backoff: Duration::from_millis(10),
+            max_backoff: Duration::from_secs(30),
+            max_retries: 12u32,
+        }
+    }
+}
+
 enum ConnectionStatus {
     Connected(Arc<Connection>),
     Connecting(Vec<oneshot::Sender<Result<Arc<Connection>, ConnectionError>>>),
@@ -36,10 +54,15 @@ pub struct ConnectionManager<Exe: Executor + ?Sized> {
     auth: Option<Authentication>,
     executor: PhantomData<Exe>,
     connections: Arc<Mutex<HashMap<BrokerAddress, ConnectionStatus>>>,
+    backoff_parameters: BackOffParameters,
 }
 
 impl<Exe: Executor> ConnectionManager<Exe> {
-    pub async fn new(url: String, auth: Option<Authentication>) -> Result<Self, ConnectionError> {
+    pub async fn new(
+        url: String,
+        auth: Option<Authentication>,
+        backoff: Option<BackOffParameters>) -> Result<Self, ConnectionError> {
+        let backoff_parameters = backoff.unwrap_or_default();
         let url = Url::parse(&url).map_err(|e| {
             error!("error parsing URL: {:?}", e);
             ConnectionError::NotFound
@@ -50,6 +73,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
             auth,
             executor: PhantomData,
             connections: Arc::new(Mutex::new(HashMap::new())),
+            backoff_parameters,
         };
         let broker_address = BrokerAddress {
             url: url.clone(),
@@ -153,10 +177,6 @@ impl<Exe: Executor> ConnectionManager<Exe> {
             None
         };
 
-        //FIXME: make them configurable
-        let min_backoff = Duration::from_millis(10);
-        let max_backoff = Duration::from_secs(30);
-        let max_retries = 12u32;
         let mut current_backoff;
         let mut current_retries = 0u32;
 
@@ -170,12 +190,15 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                         return Err(ConnectionError::Io(e).into());
                     }
 
-                    if current_retries == max_retries {
+                    if current_retries == self.backoff_parameters.max_retries {
                         return Err(ConnectionError::Io(e).into());
                     }
 
                     let jitter = rand::thread_rng().gen_range(0, 10);
-                    current_backoff = std::cmp::min(min_backoff * 2u32.pow(current_retries), max_backoff) + min_backoff * jitter;
+                    current_backoff = std::cmp::min(
+                        self.backoff_parameters.min_backoff * 2u32.pow(current_retries),
+                        self.backoff_parameters.max_backoff)
+                        + self.backoff_parameters.min_backoff * jitter;
                     current_retries += 1;
 
                     trace!("current retries: {}, current_backoff(pow = {}): {}ms",

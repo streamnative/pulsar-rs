@@ -158,7 +158,7 @@ mod tests {
 
         let f = async {
             let addr = "pulsar://127.0.0.1:6650";
-            let pulsar: Pulsar<TokioExecutor> = Pulsar::new(addr, None).await.unwrap();
+            let pulsar: Pulsar<TokioExecutor> = Pulsar::new(addr, None, None).await.unwrap();
 
             let mut consumer: Consumer<TestData> = pulsar
                 .consumer()
@@ -221,7 +221,7 @@ mod tests {
 
         let f = async {
             let addr = "pulsar://127.0.0.1:6650";
-            let pulsar: Pulsar<TokioExecutor> = Pulsar::new(addr, None).await.unwrap();
+            let pulsar: Pulsar<TokioExecutor> = Pulsar::new(addr, None, None).await.unwrap();
             let mut producer = pulsar.producer(None);
 
             // test &str
@@ -295,7 +295,7 @@ mod tests {
 
         let message_count = 10;
         let f = async move {
-            let pulsar: Pulsar<TokioExecutor> = Pulsar::new(addr, None).await.unwrap();
+            let pulsar: Pulsar<TokioExecutor> = Pulsar::new(addr, None, None).await.unwrap();
 
             let mut producer = pulsar.producer(None);
 
