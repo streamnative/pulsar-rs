@@ -88,7 +88,6 @@ mod tests {
     #[derive(Debug)]
     enum Error {
         Pulsar(PulsarError),
-        Message(String),
         Timeout(std::io::Error),
         Serde(serde_json::Error),
         Utf8(std::string::FromUtf8Error),
@@ -122,7 +121,6 @@ mod tests {
         fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
             match self {
                 Error::Pulsar(e) => write!(f, "{}", e),
-                Error::Message(e) => write!(f, "{}", e),
                 Error::Timeout(e) => write!(f, "{}", e),
                 Error::Serde(e) => write!(f, "{}", e),
                 Error::Utf8(e) => write!(f, "{}", e),
