@@ -979,6 +979,14 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
         }
     }
 
+    pub fn options(&self) -> &ConsumerOptions {
+        &self.options
+    }
+
+    pub fn topics(&self) -> Vec<String> {
+        self.topics.iter().map(|s| s.to_string()).collect()
+    }
+
     pub fn start_state_stream(&mut self) -> impl Stream<Item = ConsumerState> {
         let (tx, rx) = unbounded();
         self.state_streams.push(tx);
@@ -1024,6 +1032,23 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
     pub async fn ack(&mut self, msg: &Message<T>) -> Result<(), ConnectionError> {
         if let Some(c) = self.consumers.get_mut(&msg.topic) {
             c.ack(&msg).await
+        } else {
+            Err(ConnectionError::Unexpected(format!("no consumer for topic {}", msg.topic)))
+        }
+    }
+
+    pub async fn cumulative_ack(&mut self, msg: &Message<T>) -> Result<(), ConnectionError> {
+        if let Some(c) = self.consumers.get_mut(&msg.topic) {
+            c.cumulative_ack(&msg).await
+        } else {
+            Err(ConnectionError::Unexpected(format!("no consumer for topic {}", msg.topic)))
+        }
+    }
+
+    pub async fn nack(&mut self, msg: &Message<T>) -> Result<(), ConnectionError> {
+        if let Some(c) = self.consumers.get_mut(&msg.topic) {
+            c.nack(&msg).await;
+            Ok(())
         } else {
             Err(ConnectionError::Unexpected(format!("no consumer for topic {}", msg.topic)))
         }

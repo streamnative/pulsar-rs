@@ -66,6 +66,14 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
         }
     }
 
+    pub fn options(&self) -> &ProducerOptions {
+        &self.options
+    }
+
+    pub fn topics(&self) -> Vec<String> {
+        self.producers.keys().cloned().collect()
+    }
+
     pub async fn send<T: SerializeMessage + Sized, S: Into<String>>(
         &mut self,
         topic: S,
@@ -216,6 +224,10 @@ impl<Exe: Executor + ?Sized> TopicProducer<Exe> {
         &self.topic
     }
 
+    pub fn options(&self) -> &ProducerOptions {
+        &self.options
+    }
+
     pub async fn check_connection(&self) -> Result<(), Error> {
         self.connection
             .sender()
@@ -233,13 +245,41 @@ impl<Exe: Executor + ?Sized> TopicProducer<Exe> {
         }
     }
 
+    pub async fn send_all<'a, 'b, T, I>(
+        &mut self,
+        messages: I,
+    ) -> Result<Vec<proto::CommandSendReceipt>, Error>
+    where
+        'b: 'a,
+        T: 'b + SerializeMessage + ?Sized,
+        I: IntoIterator<Item = &'a T>,
+    {
+        // TODO determine whether to keep this approach or go with the partial send, but more mem friendly lazy approach.
+        // serialize all messages before sending to avoid a partial send
+        match messages
+            .into_iter()
+            .map(|m| T::serialize_message(m))
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(messages) => {
+                let mut v = vec![];
+                for m in messages.into_iter() {
+                    v.push(self.send_raw(m).await?);
+                }
+
+                Ok(v)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     pub fn error(&self) -> Option<Error> {
         self.connection
             .error()
             .map(|e| ProducerError::Connection(e).into())
     }
 
-    pub async fn send_raw(
+    pub(crate) async fn send_raw(
         &mut self,
         message: Message,
     ) -> Result<proto::CommandSendReceipt, Error> {

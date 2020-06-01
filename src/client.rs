@@ -293,7 +293,7 @@ impl<Exe: Executor> Pulsar<Exe> {
         }
     }
 
-    pub async fn send_raw<S: Into<String>>(
+    async fn send_raw<S: Into<String>>(
         &self,
         message: producer::Message,
         topic: S,
