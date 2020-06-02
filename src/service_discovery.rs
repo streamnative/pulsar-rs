@@ -58,13 +58,18 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
             is_authoritative = authoritative;
 
             // use the TLS connection if available
-            let broker_url = broker_url_tls.unwrap_or(broker_url);
+            let connection_url = broker_url_tls.clone().unwrap_or_else(|| broker_url.clone());
 
             // if going through a proxy, we use the base URL
             let url = if proxied_query || proxy {
                 base_url.clone()
             } else {
-                broker_url.clone()
+                connection_url.clone()
+            };
+
+            let broker_url = match broker_url_tls {
+                Some(u) => format!("{}:{}", u.host_str().unwrap(), u.port().unwrap_or(6651)),
+                None => format!("{}:{}", broker_url.host_str().unwrap(), broker_url.port().unwrap_or(6650)),
             };
 
             broker_address = BrokerAddress {

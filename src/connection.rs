@@ -440,7 +440,7 @@ impl Connection {
     pub async fn new<Exe: Executor + ?Sized>(
         url: Url,
         auth_data: Option<Authentication>,
-        proxy_to_broker_url: Option<Url>,
+        proxy_to_broker_url: Option<String>,
         certificate_chain: &[Certificate],
         ) -> Result<Connection, ConnectionError> {
 
@@ -497,7 +497,7 @@ impl Connection {
         hostname: String,
         tls: bool,
         auth_data: Option<Authentication>,
-        proxy_to_broker_url: Option<Url>,
+        proxy_to_broker_url: Option<String>,
         certificate_chain: &[Certificate],
         ) -> Result<ConnectionSender, ConnectionError> {
         match Exe::kind() {
@@ -556,7 +556,7 @@ impl Connection {
     pub async fn connect<Exe: Executor+ ?Sized, S>(
         mut stream: S,
         auth_data: Option<Authentication>,
-        proxy_to_broker_url: Option<Url>,
+        proxy_to_broker_url: Option<String>,
         ) -> Result<ConnectionSender, ConnectionError>
         where
         S: Stream<Item = Result<Message, ConnectionError>>,
@@ -564,7 +564,7 @@ impl Connection {
         S: Send + std::marker::Unpin +'static {
             let _ = stream
                 .send({
-                    let msg = messages::connect(auth_data, proxy_to_broker_url.map(|s| s.as_str().to_string()));
+                    let msg = messages::connect(auth_data, proxy_to_broker_url);
                     trace!("connection message: {:?}", msg);
                     msg
                 }).await?;

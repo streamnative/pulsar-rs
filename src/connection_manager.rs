@@ -17,7 +17,8 @@ pub struct BrokerAddress {
     /// URL we're using for connection (can be the proxy's URL)
     pub url: Url,
     /// pulsar URL for the broker we're actually contacting
-    pub broker_url: Url,
+    /// this must follow the IP:port format
+    pub broker_url: String,
     /// true if we're connecting through a proxy
     pub proxy: bool,
 }
@@ -105,7 +106,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
         };
         let broker_address = BrokerAddress {
             url: url.clone(),
-            broker_url: url,
+            broker_url: format!("{}:{}", url.host_str().unwrap(), url.port().unwrap_or(6650)),
             proxy: false,
         };
         manager.connect(broker_address).await?;
@@ -115,7 +116,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
     pub fn get_base_address(&self) -> BrokerAddress {
         BrokerAddress {
             url: self.url.clone(),
-            broker_url: self.url.clone(),
+            broker_url: format!("{}:{}", self.url.host_str().unwrap(), self.url.port().unwrap_or(6650)),
             proxy: false,
         }
     }
@@ -126,7 +127,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
     pub async fn get_base_connection(&self) -> Result<Arc<Connection>, ConnectionError> {
         let broker_address = BrokerAddress {
             url: self.url.clone(),
-            broker_url: self.url.clone(),
+            broker_url: format!("{}:{}", self.url.host_str().unwrap(), self.url.port().unwrap_or(6650)),
             proxy: false,
         };
 
