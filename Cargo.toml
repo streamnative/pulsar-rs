@@ -1,19 +1,19 @@
 [package]
 name = "pulsar"
-version = "0.3.0"
+version = "1.0.0-alpha"
 edition = "2018"
 authors = [
     "Colin Stearns <cstearns@developers.wyyerd.com>",
-    "Kevin Stenerson <kstenerson@developers.wyyerd.com>"
+    "Kevin Stenerson <kstenerson@developers.wyyerd.com>",
+    "Geoffroy Couprie <contact@geoffroycouprie.com>",
 ]
 
 license = "MIT/Apache-2.0"
 readme = "./README.md"
 repository = "https://github.com/wyyerd/pulsar-rs"
 documentation = "https://docs.rs/pulsar"
-description = "Rust API bindings for Apache Pulsar"
-keywords = ["pulsar", "api"]
-categories = ["api-bindings"]
+description = "Rust client for Apache Pulsar"
+keywords = ["pulsar", "api", "client"]
 
 [badges]
 travis-ci = {repository = "wyyerd/pulsar-rs"}
