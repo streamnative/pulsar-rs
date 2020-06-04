@@ -11,6 +11,7 @@ pub enum Error {
     Producer(ProducerError),
     ServiceDiscovery(ServiceDiscoveryError),
     Custom(String),
+    Executor,
 }
 
 impl From<ConnectionError> for Error {
@@ -45,6 +46,7 @@ impl fmt::Display for Error {
             Error::Producer(e) => write!(f, "producer error: {}", e),
             Error::ServiceDiscovery(e) => write!(f, "service discovery error: {}", e),
             Error::Custom(e) => write!(f, "error: {}", e),
+            Error::Executor => write!(f, "could not spawn task"),
         }
     }
 }
@@ -57,6 +59,7 @@ impl std::error::Error for Error {
             Error::Producer(e) => e.source(),
             Error::ServiceDiscovery(e) => e.source(),
             Error::Custom(_) => None,
+            Error::Executor => None,
         }
     }
 }
@@ -124,6 +127,8 @@ pub enum ConsumerError {
     Connection(ConnectionError),
     MissingPayload(String),
     Io(io::Error),
+    ChannelFull,
+    Closed,
 }
 
 impl From<ConnectionError> for ConsumerError {
@@ -138,12 +143,24 @@ impl From<io::Error> for ConsumerError {
     }
 }
 
+impl From<futures::channel::mpsc::SendError> for ConsumerError {
+    fn from(err: futures::channel::mpsc::SendError) -> Self {
+        if err.is_full() {
+            ConsumerError::ChannelFull
+        } else {
+            ConsumerError::Closed
+        }
+    }
+}
+
 impl fmt::Display for ConsumerError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             ConsumerError::Connection(e) => write!(f, "Connection error: {}", e),
             ConsumerError::MissingPayload(s) => write!(f, "Missing payload: {}", s),
             ConsumerError::Io(s) => write!(f, "Decompression error: {}", s),
+            ConsumerError::ChannelFull => write!(f, "cannot send message to the consumer engine: the channel is full"),
+            ConsumerError::Closed => write!(f, "cannot send message to the consumer engine: the channel is closed"),
         }
     }
 }

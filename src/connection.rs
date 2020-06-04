@@ -523,7 +523,7 @@ impl Connection {
                     Connection::connect::<Exe, _>(stream, auth_data, proxy_to_broker_url).await
                 }
             },
-            #[cfg(not(feature = "tokio_runtime"))]
+            #[cfg(not(feature = "tokio-runtime"))]
             ExecutorKind::Tokio => {
                 unimplemented!("the tokio-runtime cargo feature is not active");
             }

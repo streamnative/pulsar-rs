@@ -376,7 +376,7 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
     }
 
     pub async fn build(self) -> Result<Pulsar<Exe>, Error> {
-        let PulsarBuilder { url, auth, back_off_options, tls_options, executor } = self;
+        let PulsarBuilder { url, auth, back_off_options, tls_options, executor: _ } = self;
         Pulsar::new(url, auth, back_off_options, tls_options).await
     }
 }

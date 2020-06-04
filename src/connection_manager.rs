@@ -255,7 +255,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                     let _ = tx.send(Ok(c.clone()));
                 }
             }
-            Some(ConnectionStatus::Connected(c)) => {
+            Some(ConnectionStatus::Connected(_)) => {
                 //info!("removing old connection");
             }
             None => {

@@ -37,7 +37,6 @@ pub struct ConsumerOptions {
 pub struct Consumer<T: DeserializeMessage> {
     connection: Arc<Connection>,
     topic: String,
-    id: u64,
     messages: Pin<Box<mpsc::Receiver<Result<(proto::MessageIdData,Payload), Error>>>>,
     ack_tx: mpsc::UnboundedSender<AckMessage>,
     #[allow(unused)]
@@ -97,11 +96,15 @@ impl<T: DeserializeMessage> Consumer<T> {
         if let Some(_) = unacked_message_redelivery_delay {
             let mut redelivery_tx = ack_tx.clone();
             let mut interval = Exe::interval(Duration::from_millis(500));
-            Exe::spawn(Box::pin(async move {
+            if let Err(_) = Exe::spawn(Box::pin(async move {
               while let Some(_) = interval.next().await {
-                  redelivery_tx.send(AckMessage::UnackedRedelivery).await;
+                  if let Err(e) = redelivery_tx.send(AckMessage::UnackedRedelivery).await {
+                      error!("could not send redelivery ticker: {:?}", e);
+                  }
               }
-            }));
+            })) {
+                return Err(Error::Executor);
+            }
         }
         let (tx, rx) = mpsc::channel(1000);
         let mut c = ConsumerEngine::new(
@@ -124,12 +127,13 @@ impl<T: DeserializeMessage> Consumer<T> {
                 debug!("consumer engine stopped: {:?}", res);
             }).await;
         };
-        Exe::spawn(Box::pin(f));
+        if let Err(_) = Exe::spawn(Box::pin(f)) {
+            return Err(Error::Executor);
+        }
 
         Ok(Consumer {
             connection,
             topic,
-            id: consumer_id,
             messages: Box::pin(rx),
             ack_tx,
             data_type: PhantomData,
@@ -152,19 +156,19 @@ impl<T: DeserializeMessage> Consumer<T> {
         Ok(())
     }
 
-    pub async fn ack(&mut self, msg: &Message<T>) -> Result<(), ConnectionError> {
-        self.ack_tx.send(AckMessage::Ack(msg.message_id.clone(), false)).await;
+    pub async fn ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
+        self.ack_tx.send(AckMessage::Ack(msg.message_id.clone(), false)).await?;
         Ok(())
     }
 
-    pub async fn cumulative_ack(&mut self, msg: &Message<T>) -> Result<(), ConnectionError> {
-        self.ack_tx.send(AckMessage::Ack(msg.message_id.clone(), true)).await;
+    pub async fn cumulative_ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
+        self.ack_tx.send(AckMessage::Ack(msg.message_id.clone(), true)).await?;
         Ok(())
     }
 
-    pub async fn nack(&mut self, msg: &Message<T>) {
-        self.ack_tx.send(AckMessage::Nack(msg.message_id.clone())).await;
-        //Ok(())
+    pub async fn nack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
+        self.ack_tx.send(AckMessage::Nack(msg.message_id.clone())).await?;
+        Ok(())
     }
 
     fn create_message(
@@ -312,7 +316,10 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
                         Some(message) => {
                             self.remaining_messages -= 1;
                             if let Err(e) = self.process_message(message).await {
-                                self.tx.send(Err(e)).await;
+                                if let Err(e) = self.tx.send(Err(e)).await {
+                                    error!("cannot send a message from the consumer engine to the consumer({}), stopping the engine", self.id);
+                                    return Err(Error::Consumer(e.into()));
+                                }
                             }
                         }
 
@@ -342,10 +349,12 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
                             }
                         },
                         Some(AckMessage::Nack(message_id)) => {
-                            let send_result = self
+                            if let Err(e) = self
                                 .connection
                                 .sender()
-                                .send_redeliver_unacknowleged_messages(self.id, vec![message_id.id.clone()]);
+                                .send_redeliver_unacknowleged_messages(self.id, vec![message_id.id.clone()]) {
+                                    error!("could not ask for redelivery for message {:?}: {:?}", message_id, e);
+                                }
                         },
                         Some(AckMessage::UnackedRedelivery) => {
                             let mut h = HashSet::new();
@@ -357,17 +366,21 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
                                 }
                             }
 
-                            for i in h.iter() {
-                                self.unacked_messages.remove(&i);
-                            }
 
-                            let ids: Vec<_> = h.drain().collect();
+                            let ids: Vec<_> = h.iter().cloned().collect();
                             if !ids.is_empty() {
                                 //info!("will unack ids: {:?}", ids);
-                                let send_result = self
+                                if let Err(e) = self
                                     .connection
                                     .sender()
-                                    .send_redeliver_unacknowleged_messages(self.id, ids);
+                                    .send_redeliver_unacknowleged_messages(self.id, ids) {
+
+                                    error!("could not ask for redelivery: {:?}", e);
+                                } else {
+                                    for i in h.iter() {
+                                        self.unacked_messages.remove(&i);
+                                    }
+                                }
                             }
                         },
                     }
@@ -546,9 +559,6 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
             .map_err(|e| Error::Consumer(ConsumerError::Connection(e)))?;
 
         self.messages_rx = Some(messages);
-        //TODO this should be shared among all consumers when using the client
-        //TODO make tick_delay configurable
-        let tick_delay = Duration::from_millis(500);
 
         // drop_signal will be dropped when Consumer is dropped, then
         // drop_receiver will return, and we can close the consumer
@@ -566,7 +576,9 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
             }
         }));
         let old_signal = std::mem::replace(&mut self._drop_signal, _drop_signal);
-        old_signal.send(());
+        if let Err(e) = old_signal.send(()) {
+            error!("could not send the drop signal to the old consumer(id={}): {:?}", id, e);
+        }
 
         Ok(())
     }
@@ -1029,28 +1041,28 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
         self.send_state();
     }
 
-    pub async fn ack(&mut self, msg: &Message<T>) -> Result<(), ConnectionError> {
+    pub async fn ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         if let Some(c) = self.consumers.get_mut(&msg.topic) {
             c.ack(&msg).await
         } else {
-            Err(ConnectionError::Unexpected(format!("no consumer for topic {}", msg.topic)))
+            Err(ConnectionError::Unexpected(format!("no consumer for topic {}", msg.topic)).into())
         }
     }
 
-    pub async fn cumulative_ack(&mut self, msg: &Message<T>) -> Result<(), ConnectionError> {
+    pub async fn cumulative_ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         if let Some(c) = self.consumers.get_mut(&msg.topic) {
             c.cumulative_ack(&msg).await
         } else {
-            Err(ConnectionError::Unexpected(format!("no consumer for topic {}", msg.topic)))
+            Err(ConnectionError::Unexpected(format!("no consumer for topic {}", msg.topic)).into())
         }
     }
 
-    pub async fn nack(&mut self, msg: &Message<T>) -> Result<(), ConnectionError> {
+    pub async fn nack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         if let Some(c) = self.consumers.get_mut(&msg.topic) {
-            c.nack(&msg).await;
+            c.nack(&msg).await?;
             Ok(())
         } else {
-            Err(ConnectionError::Unexpected(format!("no consumer for topic {}", msg.topic)))
+            Err(ConnectionError::Unexpected(format!("no consumer for topic {}", msg.topic)).into())
         }
     }
 }
