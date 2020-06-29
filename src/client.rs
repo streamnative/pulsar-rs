@@ -316,7 +316,7 @@ impl<Exe: Executor> Pulsar<Exe> {
         options: ProducerOptions,
     ) -> Result<CommandSendReceipt, Error> {
         let mut producer = self.create_producer(topic, None, options).await?;
-        producer.send_raw(message).await
+        producer.send_raw(message.into()).await
     }
 
     pub fn create_multi_topic_producer(&self, options: Option<ProducerOptions>) -> MultiTopicProducer<Exe> {

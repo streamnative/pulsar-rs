@@ -213,12 +213,12 @@ impl ConnectionSender {
         }
     }
 
-    pub async fn send(
+    pub(crate) async fn send(
         &self,
         producer_id: u64,
         producer_name: String,
         sequence_id: u64,
-        message: producer::Message,
+        message: producer::ProducerMessage,
     ) -> Result<proto::CommandSendReceipt, ConnectionError> {
         let key = RequestKey::ProducerSend {
             producer_id,
@@ -782,11 +782,11 @@ pub(crate) mod messages {
         }
     }
 
-    pub fn send(
+    pub(crate) fn send(
         producer_id: u64,
         producer_name: String,
         sequence_id: u64,
-        message: producer::Message,
+        message: producer::ProducerMessage,
     ) -> Message {
         let properties = message
             .properties

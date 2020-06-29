@@ -23,15 +23,29 @@ pub struct Message {
     pub partition_key: ::std::option::Option<String>,
     /// Override namespace's replication
     pub replicate_to: ::std::vec::Vec<String>,
+    /// the timestamp that this event occurs. it is typically set by applications.
+    /// if this field is omitted, `publish_time` can be used for the purpose of `event_time`.
+    pub event_time: ::std::option::Option<u64>,
+    pub schema_version: ::std::option::Option<Vec<u8>>,
+}
+
+/// internal message type carrying options that must be defined
+/// by the producer
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ProducerMessage {
+    pub payload: Vec<u8>,
+    pub properties: HashMap<String, String>,
+    ///key to decide partition for the msg
+    pub partition_key: ::std::option::Option<String>,
+    /// Override namespace's replication
+    pub replicate_to: ::std::vec::Vec<String>,
     pub compression: ::std::option::Option<i32>,
     pub uncompressed_size: ::std::option::Option<u32>,
     /// Removed below checksum field from Metadata as
     /// it should be part of send-command which keeps checksum of header + payload
     ///optional sfixed64 checksum = 10;
-    /// differentiate single and batch message metadata
+    ///differentiate single and batch message metadata
     pub num_messages_in_batch: ::std::option::Option<i32>,
-    /// the timestamp that this event occurs. it is typically set by applications.
-    /// if this field is omitted, `publish_time` can be used for the purpose of `event_time`.
     pub event_time: ::std::option::Option<u64>,
     /// Contains encryption key name, encrypted key and metadata to describe the key
     pub encryption_keys: ::std::vec::Vec<EncryptionKeys>,
@@ -40,6 +54,21 @@ pub struct Message {
     /// Additional parameters required by encryption
     pub encryption_param: ::std::option::Option<Vec<u8>>,
     pub schema_version: ::std::option::Option<Vec<u8>>,
+}
+
+impl From<Message> for ProducerMessage {
+    fn from(m: Message) -> Self {
+        ProducerMessage {
+            payload: m.payload,
+            properties: m.properties,
+            partition_key: m.partition_key,
+            replicate_to: m.replicate_to,
+            event_time: m.event_time,
+            schema_version: m.schema_version,
+            ..Default::default()
+        }
+
+    }
 }
 
 #[derive(Clone, Default)]
@@ -81,7 +110,7 @@ impl<Exe: Executor + ?Sized> MultiTopicProducer<Exe> {
     ) -> Result<proto::CommandSendReceipt, Error> {
         let topic = topic.into();
         match T::serialize_message(&message) {
-            Ok(message) => self.send_message(topic, message).await,
+            Ok(message) => self.send_message(topic, message.into()).await,
             Err(e) => Err(e),
         }
     }
@@ -89,7 +118,7 @@ impl<Exe: Executor + ?Sized> MultiTopicProducer<Exe> {
     async fn send_message<S: Into<String>>(
         &mut self,
         topic: S,
-        message: Message,
+        message: ProducerMessage,
     ) ->  Result<proto::CommandSendReceipt, Error> {
         let topic = topic.into();
         if !self.producers.contains_key(&topic) {
@@ -123,7 +152,7 @@ impl<Exe: Executor + ?Sized> MultiTopicProducer<Exe> {
             Ok(messages) => {
                 let mut v = vec![];
                 for m in messages.into_iter() {
-                    v.push(self.send_message(topic.clone(), m).await?);
+                    v.push(self.send_message(topic.clone(), m.into()).await?);
                 }
 
                 Ok(v)
@@ -160,7 +189,6 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
         let producer_id = rand::random();
         let sequence_ids = SerialId::new();
 
-        let sender = connection.sender().clone();
         let _ = connection
             .sender()
             .lookup_topic(topic.clone(), false).await?;
@@ -190,7 +218,7 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
             //Some() => unimplemented!(),
         };
 
-        let success = sender
+        let success = connection.sender()
             .create_producer(topic.clone(), producer_id, name, options.clone()).await?;
 
         // drop_signal will be dropped when the TopicProducer is dropped, then
@@ -244,7 +272,7 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
         message: T,
     ) -> Result<proto::CommandSendReceipt, Error> {
         match T::serialize_message(&message) {
-            Ok(message) => self.send_raw(message).await,
+            Ok(message) => self.send_raw(message.into()).await,
             Err(e) => Err(e),
         }
     }
@@ -268,7 +296,7 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
             Ok(messages) => {
                 let mut v = vec![];
                 for m in messages.into_iter() {
-                    v.push(self.send_raw(m).await?);
+                    v.push(self.send_raw(m.into()).await?);
                 }
 
                 Ok(v)
@@ -285,7 +313,7 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
 
     pub(crate) async fn send_raw(
         &mut self,
-        message: Message,
+        message: ProducerMessage,
     ) -> Result<proto::CommandSendReceipt, Error> {
         match self.batch.as_ref() {
             None => {
@@ -311,7 +339,7 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
                 }
 
                 if counter > 0 {
-                    let message = Message {
+                    let message = ProducerMessage {
                       payload,
                       num_messages_in_batch: Some(counter),
                       ..Default::default()
@@ -333,7 +361,7 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
 
     async fn send_compress(
         &mut self,
-        mut message: Message,
+        mut message: ProducerMessage,
     ) -> Result<proto::CommandSendReceipt, Error> {
         let compressed_message = match self.compression {
             None | Some(CompressionType::None) => {
@@ -410,7 +438,7 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
 
     async fn send_inner(
         &mut self,
-        message: Message,
+        message: ProducerMessage,
     ) -> Result<proto::CommandSendReceipt, Error> {
         let msg = message.clone();
         match self.connection
@@ -566,7 +594,7 @@ impl Batch {
         self.storage.lock().unwrap().len() >= self.length as usize
     }
 
-    pub fn push_back(&self, msg: (oneshot::Sender<proto::CommandSendReceipt>, Message)) {
+    pub fn push_back(&self, msg: (oneshot::Sender<proto::CommandSendReceipt>, ProducerMessage)) {
         let (tx, message) = msg;
 
         let properties = message
@@ -660,6 +688,6 @@ impl<'a, T: SerializeMessage + Sized, Exe: Executor + ?Sized> MessageBuilder<'a,
         let mut message = T::serialize_message(&content)?;
         message.properties = properties;
         message.partition_key = partition_key;
-        producer.send_raw(message).await
+        producer.send_raw(message.into()).await
     }
 }
