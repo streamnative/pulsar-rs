@@ -11,12 +11,12 @@ extern crate prost_derive;
 extern crate serde;
 
 pub use client::{DeserializeMessage, Pulsar, SerializeMessage, PulsarBuilder};
-pub use connection::{Authentication, Connection, ConnectionSender};
+pub use connection::Authentication;
 pub use connection_manager::{BackOffOptions, TlsOptions, BrokerAddress};
 pub use consumer::{
-    Consumer, ConsumerBuilder, ConsumerOptions, ConsumerState, Message, MultiTopicConsumer,
+    Consumer, ConsumerBuilder, ConsumerOptions, ConsumerState, MultiTopicConsumer,
 };
-pub use error::{ConnectionError, ConsumerError, Error, ProducerError, ServiceDiscoveryError};
+pub use error::Error;
 pub use executor::Executor;
 #[cfg(feature = "tokio-runtime")]
 pub use executor::TokioExecutor;
@@ -29,7 +29,7 @@ pub use producer::{Producer, ProducerOptions, MultiTopicProducer};
 mod client;
 mod connection;
 mod connection_manager;
-mod error;
+pub mod error;
 mod executor;
 pub mod consumer;
 pub mod message;
