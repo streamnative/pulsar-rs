@@ -7,6 +7,7 @@ use std::sync::{
 };
 use std::pin::Pin;
 use native_tls::Certificate;
+use rand::{thread_rng, Rng};
 
 use futures::{
     self,
@@ -468,7 +469,11 @@ impl Connection {
             }).map_err(|e| {
                 error!("could not look up address: {:?}", e);
                 e
-            }).ok().and_then(|v| v.get(0).map(|a| *a))
+            }).ok().and_then(|v| {
+                let mut rng = thread_rng();
+                let index:usize = rng.gen_range(0, v.len());
+                v.get(index).map(|a| *a)
+            })
         }).await {
             Some(Some(address)) => address,
             _ => //return Err(Error::Custom(format!("could not query address: {}", url))),
