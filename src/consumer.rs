@@ -205,7 +205,7 @@ impl<T: DeserializeMessage> Stream for Consumer<T> {
     }
 }
 
-pub struct ConsumerEngine<Exe: Executor + ?Sized> {
+struct ConsumerEngine<Exe: Executor + ?Sized> {
     client: Pulsar<Exe>,
     connection: Arc<Connection>,
     topic: String,

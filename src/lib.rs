@@ -11,8 +11,8 @@ extern crate prost_derive;
 extern crate serde;
 
 pub use client::{DeserializeMessage, Pulsar, SerializeMessage, PulsarBuilder};
-pub use connection::{Authentication, Connection};
-pub use connection_manager::{ConnectionManager, BackOffOptions, TlsOptions, BrokerAddress};
+pub use connection::{Authentication, Connection, ConnectionSender};
+pub use connection_manager::{BackOffOptions, TlsOptions, BrokerAddress};
 pub use consumer::{
     Consumer, ConsumerBuilder, ConsumerOptions, ConsumerState, Message, MultiTopicConsumer,
 };
@@ -25,7 +25,6 @@ pub use executor::AsyncStdExecutor;
 pub use message::proto;
 pub use message::proto::command_subscribe::SubType;
 pub use producer::{Producer, ProducerOptions, MultiTopicProducer};
-pub use service_discovery::ServiceDiscovery;
 
 mod client;
 mod connection;
