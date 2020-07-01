@@ -236,12 +236,13 @@ impl<Exe: Executor> ConnectionManager<Exe> {
 
                     trace!("current retries: {}, current_backoff(pow = {}): {}ms",
                       current_retries, 2u32.pow(current_retries - 1), current_backoff.as_millis());
+                    error!("connection error, retrying connection to {} after {}ms", broker.url, current_backoff.as_millis());
                     Exe::delay(current_backoff).await;
                 },
                 Err(e) => return Err(e.into()),
             }
         };
-        debug!("got the new connection in {}ms", (std::time::Instant::now() - start).as_millis());
+        info!("Connected to {} in {}ms", broker.url, (std::time::Instant::now() - start).as_millis());
         let c = Arc::new(conn);
         let old = self
             .connections
