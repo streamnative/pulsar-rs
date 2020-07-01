@@ -1,9 +1,9 @@
 use crate::connection_manager::{BrokerAddress, ConnectionManager};
 use crate::error::{ServiceDiscoveryError, ConnectionError};
 use crate::executor:: Executor;
-use crate::message::proto::{command_lookup_topic_response, CommandLookupTopicResponse};
+use crate::message::proto::{command_lookup_topic_response, CommandLookupTopicResponse, command_partitioned_topic_metadata_response};
 use futures::{future::try_join_all, FutureExt};
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use url::Url;
 
 /// Look up broker addresses for topics and partitioned topics
@@ -37,6 +37,7 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
         let mut is_authoritative = false;
         let mut broker_address = self.manager.get_base_address();
 
+        let mut max_retries = 20u8;
         loop {
             let response = match conn.sender().lookup_topic(topic.to_string(), is_authoritative).await {
                 Ok(res) => res,
@@ -47,6 +48,21 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
                 },
                 Err(e) => return Err(e.into()),
             };
+
+            if response.response.is_none()
+                || response.response == Some(command_lookup_topic_response::LookupType::Failed as i32)
+                {
+                let error = response.error.and_then(crate::error::server_error);
+                if error == Some(crate::proto::ServerError::ServiceNotReady) {
+                    if max_retries > 0 {
+                        error!("lookup({}) answered ServiceNotReady, retrying request after 500ms (max_retries = {})", topic, max_retries);
+                        max_retries -= 1;
+                        Exe::delay(Duration::from_millis(500)).await;
+                        continue;
+                    }
+                }
+                return Err(ServiceDiscoveryError::Query(error, response.message.clone()));
+            }
 
             let LookupResponse {
                 broker_url,
@@ -104,27 +120,40 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
         let mut connection = self.manager.get_base_connection().await?;
         let topic = topic.into();
 
-        let response = match connection.sender().lookup_partitioned_topic(&topic).await {
-            Ok(res) => res,
-            Err(ConnectionError::Disconnected) => {
-                error!("tried to lookup a topic but connection was closed, reconnecting...");
-                connection = self.manager.get_base_connection().await?;
-                connection.sender().lookup_partitioned_topic(&topic).await?
-            },
-            Err(e) => return Err(e.into()),
+        let mut max_retries = 20u8;
+        let response = loop {
+            let response = match connection.sender().lookup_partitioned_topic(&topic).await {
+                Ok(res) => res,
+                Err(ConnectionError::Disconnected) => {
+                    error!("tried to lookup a topic but connection was closed, reconnecting...");
+                    connection = self.manager.get_base_connection().await?;
+                    connection.sender().lookup_partitioned_topic(&topic).await?
+                },
+                Err(e) => return Err(e.into()),
+            };
+
+            if response.response.is_none()
+                || response.response == Some(command_partitioned_topic_metadata_response::LookupType::Failed as i32)
+                {
+                let error = response.error.and_then(crate::error::server_error);
+                if error == Some(crate::proto::ServerError::ServiceNotReady) {
+                    if max_retries > 0 {
+                        error!("lookup_partitioned_topic_number({}) answered ServiceNotReady, retrying request after 500ms (max_retries = {})", topic, max_retries);
+                        max_retries -= 1;
+                        Exe::delay(Duration::from_millis(500)).await;
+                        continue;
+                    }
+                }
+                return Err(ServiceDiscoveryError::Query(error, response.message.clone()));
+            }
+
+            break response;
         };
 
         match response.partitions {
             Some(partitions) => Ok(partitions),
             None => {
-                if let Some(s) = response.message {
-                    Err(ServiceDiscoveryError::Query(s))
-                } else {
-                    Err(ServiceDiscoveryError::Query(format!(
-                        "server error: {:?}",
-                        response.error
-                    )))
-                }
+                Err(ServiceDiscoveryError::Query(response.error.and_then(crate::error::server_error), response.message))
             }
         }
     }
@@ -162,18 +191,6 @@ struct LookupResponse {
 fn convert_lookup_response(
     response: &CommandLookupTopicResponse,
 ) -> Result<LookupResponse, ServiceDiscoveryError> {
-    if response.response.is_none()
-        || response.response == Some(command_lookup_topic_response::LookupType::Failed as i32)
-    {
-        if let Some(ref s) = response.message {
-            return Err(ServiceDiscoveryError::Query(s.to_string()));
-        } else {
-            return Err(ServiceDiscoveryError::Query(format!(
-                "server error: {:?}",
-                response.error.unwrap()
-            )));
-        }
-    }
 
     let proxy = response.proxy_through_service_url.unwrap_or(false);
     let authoritative = response.authoritative.unwrap_or(false);

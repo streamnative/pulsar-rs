@@ -216,7 +216,8 @@ impl std::error::Error for ProducerError {
 #[derive(Debug)]
 pub enum ServiceDiscoveryError {
     Connection(ConnectionError),
-    Query(String),
+    Query(Option<crate::message::proto::ServerError>, Option<String>),
+    //Query(Option<i32>, String),
     NotFound,
     DnsLookupError,
     Canceled,
@@ -234,7 +235,7 @@ impl fmt::Display for ServiceDiscoveryError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             ServiceDiscoveryError::Connection(e) => write!(f, "Connection error: {}", e),
-            ServiceDiscoveryError::Query(s) => write!(f, "Query error: {}", s),
+            ServiceDiscoveryError::Query(e, s) => write!(f, "Query error ({:?}): {}", e, s.as_deref().unwrap_or("")),
             ServiceDiscoveryError::NotFound => write!(f, "cannot find topic"),
             ServiceDiscoveryError::DnsLookupError => write!(f, "cannot lookup broker address"),
             ServiceDiscoveryError::Canceled => write!(f, "canceled request"),
@@ -282,5 +283,36 @@ impl SharedError {
         let mut lock = self.error.lock().unwrap();
         *lock = Some(error);
         self.error_set.store(true, Ordering::Release);
+    }
+}
+
+use crate::proto::ServerError;
+pub(crate) fn server_error(i: i32) -> Option<ServerError> {
+    match i {
+        0 => Some(ServerError::UnknownError),
+        1 => Some(ServerError::MetadataError),
+        2 => Some(ServerError::PersistenceError),
+        3 => Some(ServerError::AuthenticationError),
+        4 => Some(ServerError::AuthorizationError),
+        5 => Some(ServerError::ConsumerBusy),
+        6 => Some(ServerError::ServiceNotReady),
+        7 => Some(ServerError::ProducerBlockedQuotaExceededError),
+        8 => Some(ServerError::ProducerBlockedQuotaExceededException),
+        9 => Some(ServerError::ChecksumError),
+        10 => Some(ServerError::UnsupportedVersionError),
+        11 => Some(ServerError::TopicNotFound),
+        12 => Some(ServerError::SubscriptionNotFound),
+        13 => Some(ServerError::ConsumerNotFound),
+        14 => Some(ServerError::TooManyRequests),
+        15 => Some(ServerError::TopicTerminatedError),
+        16 => Some(ServerError::ProducerBusy),
+        17 => Some(ServerError::InvalidTopicName),
+        /* FIXME: why aren't they found by the compiler? Max enum size?
+        18 => Some(ServerError::IncompatibleSchema),
+        19 => Some(ServerError::ConsumerAssignError),
+        20 => Some(ServerError::TransactionCoordinatorNotFound),
+        21 => Some(ServerError::InvalidTxnStatus),
+        */
+        _  => None,
     }
 }
