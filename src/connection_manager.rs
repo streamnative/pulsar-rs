@@ -229,7 +229,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
 
                     let jitter = rand::thread_rng().gen_range(0, 10);
                     current_backoff = std::cmp::min(
-                        self.back_off_options.min_backoff * 2u32.pow(current_retries),
+                        self.back_off_options.min_backoff * 2u32.saturating_pow(current_retries),
                         self.back_off_options.max_backoff)
                         + self.back_off_options.min_backoff * jitter;
                     current_retries += 1;
