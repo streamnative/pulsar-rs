@@ -128,7 +128,7 @@ mod tests {
     }
 
     use log::{Record, Metadata, LevelFilter};
-    pub struct SimpleLogger;
+    pub struct SimpleLogger { pub tag: &'static str }
     impl log::Log for SimpleLogger {
         fn enabled(&self, _metadata: &Metadata) -> bool {
             //metadata.level() <= Level::Info
@@ -137,14 +137,14 @@ mod tests {
 
         fn log(&self, record: &Record) {
             if self.enabled(record.metadata()) {
-                println!("{} {}\t{}\t{}", chrono::Utc::now(),
+                println!("{} {} {}\t{}\t{}", chrono::Utc::now(), self.tag,
                   record.level(), record.module_path().unwrap(), record.args());
             }
         }
         fn flush(&self) {}
     }
 
-    pub static TEST_LOGGER: SimpleLogger = SimpleLogger;
+    pub static TEST_LOGGER: SimpleLogger = SimpleLogger { tag: "" };
 
     #[test]
     #[cfg(feature = "tokio-runtime")]

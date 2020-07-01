@@ -1238,10 +1238,11 @@ mod tests {
         }
     }
 
+    pub static MULTI_LOGGER: crate::tests::SimpleLogger = crate::tests::SimpleLogger { tag: "multi_consumer" };
     #[test]
     #[cfg(feature = "tokio-runtime")]
     fn multi_consumer() {
-        let _ = log::set_logger(&TEST_LOGGER);
+        let _ = log::set_logger(&MULTI_LOGGER);
         let _ = log::set_max_level(LevelFilter::Debug);
         let addr = "pulsar://127.0.0.1:6650";
         let rt = Runtime::new().unwrap();
