@@ -1,3 +1,4 @@
+//! Message publication
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::io::Write;
@@ -15,11 +16,18 @@ use crate::{Error, Pulsar};
 type ProducerId = u64;
 type ProducerName = String;
 
+/// message data that will be sent on a topic
+///
+/// generated from the [SerializeMessage] trait or [MessageBuilder]
+///
+/// this is actually a subset of the fields of a message, because batching,
+/// compression and encryption should be handled by the producer
 #[derive(Debug, Clone, Default)]
 pub struct Message {
+    /// serialized data
     pub payload: Vec<u8>,
     pub properties: HashMap<String, String>,
-    ///key to decide partition for the msg
+    /// key to decide partition for the msg
     pub partition_key: ::std::option::Option<String>,
     /// Override namespace's replication
     pub replicate_to: ::std::vec::Vec<String>,
@@ -71,6 +79,7 @@ impl From<Message> for ProducerMessage {
     }
 }
 
+/// Configuration options for producers
 #[derive(Clone, Default)]
 pub struct ProducerOptions {
     pub encrypted: Option<bool>,
@@ -80,6 +89,7 @@ pub struct ProducerOptions {
     pub compression: Option<proto::CompressionType>,
 }
 
+/// Wrapper structure that manges multiple producers at once, creating them as needed
 pub struct MultiTopicProducer<Exe: Executor + ?Sized> {
     client: Pulsar<Exe>,
     producers: BTreeMap<String, Producer<Exe>>,
@@ -162,6 +172,7 @@ impl<Exe: Executor + ?Sized> MultiTopicProducer<Exe> {
     }
 }
 
+/// a producer is used to publish messages on a topic
 pub struct Producer<Exe: Executor + ?Sized> {
     client: Pulsar<Exe>,
     connection: Arc<Connection>,
@@ -508,6 +519,9 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
     }
 }
 
+/// Helper structure to prepare a producer
+///
+/// generated from [Pulsar::producer]
 pub struct ProducerBuilder<'a, Topic, Exe: Executor + ?Sized> {
     pulsar: &'a Pulsar<Exe>,
     topic: Topic,
@@ -622,6 +636,9 @@ impl Batch {
     }
 }
 
+/// Helper structure to prepare a message
+///
+/// generated with [Producer::create_message]
 pub struct MessageBuilder<'a, Content, Exe: Executor + ?Sized> {
     producer: &'a mut Producer<Exe>,
     properties: HashMap<String, String>,

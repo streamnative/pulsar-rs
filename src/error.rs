@@ -1,3 +1,4 @@
+//! Error types
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,

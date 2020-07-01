@@ -37,6 +37,7 @@ impl DeserializeMessage for String {
     }
 }
 
+/// Helper trait for message serialization
 pub trait SerializeMessage {
     fn serialize_message(input: &Self) -> Result<producer::Message, Error>;
 }
@@ -80,8 +81,9 @@ impl SerializeMessage for str {
     }
 }
 
-//TODO add more DeserializeMessage impls
-
+/// Pulsar client
+///
+/// This is the starting point of this API, used to create connections, producers and consumers
 #[derive(Clone)]
 pub struct Pulsar<E: Executor + ?Sized> {
     pub(crate) manager: Arc<ConnectionManager<E>>,
@@ -107,6 +109,7 @@ impl<Exe: Executor> Pulsar<Exe> {
         })
     }
 
+    /// creates a new client builder
     pub fn builder<S: Into<String>>(url: S) -> PulsarBuilder<Exe> {
         PulsarBuilder {
             url: url.into(),
@@ -117,6 +120,7 @@ impl<Exe: Executor> Pulsar<Exe> {
         }
     }
 
+    /// gets the address of a broker handling the topic
     pub async fn lookup_topic<S: Into<String>>(
         &self,
         topic: S,
@@ -124,7 +128,7 @@ impl<Exe: Executor> Pulsar<Exe> {
         self.service_discovery.lookup_topic(topic).await.map_err(|e| e.into())
     }
 
-    /// get the number of partitions for a partitioned topic
+    /// gets the number of partitions for a partitioned topic
     pub async fn lookup_partitioned_topic_number<S: Into<String>>(
         &self,
         topic: S,
@@ -133,6 +137,7 @@ impl<Exe: Executor> Pulsar<Exe> {
             .map_err(|e| e.into())
     }
 
+    /// gets the address of brokers handling the topic's partitions
     pub async fn lookup_partitioned_topic<S: Into<String>>(
         &self,
         topic: S,
@@ -142,6 +147,7 @@ impl<Exe: Executor> Pulsar<Exe> {
             .map_err(|e| e.into())
     }
 
+    /// gets the list of topics from a namespace
     pub async fn get_topics_of_namespace(
         &self,
         namespace: String,
@@ -153,6 +159,7 @@ impl<Exe: Executor> Pulsar<Exe> {
         Ok(topics.topics)
     }
 
+    /// creates a consumer vuilder
     pub fn consumer(&self) -> ConsumerBuilder<Unset, Unset, Unset, Exe> {
         ConsumerBuilder::new(self)
     }
@@ -184,6 +191,7 @@ impl<Exe: Executor> Pulsar<Exe> {
         )
     }
 
+    /// creates a consumer
     pub async fn create_consumer<T, S1, S2>(
         &self,
         topic: S1,
@@ -324,6 +332,7 @@ impl<Exe: Executor> Pulsar<Exe> {
     }
 }
 
+/// Helper structure to generate a [Pulsar] client
 pub struct PulsarBuilder<Exe> {
     url: String,
     auth: Option<Authentication>,
@@ -333,6 +342,7 @@ pub struct PulsarBuilder<Exe> {
 }
 
 impl<Exe: Executor> PulsarBuilder<Exe> {
+    /// Authentication parameters (JWT, Biscuit, etc)
     pub fn with_auth(self, auth: Authentication) -> Self {
         PulsarBuilder {
             url: self.url,
@@ -343,6 +353,7 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
         }
     }
 
+    /// Exponential back off parameters for automatic reconnection
     pub fn with_back_off_options(self, back_off_options: BackOffOptions) -> Self {
         PulsarBuilder {
             url: self.url,
@@ -353,6 +364,7 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
         }
     }
 
+    /// add a custom certificate chain to authenticate the server in TLS connectioons
     pub fn with_certificate_chain(self, certificate_chain: Vec<u8>) -> Self {
         PulsarBuilder {
             url: self.url,
@@ -365,6 +377,7 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
         }
     }
 
+    /// add a custom certificate chain from a file to authenticate the server in TLS connectioons
     pub fn with_certificate_chain_file<P: AsRef<std::path::Path>>(self, path: P) -> Result<Self, std::io::Error> {
         use std::io::Read;
 
@@ -375,6 +388,7 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
         Ok(self.with_certificate_chain(v))
     }
 
+    /// creates the Pulsar client and connects it
     pub async fn build(self) -> Result<Pulsar<Exe>, Error> {
         let PulsarBuilder { url, auth, back_off_options, tls_options, executor: _ } = self;
         Pulsar::new(url, auth, back_off_options, tls_options).await

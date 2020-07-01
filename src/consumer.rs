@@ -1,3 +1,4 @@
+//! Topic subscriptions
 use std::collections::{BTreeMap, BTreeSet, VecDeque, HashMap, HashSet};
 use std::fmt::Debug;
 use std::marker::PhantomData;
@@ -23,6 +24,7 @@ use crate::message::{
 };
 use crate::{DeserializeMessage, Pulsar};
 
+/// Configuration options for consumers
 #[derive(Clone, Default, Debug)]
 pub struct ConsumerOptions {
     pub priority_level: Option<i32>,
@@ -34,6 +36,7 @@ pub struct ConsumerOptions {
     pub initial_position: Option<i32>,
 }
 
+/// the consumer is used to subscribe to a topic
 pub struct Consumer<T: DeserializeMessage> {
     connection: Arc<Connection>,
     topic: String,
@@ -937,6 +940,7 @@ pub struct ConsumerState {
     pub messages_received: u64,
 }
 
+/// A consumer that can subscribe on multiple topics, from a rege matching topic names
 pub struct MultiTopicConsumer<T: DeserializeMessage, Exe: Executor> {
     namespace: String,
     topic_regex: Regex,

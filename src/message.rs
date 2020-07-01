@@ -1,3 +1,4 @@
+//! low level structures used to send and process raw messages
 use crate::connection::RequestKey;
 use crate::error::ConnectionError;
 use bytes::{Buf, BufMut, BytesMut};
