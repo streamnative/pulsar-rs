@@ -18,7 +18,7 @@ use crate::error::{ConnectionError, ConsumerError, Error};
 use crate::executor::Executor;
 use crate::message::{
     parse_batched_message,
-    proto::{self, command_subscribe::SubType, MessageIdData, Schema},
+    proto::{self, command_subscribe::SubType, MessageIdData, Schema, MessageMetadata},
     BatchedMessage, Message as RawMessage, Metadata, Payload,
 };
 use crate::{DeserializeMessage, Pulsar};
@@ -1074,6 +1074,11 @@ pub struct Message<T> {
     _phantom: PhantomData<T>,
 }
 
+impl<T> Message<T> {
+  pub fn metadata(&self) -> &MessageMetadata {
+    &self.payload.metadata
+  }
+}
 impl<T: DeserializeMessage> Message<T> {
   pub fn deserialize(&self) -> T::Output {
       T::deserialize_message(&self.payload)

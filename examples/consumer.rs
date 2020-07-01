@@ -28,7 +28,7 @@ async fn main() -> Result<(), pulsar::Error> {
 
     let mut consumer: Consumer<TestData> = pulsar
         .consumer()
-        .with_topic("test")
+        .with_topic("non-persistent://public/default/test")
         .with_consumer_name("test_consumer")
         .with_subscription_type(SubType::Exclusive)
         .with_subscription("test_subscription")
@@ -38,6 +38,7 @@ async fn main() -> Result<(), pulsar::Error> {
     let mut counter = 0usize;
     while let Some(msg) = consumer.try_next().await? {
         consumer.ack(&msg).await?;
+        log::info!("metadata: {:?}", msg.metadata());
         let data = match msg.deserialize() {
             Ok(data) => data,
             Err(e) => {
