@@ -68,7 +68,7 @@ impl std::error::Error for Error {
 pub enum ConnectionError {
     Io(io::Error),
     Disconnected,
-    PulsarError(String),
+    PulsarError(Option<crate::message::proto::ServerError>, Option<String>),
     Unexpected(String),
     Decoding(String),
     Encoding(String),
@@ -97,7 +97,7 @@ impl fmt::Display for ConnectionError {
         match self {
             ConnectionError::Io(e) => write!(f, "{}", e),
             ConnectionError::Disconnected => write!(f, "Disconnected"),
-            ConnectionError::PulsarError(e) => write!(f, "{}", e),
+            ConnectionError::PulsarError(e, s) => write!(f, "Server error ({:?}): {}", e, s.as_deref().unwrap_or("")),
             ConnectionError::Unexpected(e) => write!(f, "{}", e),
             ConnectionError::Decoding(e) => write!(f, "Error decoding message: {}", e),
             ConnectionError::Encoding(e) => write!(f, "Error encoding message: {}", e),
@@ -217,7 +217,6 @@ impl std::error::Error for ProducerError {
 pub enum ServiceDiscoveryError {
     Connection(ConnectionError),
     Query(Option<crate::message::proto::ServerError>, Option<String>),
-    //Query(Option<i32>, String),
     NotFound,
     DnsLookupError,
     Canceled,

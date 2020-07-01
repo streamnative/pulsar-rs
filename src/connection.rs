@@ -582,14 +582,14 @@ impl Connection {
                             error: Some(error), ..
                         },
                         ..
-                })) => Err(ConnectionError::PulsarError(format!("{:?}", error))),
+                })) => Err(ConnectionError::PulsarError(crate::error::server_error(error.error), Some(error.message))),
                 Some(Ok(msg)) => {
                     let cmd = msg.command.clone();
                     trace!("received connection response: {:?}", msg);
                     msg.command
                         .connected
                         .ok_or_else(|| {
-                            ConnectionError::PulsarError(format!(
+                            ConnectionError::Unexpected(format!(
                                     "Unexpected message from pulsar: {:?}",
                                     cmd
                                     ))
@@ -664,11 +664,10 @@ fn extract_message<T: Debug, F>(message: Message, extract: F) -> Result<T, Conne
 where
     F: FnOnce(Message) -> Option<T>,
 {
-    if message.command.error.is_some() {
-        Err(ConnectionError::PulsarError(format!(
-            "{:?}",
-            message.command.error.unwrap()
-        )))
+    if let Some(e) = message.command.error {
+        Err(ConnectionError::PulsarError(
+                crate::error::server_error(e.error),
+                Some(e.message)))
     } else {
         let cmd = message.command.clone();
         if let Some(extracted) = extract(message) {
