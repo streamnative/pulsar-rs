@@ -735,6 +735,10 @@ pub mod proto {
         pub consumer_id: u64,
         #[prost(message, required, tag="2")]
         pub message_id: MessageIdData,
+        #[prost(message, required, tag="3")]
+        pub redelivery_count: Option<u32>,
+        #[prost(message, required, tag="4")]
+        pub ack_set: i64,
     }
     #[derive(Clone, PartialEq, Message)]
     pub struct CommandAck {

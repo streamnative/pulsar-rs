@@ -86,6 +86,7 @@ impl<T: DeserializeMessage> Consumer<T> {
         consumer_name: Option<String>,
         batch_size: Option<u32>,
         unacked_message_redelivery_delay: Option<Duration>,
+        dead_letter_policy: Option<DeadLetterPolicy>,
         options: ConsumerOptions,
     ) -> Result<Consumer<T>, Error> {
         let consumer_id = consumer_id.unwrap_or_else(rand::random);
@@ -160,6 +161,7 @@ impl<T: DeserializeMessage> Consumer<T> {
             ack_rx,
             batch_size,
             unacked_message_redelivery_delay,
+            dead_letter_policy,
             options.clone(),
             _drop_signal,
         );
@@ -287,6 +289,7 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe> {
         ack_rx: mpsc::UnboundedReceiver<AckMessage>,
         batch_size: u32,
         unacked_message_redelivery_delay: Option<Duration>,
+        dead_letter_policy: Option<DeadLetterPolicy>,
         options: ConsumerOptions,
         _drop_signal: oneshot::Sender<()>,
     ) -> ConsumerEngine<Exe> {
@@ -305,6 +308,7 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe> {
             remaining_messages: batch_size,
             unacked_message_redelivery_delay,
             unacked_messages: HashMap::new(),
+            dead_letter_policy,
             options,
             _drop_signal,
         }
