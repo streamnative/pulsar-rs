@@ -26,7 +26,7 @@ use crate::message::{
 };
 use crate::producer::{self, ProducerOptions};
 
-pub enum Register {
+pub(crate) enum Register {
     Request {
         key: RequestKey,
         resolver: oneshot::Sender<Message>,
@@ -50,7 +50,7 @@ pub struct Authentication {
     pub data: Vec<u8>,
 }
 
-pub struct Receiver<S: Stream<Item = Result<Message, ConnectionError>>> {
+pub(crate) struct Receiver<S: Stream<Item = Result<Message, ConnectionError>>> {
     inbound: Pin<Box<S>>,
     outbound: mpsc::UnboundedSender<Message>,
     error: SharedError,
@@ -198,7 +198,7 @@ pub struct ConnectionSender {
 }
 
 impl ConnectionSender {
-    pub fn new(
+    pub(crate) fn new(
         tx: mpsc::UnboundedSender<Message>,
         registrations: mpsc::UnboundedSender<Register>,
         receiver_shutdown: oneshot::Sender<()>,
