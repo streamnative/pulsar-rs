@@ -286,7 +286,7 @@ impl SharedError {
     }
 }
 
-use crate::proto::ServerError;
+use crate::message::proto::ServerError;
 pub(crate) fn server_error(i: i32) -> Option<ServerError> {
     match i {
         0 => Some(ServerError::UnknownError),

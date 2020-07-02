@@ -147,11 +147,11 @@ extern crate prost_derive;
 #[macro_use]
 extern crate serde;
 
-pub use client::{DeserializeMessage, Pulsar, SerializeMessage, PulsarBuilder};
+pub use client::{DeserializeMessage, Pulsar, SerializeMessage};
 pub use connection::Authentication;
 pub use connection_manager::{BackOffOptions, TlsOptions, BrokerAddress};
 pub use consumer::{
-    Consumer, ConsumerBuilder, ConsumerOptions, ConsumerState, MultiTopicConsumer,
+    Consumer, ConsumerOptions, ConsumerState, MultiTopicConsumer,
 };
 pub use error::Error;
 pub use executor::Executor;
@@ -159,7 +159,6 @@ pub use executor::Executor;
 pub use executor::TokioExecutor;
 #[cfg(feature = "async-std-runtime")]
 pub use executor::AsyncStdExecutor;
-pub use message::proto;
 pub use message::proto::command_subscribe::SubType;
 pub use producer::{Producer, ProducerOptions, MultiTopicProducer};
 

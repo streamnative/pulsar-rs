@@ -53,7 +53,7 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
                 || response.response == Some(command_lookup_topic_response::LookupType::Failed as i32)
                 {
                 let error = response.error.and_then(crate::error::server_error);
-                if error == Some(crate::proto::ServerError::ServiceNotReady) {
+                if error == Some(crate::message::proto::ServerError::ServiceNotReady) {
                     if max_retries > 0 {
                         error!("lookup({}) answered ServiceNotReady, retrying request after 500ms (max_retries = {})", topic, max_retries);
                         max_retries -= 1;
@@ -136,7 +136,7 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
                 || response.response == Some(command_partitioned_topic_metadata_response::LookupType::Failed as i32)
                 {
                 let error = response.error.and_then(crate::error::server_error);
-                if error == Some(crate::proto::ServerError::ServiceNotReady) {
+                if error == Some(crate::message::proto::ServerError::ServiceNotReady) {
                     if max_retries > 0 {
                         error!("lookup_partitioned_topic_number({}) answered ServiceNotReady, retrying request after 500ms (max_retries = {})", topic, max_retries);
                         max_retries -= 1;
