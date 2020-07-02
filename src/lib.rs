@@ -378,7 +378,11 @@ mod tests {
                     .await
                     .unwrap();
 
-                producer.send(topic, send_data.to_string()).await.unwrap().await;
+                producer
+                    .send(topic, send_data.to_string())
+                    .await
+                    .unwrap()
+                    .await;
 
                 let msg = consumer.next().await.unwrap().unwrap();
                 consumer.ack(&msg).await.unwrap();
@@ -404,7 +408,11 @@ mod tests {
                     .await
                     .unwrap();
 
-                producer.send(topic, send_data.to_vec()).await.unwrap().await;
+                producer
+                    .send(topic, send_data.to_vec())
+                    .await
+                    .unwrap()
+                    .await;
 
                 let msg = consumer.next().await.unwrap().unwrap();
                 consumer.ack(&msg).await.unwrap();
