@@ -322,7 +322,8 @@ mod tests {
                     })
                     .await
                     .unwrap()
-                    .await;
+                    .await
+                    .unwrap();
             }
 
             info!("sent");
@@ -382,7 +383,8 @@ mod tests {
                     .send(topic, send_data.to_string())
                     .await
                     .unwrap()
-                    .await;
+                    .await
+                    .unwrap();
 
                 let msg = consumer.next().await.unwrap().unwrap();
                 consumer.ack(&msg).await.unwrap();
@@ -412,7 +414,8 @@ mod tests {
                     .send(topic, send_data.to_vec())
                     .await
                     .unwrap()
-                    .await;
+                    .await
+                    .unwrap();
 
                 let msg = consumer.next().await.unwrap().unwrap();
                 consumer.ack(&msg).await.unwrap();
@@ -472,7 +475,8 @@ mod tests {
                     })
                     .await
                     .unwrap()
-                    .await;
+                    .await
+                    .unwrap();
             }
 
             let mut count = 0usize;

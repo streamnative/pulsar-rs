@@ -45,7 +45,9 @@ async fn main() -> Result<(), pulsar::Error> {
             .send(TestData {
                 data: "data".to_string(),
             })
-            .await?;
+            .await?
+            .await
+            .unwrap();
 
         counter += 1;
         println!("{} messages", counter);
