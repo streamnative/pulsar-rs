@@ -115,7 +115,7 @@ impl<Exe: Executor + ?Sized> MultiTopicProducer<Exe> {
         &mut self,
         topic: S,
         message: T,
-    ) -> Result<proto::CommandSendReceipt, Error> {
+    ) -> Result<oneshot::Receiver<proto::CommandSendReceipt>, Error> {
         let topic = topic.into();
         match T::serialize_message(&message) {
             Ok(message) => self.send_message(topic, message.into()).await,
@@ -127,7 +127,7 @@ impl<Exe: Executor + ?Sized> MultiTopicProducer<Exe> {
         &mut self,
         topic: S,
         message: ProducerMessage,
-    ) -> Result<proto::CommandSendReceipt, Error> {
+    ) -> Result<oneshot::Receiver<proto::CommandSendReceipt>, Error> {
         let topic = topic.into();
         if !self.producers.contains_key(&topic) {
             let producer = self
@@ -145,7 +145,7 @@ impl<Exe: Executor + ?Sized> MultiTopicProducer<Exe> {
         &mut self,
         topic: S,
         messages: I,
-    ) -> Result<Vec<proto::CommandSendReceipt>, Error>
+    ) -> Result<Vec<oneshot::Receiver<proto::CommandSendReceipt>>, Error>
     where
         'b: 'a,
         T: 'b + SerializeMessage + ?Sized,
@@ -280,10 +280,26 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
         Ok(())
     }
 
+    // sends a message
+    //
+    // this function returns a `Receiver` because the receipt can come long after
+    // this function was called, for various reasons:
+    // - the message was sent successfully but Pulsar did not send the receipt yet
+    // - the producer is batching messages, so this function must return immediately,
+    // and the receipt will come when the batched messages are actually sent
+    //
+    // Usage:
+    //
+    // ```rust,ignore
+    // let f1 = producer.send("hello").await?;
+    // let f2 = producer.send("world").await?;
+    // let receipt1 = f.await;
+    // let receipt2 = f.await;
+    // ```
     pub async fn send<T: SerializeMessage + Sized>(
         &mut self,
         message: T,
-    ) -> Result<proto::CommandSendReceipt, Error> {
+    ) -> Result<oneshot::Receiver<proto::CommandSendReceipt>, Error> {
         match T::serialize_message(&message) {
             Ok(message) => self.send_raw(message.into()).await,
             Err(e) => Err(e),
@@ -293,7 +309,7 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
     pub async fn send_all<'a, 'b, T, I>(
         &mut self,
         messages: I,
-    ) -> Result<Vec<proto::CommandSendReceipt>, Error>
+    ) -> Result<Vec<oneshot::Receiver<proto::CommandSendReceipt>>, Error>
     where
         'b: 'a,
         T: 'b + SerializeMessage + ?Sized,
@@ -324,14 +340,55 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
             .map(|e| ProducerError::Connection(e).into())
     }
 
+    /// sends the current batch of messages
+    pub async fn send_batch(&mut self) -> Result<proto::CommandSendReceipt, Error> {
+        match self.batch.as_ref() {
+            None => Err(ProducerError::Custom("not a batching producer".to_string()).into()),
+            Some(batch) => {
+                let mut payload: Vec<u8> = Vec::new();
+                let mut receipts = Vec::new();
+                let mut counter = 0i32;
+
+                {
+                    let batch = batch.lock().unwrap();
+
+                    for (tx, message) in batch.get_messages() {
+                        receipts.push(tx);
+                        message.serialize(&mut payload);
+                        counter += 1;
+                    }
+                }
+
+                if counter > 0 {
+                    let message = ProducerMessage {
+                        payload,
+                        num_messages_in_batch: Some(counter),
+                        ..Default::default()
+                    };
+
+                    let send_receipt = self.send_compress(message).await?;
+
+                    trace!("sending a batched message of size {}", counter);
+                    Ok(send_receipt)
+                } else {
+                    Err(ProducerError::Custom("no messages to send".into()).into())
+                }
+            }
+        }
+    }
+
     pub(crate) async fn send_raw(
         &mut self,
         message: ProducerMessage,
-    ) -> Result<proto::CommandSendReceipt, Error> {
+    ) -> Result<oneshot::Receiver<proto::CommandSendReceipt>, Error> {
+        let (tx, rx) = oneshot::channel();
         match self.batch.as_ref() {
-            None => self.send_compress(message).await,
+            None => {
+                let receipt = self.send_compress(message).await?;
+                let _ = tx.send(receipt);
+                Ok(rx)
+            }
             Some(batch) => {
-                let (tx, rx) = oneshot::channel();
                 let mut payload: Vec<u8> = Vec::new();
                 let mut receipts = Vec::new();
                 let mut counter = 0i32;
@@ -363,8 +420,8 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
                         let _ = tx.send(send_receipt.clone());
                     }
                 }
-                rx.await
-                    .map_err(|_| ProducerError::Custom("could not send message".to_string()).into())
+
+                Ok(rx)
             }
         }
     }
@@ -708,7 +765,7 @@ impl<'a, Content, Exe: Executor + ?Sized> MessageBuilder<'a, Content, Exe> {
 }
 
 impl<'a, T: SerializeMessage + Sized, Exe: Executor + ?Sized> MessageBuilder<'a, Set<T>, Exe> {
-    pub async fn send(self) -> Result<proto::CommandSendReceipt, Error> {
+    pub async fn send(self) -> Result<oneshot::Receiver<proto::CommandSendReceipt>, Error> {
         let MessageBuilder {
             producer,
             properties,

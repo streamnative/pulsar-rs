@@ -3,6 +3,7 @@ use std::string::FromUtf8Error;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::channel::oneshot;
 use futures::future;
 
 use crate::connection::Authentication;
@@ -368,7 +369,7 @@ impl<Exe: Executor> Pulsar<Exe> {
         topic: S,
         message: &M,
         options: ProducerOptions,
-    ) -> Result<CommandSendReceipt, Error> {
+    ) -> Result<oneshot::Receiver<CommandSendReceipt>, Error> {
         match M::serialize_message(message) {
             Ok(message) => self.send_raw::<S>(message, topic, options).await,
             Err(e) => Err(e),
@@ -380,9 +381,10 @@ impl<Exe: Executor> Pulsar<Exe> {
         message: producer::Message,
         topic: S,
         options: ProducerOptions,
-    ) -> Result<CommandSendReceipt, Error> {
+    ) -> Result<oneshot::Receiver<CommandSendReceipt>, Error> {
         let mut producer = self.create_producer(topic, None, options).await?;
-        producer.send_raw(message.into()).await
+        let rx = producer.send_raw(message.into()).await?;
+        Ok(rx)
     }
 
     pub fn create_multi_topic_producer(
