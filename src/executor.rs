@@ -6,6 +6,7 @@ pub enum ExecutorKind {
     AsyncStd,
 }
 
+/// Wrapper trait abstracting the Tokio and async-std executors
 pub trait Executor: Clone + Send + Sync + 'static {
     fn spawn(f: Pin<Box<dyn Future<Output = ()> + Send>>) -> Result<(), ()>;
     fn spawn_blocking<F, Res>(f: F) -> JoinHandle<Res>
@@ -22,6 +23,7 @@ pub trait Executor: Clone + Send + Sync + 'static {
     fn kind() -> ExecutorKind;
 }
 
+/// Wrapper for the Tokio executor
 #[cfg(feature = "tokio-runtime")]
 #[derive(Clone, Debug)]
 pub struct TokioExecutor(pub tokio::runtime::Handle);
@@ -54,6 +56,7 @@ impl Executor for TokioExecutor {
     }
 }
 
+/// Wrapper for the async-std executor
 #[cfg(feature = "async-std-runtime")]
 #[derive(Clone, Debug)]
 pub struct AsyncStdExecutor;

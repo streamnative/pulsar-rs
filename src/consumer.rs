@@ -675,6 +675,74 @@ pub struct ConsumerBuilder<'a, Topic, Subscription, SubscriptionType, Exe: Execu
     topic_refresh: Option<Duration>,
 }
 
+impl<'a, Exe: Executor> ConsumerBuilder<'a, Set<String>, Set<String>, Set<SubType>, Exe> {
+    pub async fn build<T: DeserializeMessage>(self) -> Result<Consumer<T>, Error> {
+        let ConsumerBuilder {
+            pulsar,
+            topic: Set(topic),
+            subscription: Set(subscription),
+            subscription_type: Set(sub_type),
+            consumer_id,
+            consumer_name,
+            consumer_options,
+            batch_size,
+            unacked_message_resend_delay,
+            ..
+        } = self;
+
+        pulsar.create_consumer(
+            topic,
+            subscription,
+            sub_type,
+            batch_size,
+            consumer_name,
+            consumer_id,
+            unacked_message_resend_delay,
+            consumer_options.unwrap_or_else(ConsumerOptions::default),
+        ).await
+    }
+}
+
+impl<'a, Exe: Executor> ConsumerBuilder<'a, Set<Regex>, Set<String>, Set<SubType>, Exe> {
+    pub fn build<T: DeserializeMessage>(self) -> MultiTopicConsumer<T, Exe> {
+        let ConsumerBuilder {
+            pulsar,
+            topic: Set(topic),
+            subscription: Set(subscription),
+            subscription_type: Set(sub_type),
+            consumer_id,
+            consumer_name,
+            consumer_options,
+            batch_size,
+            topic_refresh,
+            namespace,
+            unacked_message_resend_delay,
+            ..
+        } = self;
+        if consumer_id.is_some() {
+            warn!("Multi-topic consumers cannot have a set consumer ID; ignoring.");
+        }
+        if consumer_name.is_some() {
+            warn!("Consumer name not currently supported for Multi-topic consumers; ignoring.");
+        }
+        if batch_size.is_some() {
+            warn!("Batch size not currently supported for Multi-topic consumers; ignoring.");
+        }
+        let namespace = namespace.unwrap_or_else(|| "public/default".to_owned());
+        let topic_refresh = topic_refresh.unwrap_or_else(|| Duration::from_secs(30));
+
+        pulsar.create_multi_topic_consumer(
+            topic,
+            subscription,
+            namespace,
+            sub_type,
+            topic_refresh,
+            unacked_message_resend_delay,
+            consumer_options.unwrap_or_else(|| ConsumerOptions::default()),
+        )
+    }
+}
+
 impl<'a, Exe: Executor + ?Sized> ConsumerBuilder<'a, Unset, Unset, Unset, Exe> {
     pub fn new(pulsar: &'a Pulsar<Exe>) -> Self {
         ConsumerBuilder {
@@ -861,74 +929,6 @@ impl<'a, Topic, Subscription, SubscriptionType, Exe: Executor + ?Sized>
     pub fn with_unacked_message_resend_delay(mut self, delay: Option<Duration>) -> Self {
         self.unacked_message_resend_delay = delay;
         self
-    }
-}
-
-impl<'a, Exe: Executor> ConsumerBuilder<'a, Set<String>, Set<String>, Set<SubType>, Exe> {
-    pub async fn build<T: DeserializeMessage>(self) -> Result<Consumer<T>, Error> {
-        let ConsumerBuilder {
-            pulsar,
-            topic: Set(topic),
-            subscription: Set(subscription),
-            subscription_type: Set(sub_type),
-            consumer_id,
-            consumer_name,
-            consumer_options,
-            batch_size,
-            unacked_message_resend_delay,
-            ..
-        } = self;
-
-        pulsar.create_consumer(
-            topic,
-            subscription,
-            sub_type,
-            batch_size,
-            consumer_name,
-            consumer_id,
-            unacked_message_resend_delay,
-            consumer_options.unwrap_or_else(ConsumerOptions::default),
-        ).await
-    }
-}
-
-impl<'a, Exe: Executor> ConsumerBuilder<'a, Set<Regex>, Set<String>, Set<SubType>, Exe> {
-    pub fn build<T: DeserializeMessage>(self) -> MultiTopicConsumer<T, Exe> {
-        let ConsumerBuilder {
-            pulsar,
-            topic: Set(topic),
-            subscription: Set(subscription),
-            subscription_type: Set(sub_type),
-            consumer_id,
-            consumer_name,
-            consumer_options,
-            batch_size,
-            topic_refresh,
-            namespace,
-            unacked_message_resend_delay,
-            ..
-        } = self;
-        if consumer_id.is_some() {
-            warn!("Multi-topic consumers cannot have a set consumer ID; ignoring.");
-        }
-        if consumer_name.is_some() {
-            warn!("Consumer name not currently supported for Multi-topic consumers; ignoring.");
-        }
-        if batch_size.is_some() {
-            warn!("Batch size not currently supported for Multi-topic consumers; ignoring.");
-        }
-        let namespace = namespace.unwrap_or_else(|| "public/default".to_owned());
-        let topic_refresh = topic_refresh.unwrap_or_else(|| Duration::from_secs(30));
-
-        pulsar.create_multi_topic_consumer(
-            topic,
-            subscription,
-            namespace,
-            sub_type,
-            topic_refresh,
-            unacked_message_resend_delay,
-            consumer_options.unwrap_or_else(|| ConsumerOptions::default()),
-        )
     }
 }
 

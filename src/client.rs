@@ -84,6 +84,21 @@ impl SerializeMessage for str {
 /// Pulsar client
 ///
 /// This is the starting point of this API, used to create connections, producers and consumers
+///
+/// While methods are provided to create the client, producers and consumers directly,
+/// the builders should be used for more clarity:
+///
+/// ```rust,ignore
+/// let addr = "pulsar://127.0.0.1:6650";
+/// // you can indicate which executor you use as the return type of client creation
+/// let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await?;
+/// let mut producer = pulsar
+///     .producer()
+///     .with_topic("non-persistent://public/default/test")
+///     .with_name("my producer")
+///     .build()
+///     .await?;
+/// ```
 #[derive(Clone)]
 pub struct Pulsar<E: Executor + ?Sized> {
     pub(crate) manager: Arc<ConnectionManager<E>>,
@@ -91,6 +106,7 @@ pub struct Pulsar<E: Executor + ?Sized> {
 }
 
 impl<Exe: Executor> Pulsar<Exe> {
+    /// creates a new client
     pub async fn new<S: Into<String>>(
         url: S,
         auth: Option<Authentication>,
@@ -118,6 +134,42 @@ impl<Exe: Executor> Pulsar<Exe> {
             tls_options: None,
             executor: PhantomData,
         }
+    }
+
+    /// creates a consumer builder
+    ///
+    /// ```rust,ignore
+    /// let addr = "pulsar://127.0.0.1:6650";
+    /// let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await?;
+    ///
+    /// let mut consumer: Consumer<TestData> = pulsar
+    /// .consumer()
+    /// .with_topic("non-persistent://public/default/test")
+    /// .with_consumer_name("test_consumer")
+    /// .with_subscription_type(SubType::Exclusive)
+    /// .with_subscription("test_subscription")
+    /// .build()
+    /// .await?;
+    /// ```
+    pub fn consumer(&self) -> ConsumerBuilder<Unset, Unset, Unset, Exe> {
+        ConsumerBuilder::new(self)
+    }
+
+    /// creates a producer builder
+    ///
+    /// ```rust,ignore
+    /// let addr = "pulsar://127.0.0.1:6650";
+    /// let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await?;
+    ///
+    /// let mut producer = pulsar
+    ///     .producer()
+    ///     .with_topic("non-persistent://public/default/test")
+    ///     .with_name("my producer")
+    ///     .build()
+    ///     .await?;
+    /// ```
+    pub fn producer(&self) -> ProducerBuilder<Unset, Exe> {
+        ProducerBuilder::new(self)
     }
 
     /// gets the address of a broker handling the topic
@@ -157,11 +209,6 @@ impl<Exe: Executor> Pulsar<Exe> {
             .get_base_connection().await?;
         let topics = conn.sender().get_topics_of_namespace(namespace, mode).await?;
         Ok(topics.topics)
-    }
-
-    /// creates a consumer vuilder
-    pub fn consumer(&self) -> ConsumerBuilder<Unset, Unset, Unset, Exe> {
-        ConsumerBuilder::new(self)
     }
 
     pub fn create_multi_topic_consumer<T, S1, S2>(
@@ -267,10 +314,6 @@ impl<Exe: Executor> Pulsar<Exe> {
         future::try_join_all(res).await
     }
 
-    pub fn producer(&self) -> ProducerBuilder<Unset, Exe> {
-        ProducerBuilder::new(self)
-    }
-
     pub async fn create_producer<S: Into<String>>(
         &self,
         topic: S,
@@ -305,6 +348,9 @@ impl<Exe: Executor> Pulsar<Exe> {
         future::try_join_all(res).await
     }
 
+    /// sends one mssage on a topic (not recommended for multiple messages)
+    ///
+    /// this function will create a producer, send the message then drop the producer
     pub async fn send<S: Into<String>, M: SerializeMessage + ?Sized>(
         &self,
         topic: S,

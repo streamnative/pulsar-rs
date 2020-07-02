@@ -529,6 +529,22 @@ pub struct ProducerBuilder<'a, Topic, Exe: Executor + ?Sized> {
     producer_options: Option<ProducerOptions>,
 }
 
+
+impl<'a, Exe: Executor + ?Sized> ProducerBuilder<'a, Set<String>, Exe> {
+    pub async fn build(self) -> Result<Producer<Exe>, Error> {
+        let ProducerBuilder {
+            pulsar,
+            topic: Set(topic),
+            name,
+            producer_options,
+        } = self;
+
+        pulsar
+            .create_producer(topic, name, producer_options.unwrap_or_default())
+            .await
+    }
+}
+
 use crate::consumer::{Set, Unset};
 impl<'a, Exe: Executor + ?Sized> ProducerBuilder<'a, Unset, Exe> {
     pub fn new(pulsar: &'a Pulsar<Exe>) -> Self {
@@ -571,21 +587,6 @@ impl<'a, Topic, Exe: Executor + ?Sized> ProducerBuilder<'a, Topic, Exe> {
             name: self.name,
             producer_options: Some(options),
         }
-    }
-}
-
-impl<'a, Exe: Executor + ?Sized> ProducerBuilder<'a, Set<String>, Exe> {
-    pub async fn build(self) -> Result<Producer<Exe>, Error> {
-        let ProducerBuilder {
-            pulsar,
-            topic: Set(topic),
-            name,
-            producer_options,
-        } = self;
-
-        pulsar
-            .create_producer(topic, name, producer_options.unwrap_or_default())
-            .await
     }
 }
 

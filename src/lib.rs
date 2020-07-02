@@ -16,7 +16,7 @@
 //! ## Examples
 //!
 //! ### Producing
-//! ```rust
+//! ```rust,no_run
 //! #[macro_use]
 //! extern crate serde;
 //! use pulsar::{
@@ -74,7 +74,7 @@
 //! ```
 //! 
 //! ### Consuming
-//! ```rust
+//! ```rust,no_run
 //! #[macro_use]
 //! extern crate serde;
 //! use futures::TryStreamExt;

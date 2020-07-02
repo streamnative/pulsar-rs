@@ -44,6 +44,7 @@ pub enum RequestKey {
     ProducerSend { producer_id: u64, sequence_id: u64 },
 }
 
+/// Authentication parameters
 #[derive(Clone)]
 pub struct Authentication {
     pub name: String,
