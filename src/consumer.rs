@@ -11,7 +11,6 @@ use futures::channel::mpsc::{unbounded, UnboundedSender};
 use futures::{channel::{mpsc, oneshot}, Future, FutureExt, Stream, StreamExt, SinkExt};
 use futures::future::{Either, try_join_all};
 use futures::task::{Context, Poll};
-use rand;
 use regex::Regex;
 
 use crate::connection:: Connection;
@@ -96,16 +95,16 @@ impl<T: DeserializeMessage> Consumer<T> {
             }
         }));
 
-        if let Some(_) = unacked_message_redelivery_delay {
+        if unacked_message_redelivery_delay.is_some() {
             let mut redelivery_tx = ack_tx.clone();
             let mut interval = Exe::interval(Duration::from_millis(500));
-            if let Err(_) = Exe::spawn(Box::pin(async move {
-              while let Some(_) = interval.next().await {
+            if Exe::spawn(Box::pin(async move {
+              while interval.next().await.is_some() {
                   if let Err(e) = redelivery_tx.send(AckMessage::UnackedRedelivery).await {
                       error!("could not send redelivery ticker: {:?}", e);
                   }
               }
-            })) {
+            })).is_err() {
                 return Err(Error::Executor);
             }
         }
@@ -115,14 +114,14 @@ impl<T: DeserializeMessage> Consumer<T> {
             connection.clone(),
             topic.clone(),
             subscription.clone(),
-            sub_type.clone(),
+            sub_type,
             consumer_id,
-            name.clone(),
+            name,
             tx,
             messages,
             ack_rx,
             batch_size,
-            unacked_message_redelivery_delay.clone(),
+            unacked_message_redelivery_delay,
             options.clone(),
             _drop_signal);
         let f = async move {
@@ -130,7 +129,7 @@ impl<T: DeserializeMessage> Consumer<T> {
                 debug!("consumer engine stopped: {:?}", res);
             }).await;
         };
-        if let Err(_) = Exe::spawn(Box::pin(f)) {
+        if Exe::spawn(Box::pin(f)).is_err() {
             return Err(Error::Executor);
         }
 
@@ -183,7 +182,7 @@ impl<T: DeserializeMessage> Consumer<T> {
             topic: self.topic.clone(),
             message_id: MessageData {
                 id: message_id,
-                batch_size: payload.metadata.num_messages_in_batch.clone(),
+                batch_size: payload.metadata.num_messages_in_batch,
             },
             payload,
             _phantom: PhantomData,
@@ -196,9 +195,9 @@ impl<T: DeserializeMessage> Stream for Consumer<T> {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match self.messages.as_mut().poll_next(cx) {
-            Poll::Pending => return Poll::Pending,
+            Poll::Pending => Poll::Pending,
             Poll::Ready(None) => {
-                return Poll::Ready(Some(Err(Error::Connection(ConnectionError::Disconnected))));
+                Poll::Ready(Some(Err(Error::Connection(ConnectionError::Disconnected))))
             }
             Poll::Ready(Some(Ok((id, payload )))) => {
                 Poll::Ready(Some(Ok(self.create_message(id, payload))))
@@ -398,16 +397,16 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
             (Some(message), Some(payload)) => (message, payload),
             (Some(message), None) => {
                 return Err(Error::Consumer(ConsumerError::MissingPayload(
-                                format!("expecting payload with {:?}", message))).into());
+                                format!("expecting payload with {:?}", message))));
             }
             (None, Some(_)) => {
                 return Err(Error::Consumer(ConsumerError::MissingPayload(
-                                format!("expecting 'message' command in {:?}", command))).into());
+                                format!("expecting 'message' command in {:?}", command))));
 
             }
             (None, None) => {
                 return Err(Error::Consumer(ConsumerError::MissingPayload(
-                                format!("expecting 'message' command and payload in {:?}", command))).into());
+                                format!("expecting 'message' command and payload in {:?}", command))));
             }
         };
 
@@ -500,7 +499,7 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
                 error!("unknown compression type: {}", i);
                 return Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
                                 std::io::ErrorKind::Other,
-                                format!("unknown compression type: {}", i)))).into());
+                                format!("unknown compression type: {}", i)))));
             }
         };
 
@@ -738,7 +737,7 @@ impl<'a, Exe: Executor> ConsumerBuilder<'a, Set<Regex>, Set<String>, Set<SubType
             sub_type,
             topic_refresh,
             unacked_message_resend_delay,
-            consumer_options.unwrap_or_else(|| ConsumerOptions::default()),
+            consumer_options.unwrap_or_else(ConsumerOptions::default),
         )
     }
 }

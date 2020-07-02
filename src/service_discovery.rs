@@ -53,13 +53,12 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
                 || response.response == Some(command_lookup_topic_response::LookupType::Failed as i32)
                 {
                 let error = response.error.and_then(crate::error::server_error);
-                if error == Some(crate::message::proto::ServerError::ServiceNotReady) {
-                    if max_retries > 0 {
-                        error!("lookup({}) answered ServiceNotReady, retrying request after 500ms (max_retries = {})", topic, max_retries);
-                        max_retries -= 1;
-                        Exe::delay(Duration::from_millis(500)).await;
-                        continue;
-                    }
+                if error == Some(crate::message::proto::ServerError::ServiceNotReady)
+                    && max_retries > 0 {
+                    error!("lookup({}) answered ServiceNotReady, retrying request after 500ms (max_retries = {})", topic, max_retries);
+                    max_retries -= 1;
+                    Exe::delay(Duration::from_millis(500)).await;
+                    continue;
                 }
                 return Err(ServiceDiscoveryError::Query(error, response.message.clone()));
             }
@@ -106,7 +105,7 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
                     .get_connection(&broker_address)
                     .await
                     .map(|_| broker_address)
-                    .map_err(|e| ServiceDiscoveryError::Connection(e));
+                    .map_err(ServiceDiscoveryError::Connection);
                 break res;
             }
         }
@@ -136,13 +135,13 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
                 || response.response == Some(command_partitioned_topic_metadata_response::LookupType::Failed as i32)
                 {
                 let error = response.error.and_then(crate::error::server_error);
-                if error == Some(crate::message::proto::ServerError::ServiceNotReady) {
-                    if max_retries > 0 {
-                        error!("lookup_partitioned_topic_number({}) answered ServiceNotReady, retrying request after 500ms (max_retries = {})", topic, max_retries);
-                        max_retries -= 1;
-                        Exe::delay(Duration::from_millis(500)).await;
-                        continue;
-                    }
+                if error == Some(crate::message::proto::ServerError::ServiceNotReady)
+                    && max_retries > 0 {
+
+                    error!("lookup_partitioned_topic_number({}) answered ServiceNotReady, retrying request after 500ms (max_retries = {})", topic, max_retries);
+                    max_retries -= 1;
+                    Exe::delay(Duration::from_millis(500)).await;
+                    continue;
                 }
                 return Err(ServiceDiscoveryError::Query(error, response.message.clone()));
             }

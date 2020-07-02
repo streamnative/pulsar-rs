@@ -3,7 +3,6 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::io::Write;
 use futures::channel::oneshot;
-use rand;
 
 use crate::client::SerializeMessage;
 use crate::connection::{Connection, SerialId};
@@ -205,8 +204,8 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
             .lookup_topic(topic.clone(), false).await?;
 
         let topic = topic.clone();
-        let batch_size = options.batch_size.clone();
-        let compression = options.compression.clone();
+        let batch_size = options.batch_size;
+        let compression = options.compression;
 
         match compression {
             None | Some(CompressionType::None) => {},
@@ -479,10 +478,10 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
                 self.message_id.get(),
                 msg,
                 ).await {
-                Ok(receipt) => return Ok(receipt),
+                Ok(receipt) => Ok(receipt),
                 Err(e) => {
                     error!("send_inner got error: {:?}", e);
-                    return Err(ProducerError::Connection(e).into());
+                    Err(ProducerError::Connection(e).into())
                 }
             }
 
@@ -496,17 +495,17 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
         self.connection = conn;
 
         let topic = self.topic.clone();
-        let batch_size = self.options.batch_size.clone();
+        let batch_size = self.options.batch_size;
 
         let _ = self.connection.sender()
-            .create_producer(topic.clone(), self.id.clone(), Some(self.name.clone()), self.options.clone()).await?;
+            .create_producer(topic.clone(), self.id, Some(self.name.clone()), self.options.clone()).await?;
 
         // drop_signal will be dropped when the TopicProducer is dropped, then
         // drop_receiver will return, and we can close the producer
         let (_drop_signal, drop_receiver) = oneshot::channel::<()>();
         let batch =  batch_size.map(Batch::new).map(Mutex::new);
         let conn = self.connection.clone();
-        let producer_id = self.id.clone();
+        let producer_id = self.id;
         let _ = Exe::spawn(Box::pin(async move {
             let _res = drop_receiver.await;
              let _ = conn.sender().close_producer(producer_id).await;

@@ -473,7 +473,7 @@ impl Connection {
             }).ok().and_then(|v| {
                 let mut rng = thread_rng();
                 let index:usize = rng.gen_range(0, v.len());
-                v.get(index).map(|a| *a)
+                v.get(index).copied()
             })
         }).await {
             Some(Some(address)) => address,
@@ -606,26 +606,26 @@ impl Connection {
             let error = SharedError::new();
             let (receiver_shutdown_tx, receiver_shutdown_rx) = oneshot::channel();
 
-            if let Err(_) = Exe::spawn(Box::pin(Receiver::new(
+            if Exe::spawn(Box::pin(Receiver::new(
                         stream,
                         tx.clone(),
                         error.clone(),
                         registrations_rx,
                         receiver_shutdown_rx,
-                        ).map(|_| ()))) {
+                        ).map(|_| ()))).is_err() {
                 error!("the executor could not spawn the Receiver future");
                 return Err(ConnectionError::Shutdown);
             }
 
             let err = error.clone();
-            if let Err(_) = Exe::spawn(Box::pin(async move {
+            if Exe::spawn(Box::pin(async move {
                 while let Some(msg) = rx.next().await {
                     if let Err(e) = sink.send(msg).await {
                         err.set(e);
                         break;
                     }
                 }
-            })) {
+            })).is_err() {
                 error!("the executor could not spawn the Receiver future");
                 return Err(ConnectionError::Shutdown);
             }

@@ -177,7 +177,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                 .lock()
                 .unwrap()
                 .entry(broker.clone())
-                .or_insert(ConnectionStatus::Connecting(Vec::new()))
+                .or_insert_with(|| ConnectionStatus::Connecting(Vec::new()))
             {
                 ConnectionStatus::Connecting(ref mut v) => {
                     if v.is_empty() {
@@ -220,11 +220,11 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                 Ok(c) => break c,
                 Err(ConnectionError::Io(e)) => {
                     if e.kind() != std::io::ErrorKind::ConnectionRefused {
-                        return Err(ConnectionError::Io(e).into());
+                        return Err(ConnectionError::Io(e));
                     }
 
                     if current_retries == self.back_off_options.max_retries {
-                        return Err(ConnectionError::Io(e).into());
+                        return Err(ConnectionError::Io(e));
                     }
 
                     let jitter = rand::thread_rng().gen_range(0, 10);
@@ -239,7 +239,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                     error!("connection error, retrying connection to {} after {}ms", broker.url, current_backoff.as_millis());
                     Exe::delay(current_backoff).await;
                 },
-                Err(e) => return Err(e.into()),
+                Err(e) => return Err(e),
             }
         };
         info!("Connected to {} in {}ms", broker.url, (std::time::Instant::now() - start).as_millis());

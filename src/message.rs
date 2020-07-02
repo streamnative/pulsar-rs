@@ -150,7 +150,7 @@ impl tokio_util::codec::Decoder for Codec {
                         })?;
                     let command = BaseCommand::decode(command_frame.command)?;
 
-                    let payload = if buf.len() > 0 {
+                    let payload = if !buf.is_empty() {
                         let (buf, payload_frame) = payload_frame(buf).map_err(|err| {
                             ConnectionError::Decoding(format!(
                                 "Error decoding payload frame: {:?}",
@@ -254,7 +254,7 @@ impl futures_codec::Decoder for Codec {
                         })?;
                     let command = BaseCommand::decode(command_frame.command)?;
 
-                    let payload = if buf.len() > 0 {
+                    let payload = if !buf.is_empty() {
                         let (buf, payload_frame) = payload_frame(buf).map_err(|err| {
                             ConnectionError::Decoding(format!(
                                 "Error decoding payload frame: {:?}",
