@@ -740,6 +740,7 @@ pub struct ConsumerBuilder<'a, Topic, Subscription, SubscriptionType, Exe: Execu
     consumer_name: Option<String>,
     batch_size: Option<u32>,
     unacked_message_resend_delay: Option<Duration>,
+    dead_letter_policy: Option<DeadLetterPolicy>,
     consumer_options: Option<ConsumerOptions>,
 
     // Currently only used for multi-topic
@@ -829,6 +830,7 @@ impl<'a, Exe: Executor + ?Sized> ConsumerBuilder<'a, Unset, Unset, Unset, Exe> {
             batch_size: None,
             //TODO what should this default to? None seems incorrect..
             unacked_message_resend_delay: None,
+            dead_letter_policy: None,
             consumer_options: None,
             namespace: None,
             topic_refresh: None,
@@ -855,6 +857,7 @@ impl<'a, Subscription, SubscriptionType, Exe: Executor + ?Sized>
             namespace: self.namespace,
             topic_refresh: self.topic_refresh,
             unacked_message_resend_delay: self.unacked_message_resend_delay,
+            dead_letter_policy: self.dead_letter_policy,
         }
     }
 
@@ -874,6 +877,7 @@ impl<'a, Subscription, SubscriptionType, Exe: Executor + ?Sized>
             namespace: self.namespace,
             topic_refresh: self.topic_refresh,
             unacked_message_resend_delay: self.unacked_message_resend_delay,
+            dead_letter_policy: self.dead_letter_policy,
         }
     }
 }
@@ -897,6 +901,7 @@ impl<'a, Topic, SubscriptionType, Exe: Executor + ?Sized>
             namespace: self.namespace,
             topic_refresh: self.topic_refresh,
             unacked_message_resend_delay: self.unacked_message_resend_delay,
+            dead_letter_policy: self.dead_letter_policy,
         }
     }
 }
@@ -920,6 +925,7 @@ impl<'a, Topic, Subscription, Exe: Executor + ?Sized>
             namespace: self.namespace,
             topic_refresh: self.topic_refresh,
             unacked_message_resend_delay: self.unacked_message_resend_delay,
+            dead_letter_policy: self.dead_letter_policy,
         }
     }
 }
@@ -943,6 +949,7 @@ impl<'a, Subscription, SubscriptionType, Exe: Executor + ?Sized>
             namespace: Some(namespace.into()),
             topic_refresh: self.topic_refresh,
             unacked_message_resend_delay: self.unacked_message_resend_delay,
+            dead_letter_policy: self.dead_letter_policy,
         }
     }
 
@@ -962,8 +969,19 @@ impl<'a, Subscription, SubscriptionType, Exe: Executor + ?Sized>
             namespace: self.namespace,
             topic_refresh: Some(refresh_interval),
             unacked_message_resend_delay: self.unacked_message_resend_delay,
+            dead_letter_policy: self.dead_letter_policy,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct DeadLetterPolicy {
+    //Maximum number of times that a message will be redelivered before being sent to the dead letter queue.
+    max_redeliver_count: usize,
+    // Name of the retry topic where the failing messages will be sent.
+    retry_letter_topic: String,
+    //Name of the dead topic where the failing messages will be sent.
+    dead_letter_topic: String,
 }
 
 impl<'a, Topic, Subscription, SubscriptionType, Exe: Executor + ?Sized>
@@ -1006,6 +1024,11 @@ impl<'a, Topic, Subscription, SubscriptionType, Exe: Executor + ?Sized>
     /// consumer disconnects with pending unacknowledged messages.
     pub fn with_unacked_message_resend_delay(mut self, delay: Option<Duration>) -> Self {
         self.unacked_message_resend_delay = delay;
+        self
+    }
+
+    pub fn with_dead_letter_policy(mut self, dead_letter_policy: Option<DeadLetterPolicy>) -> Self {
+        self.dead_letter_policy = dead_letter_policy;
         self
     }
 }
