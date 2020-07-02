@@ -280,22 +280,22 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
         Ok(())
     }
 
-    // sends a message
-    //
-    // this function returns a `Receiver` because the receipt can come long after
-    // this function was called, for various reasons:
-    // - the message was sent successfully but Pulsar did not send the receipt yet
-    // - the producer is batching messages, so this function must return immediately,
-    // and the receipt will come when the batched messages are actually sent
-    //
-    // Usage:
-    //
-    // ```rust,ignore
-    // let f1 = producer.send("hello").await?;
-    // let f2 = producer.send("world").await?;
-    // let receipt1 = f.await;
-    // let receipt2 = f.await;
-    // ```
+    /// sends a message
+    ///
+    /// this function returns a `Receiver` because the receipt can come long after
+    /// this function was called, for various reasons:
+    /// - the message was sent successfully but Pulsar did not send the receipt yet
+    /// - the producer is batching messages, so this function must return immediately,
+    /// and the receipt will come when the batched messages are actually sent
+    ///
+    /// Usage:
+    ///
+    /// ```rust,ignore
+    /// let f1 = producer.send("hello").await?;
+    /// let f2 = producer.send("world").await?;
+    /// let receipt1 = f.await;
+    /// let receipt2 = f.await;
+    /// ```
     pub async fn send<T: SerializeMessage + Sized>(
         &mut self,
         message: T,

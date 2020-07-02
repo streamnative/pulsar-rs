@@ -39,6 +39,32 @@ pub struct ConsumerOptions {
 }
 
 /// the consumer is used to subscribe to a topic
+///
+/// ```rust,ignore
+/// let mut consumer: Consumer<TestData> = pulsar
+///     .consumer()
+///     .with_topic("non-persistent://public/default/test")
+///     .with_consumer_name("test_consumer")
+///     .with_subscription_type(SubType::Exclusive)
+///     .with_subscription("test_subscription")
+///     .build()
+///     .await?;
+///
+/// let mut counter = 0usize;
+/// while let Some(msg) = consumer.try_next().await? {
+///     consumer.ack(&msg).await?;
+///     let data = match msg.deserialize() {
+///         Ok(data) => data,
+///         Err(e) => {
+///             log::error!("could not deserialize message: {:?}", e);
+///             break;
+///         }
+///     };
+///
+///     counter += 1;
+///     log::info!("got {} messages", counter);
+/// }
+/// ```
 pub struct Consumer<T: DeserializeMessage> {
     connection: Arc<Connection>,
     topic: String,
