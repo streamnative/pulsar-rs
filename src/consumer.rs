@@ -1307,7 +1307,7 @@ mod tests {
             while let Some(res) = consumer.next().await {
                 match res {
                     Ok(message) => {
-                        consumer.ack(&message).await;
+                        consumer.ack(&message).await.unwrap();
                         let msg = message.deserialize().unwrap();
                         if !data.contains(&msg) {
                             panic!("Unexpected message: {:?}", &msg);
@@ -1397,7 +1397,7 @@ mod tests {
                 let msg = consumer.next().await.unwrap().unwrap();
                 println!("got message: {:?}", msg.payload);
                 assert_eq!(message, msg.deserialize().unwrap(), "we probably receive a message from a previous run of the test");
-                consumer.ack(&msg).await;
+                consumer.ack(&msg).await.unwrap();
             }
 
             {
@@ -1419,7 +1419,7 @@ mod tests {
                     let msg = val.unwrap().unwrap();
                     println!("got message: {:?}", msg.payload);
                     // cleanup for the next test
-                    consumer.ack(&msg).await;
+                    consumer.ack(&msg).await.unwrap();
                     // we should not receive a different message anyway
                     assert_eq!(message, msg.deserialize().unwrap());
                 }
