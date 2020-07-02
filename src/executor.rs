@@ -169,7 +169,7 @@ pub enum Delay {
     #[cfg(feature = "tokio-runtime")]
     Tokio(tokio::time::Delay),
     #[cfg(feature = "async-std-runtime")]
-    AsyncStd(Pin<Box<dyn Future<Output=()>+Send>>),
+    AsyncStd(Pin<Box<dyn Future<Output = ()> + Send>>),
 }
 
 impl Future for Delay {

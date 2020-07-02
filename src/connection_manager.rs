@@ -7,9 +7,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::channel::oneshot;
-use url::Url;
-use rand::Rng;
 use native_tls::Certificate;
+use rand::Rng;
+use url::Url;
 
 /// holds connection information for a broker
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -74,7 +74,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
         auth: Option<Authentication>,
         backoff: Option<BackOffOptions>,
         tls: Option<TlsOptions>,
-        ) -> Result<Self, ConnectionError> {
+    ) -> Result<Self, ConnectionError> {
         let back_off_options = backoff.unwrap_or_default();
         let tls_options = tls.unwrap_or_default();
         let url = Url::parse(&url).map_err(|e| {
@@ -87,13 +87,14 @@ impl<Exe: Executor> ConnectionManager<Exe> {
             Some(certificate_chain) => {
                 let mut v = vec![];
                 for cert in pem::parse_many(&certificate_chain).iter().rev() {
-                    v.push(Certificate::from_der(&cert.contents[..])
-                           .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?);
+                    v.push(
+                        Certificate::from_der(&cert.contents[..])
+                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?,
+                    );
                 }
                 v
-            },
+            }
         };
-
 
         let manager = ConnectionManager {
             url: url.clone(),
@@ -116,7 +117,11 @@ impl<Exe: Executor> ConnectionManager<Exe> {
     pub fn get_base_address(&self) -> BrokerAddress {
         BrokerAddress {
             url: self.url.clone(),
-            broker_url: format!("{}:{}", self.url.host_str().unwrap(), self.url.port().unwrap_or(6650)),
+            broker_url: format!(
+                "{}:{}",
+                self.url.host_str().unwrap(),
+                self.url.port().unwrap_or(6650)
+            ),
             proxy: false,
         }
     }
@@ -127,7 +132,11 @@ impl<Exe: Executor> ConnectionManager<Exe> {
     pub async fn get_base_connection(&self) -> Result<Arc<Connection>, ConnectionError> {
         let broker_address = BrokerAddress {
             url: self.url.clone(),
-            broker_url: format!("{}:{}", self.url.host_str().unwrap(), self.url.port().unwrap_or(6650)),
+            broker_url: format!(
+                "{}:{}",
+                self.url.host_str().unwrap(),
+                self.url.port().unwrap_or(6650)
+            ),
             proxy: false,
         };
 
@@ -150,7 +159,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                     } else {
                         None
                     }
-                },
+                }
                 Some(ConnectionStatus::Connecting(ref mut v)) => {
                     let (tx, rx) = oneshot::channel();
                     v.push(tx);
@@ -188,9 +197,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                         Some(rx)
                     }
                 }
-                ConnectionStatus::Connected(_) => {
-                    None
-                }
+                ConnectionStatus::Connected(_) => None,
             }
         };
         if let Some(rx) = rx {
@@ -216,7 +223,9 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                 self.auth.clone(),
                 proxy_url.clone(),
                 &self.certificate_chain,
-                ).await {
+            )
+            .await
+            {
                 Ok(c) => break c,
                 Err(ConnectionError::Io(e)) => {
                     if e.kind() != std::io::ErrorKind::ConnectionRefused {
@@ -230,19 +239,31 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                     let jitter = rand::thread_rng().gen_range(0, 10);
                     current_backoff = std::cmp::min(
                         self.back_off_options.min_backoff * 2u32.saturating_pow(current_retries),
-                        self.back_off_options.max_backoff)
-                        + self.back_off_options.min_backoff * jitter;
+                        self.back_off_options.max_backoff,
+                    ) + self.back_off_options.min_backoff * jitter;
                     current_retries += 1;
 
-                    trace!("current retries: {}, current_backoff(pow = {}): {}ms",
-                      current_retries, 2u32.pow(current_retries - 1), current_backoff.as_millis());
-                    error!("connection error, retrying connection to {} after {}ms", broker.url, current_backoff.as_millis());
+                    trace!(
+                        "current retries: {}, current_backoff(pow = {}): {}ms",
+                        current_retries,
+                        2u32.pow(current_retries - 1),
+                        current_backoff.as_millis()
+                    );
+                    error!(
+                        "connection error, retrying connection to {} after {}ms",
+                        broker.url,
+                        current_backoff.as_millis()
+                    );
                     Exe::delay(current_backoff).await;
-                },
+                }
                 Err(e) => return Err(e),
             }
         };
-        info!("Connected to {} in {}ms", broker.url, (std::time::Instant::now() - start).as_millis());
+        info!(
+            "Connected to {} in {}ms",
+            broker.url,
+            (std::time::Instant::now() - start).as_millis()
+        );
         let c = Arc::new(conn);
         let old = self
             .connections

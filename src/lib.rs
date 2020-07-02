@@ -1,9 +1,9 @@
-//! # Pure Rust async await client for Apache Pulsar 
+//! # Pure Rust async await client for Apache Pulsar
 //!
 //! This is a pure Rust client for Apache Pulsar that does not depend on the
 //! C++ Pulsar library. It provides an async/await based API, compatible with
 //! [Tokio](https://tokio.rs/) and [async-std](https://async.rs/).
-//! 
+//!
 //! Features:
 //! - URL based (`pulsar://` and `pulsar+ssl://`) connections with DNS lookup
 //! - multi topic consumers (based on a regex)
@@ -22,12 +22,12 @@
 //! use pulsar::{
 //!     message::proto, producer, Error as PulsarError, Pulsar, SerializeMessage, TokioExecutor,
 //! };
-//! 
+//!
 //! #[derive(Serialize, Deserialize)]
 //! struct TestData {
 //!     data: String,
 //! }
-//! 
+//!
 //! impl SerializeMessage for TestData {
 //!     fn serialize_message(input: &Self) -> Result<producer::Message, PulsarError> {
 //!         let payload = serde_json::to_vec(input).map_err(|e| PulsarError::Custom(e.to_string()))?;
@@ -37,11 +37,11 @@
 //!         })
 //!     }
 //! }
-//! 
+//!
 //! #[tokio::main]
 //! async fn main() -> Result<(), pulsar::Error> {
 //!     env_logger::init();
-//! 
+//!
 //!     let addr = "pulsar://127.0.0.1:6650";
 //!     let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await?;
 //!     let mut producer = pulsar
@@ -57,7 +57,7 @@
 //!         })
 //!         .build()
 //!         .await?;
-//! 
+//!
 //!     let mut counter = 0usize;
 //!     loop {
 //!         producer
@@ -65,14 +65,14 @@
 //!                 data: "data".to_string(),
 //!             })
 //!             .await?;
-//! 
+//!
 //!         counter += 1;
 //!         println!("{} messages", counter);
 //!         tokio::time::delay_for(std::time::Duration::from_millis(2000)).await;
 //!     }
 //! }
 //! ```
-//! 
+//!
 //! ### Consuming
 //! ```rust,no_run
 //! #[macro_use]
@@ -82,27 +82,27 @@
 //!     message::proto::command_subscribe::SubType, message::Payload, Consumer, DeserializeMessage,
 //!     Pulsar, TokioExecutor,
 //! };
-//! 
+//!
 //! #[derive(Serialize, Deserialize)]
 //! struct TestData {
 //!     data: String,
 //! }
-//! 
+//!
 //! impl DeserializeMessage for TestData {
 //!     type Output = Result<TestData, serde_json::Error>;
-//! 
+//!
 //!     fn deserialize_message(payload: &Payload) -> Self::Output {
 //!         serde_json::from_slice(&payload.data)
 //!     }
 //! }
-//! 
+//!
 //! #[tokio::main]
 //! async fn main() -> Result<(), pulsar::Error> {
 //!     env_logger::init();
-//! 
+//!
 //!     let addr = "pulsar://127.0.0.1:6650";
 //!     let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await?;
-//! 
+//!
 //!     let mut consumer: Consumer<TestData> = pulsar
 //!         .consumer()
 //!         .with_topic("test")
@@ -111,7 +111,7 @@
 //!         .with_subscription("test_subscription")
 //!         .build()
 //!         .await?;
-//! 
+//!
 //!     let mut counter = 0usize;
 //!     while let Some(msg) = consumer.try_next().await? {
 //!         consumer.ack(&msg).await?;
@@ -122,7 +122,7 @@
 //!                 break;
 //!             }
 //!         };
-//! 
+//!
 //!         if data.data.as_str() != "data" {
 //!             log::error!("Unexpected payload: {}", &data.data);
 //!             break;
@@ -130,7 +130,7 @@
 //!         counter += 1;
 //!         log::info!("got {} messages", counter);
 //!     }
-//! 
+//!
 //!     Ok(())
 //! }
 //! ```
@@ -149,25 +149,23 @@ extern crate serde;
 
 pub use client::{DeserializeMessage, Pulsar, SerializeMessage};
 pub use connection::Authentication;
-pub use connection_manager::{BackOffOptions, TlsOptions, BrokerAddress};
-pub use consumer::{
-    Consumer, ConsumerOptions, ConsumerState, MultiTopicConsumer,
-};
+pub use connection_manager::{BackOffOptions, BrokerAddress, TlsOptions};
+pub use consumer::{Consumer, ConsumerOptions, ConsumerState, MultiTopicConsumer};
 pub use error::Error;
+#[cfg(feature = "async-std-runtime")]
+pub use executor::AsyncStdExecutor;
 pub use executor::Executor;
 #[cfg(feature = "tokio-runtime")]
 pub use executor::TokioExecutor;
-#[cfg(feature = "async-std-runtime")]
-pub use executor::AsyncStdExecutor;
 pub use message::proto::command_subscribe::SubType;
-pub use producer::{Producer, ProducerOptions, MultiTopicProducer};
+pub use producer::{MultiTopicProducer, Producer, ProducerOptions};
 
 mod client;
 mod connection;
 mod connection_manager;
+pub mod consumer;
 pub mod error;
 mod executor;
-pub mod consumer;
 pub mod message;
 pub mod producer;
 mod service_discovery;
@@ -185,10 +183,10 @@ mod tests {
     use message::proto::command_subscribe::SubType;
 
     use crate::client::SerializeMessage;
-    use crate::message::Payload;
-    use crate::Error as PulsarError;
     #[cfg(feature = "tokio-runtime")]
     use crate::executor::TokioExecutor;
+    use crate::message::Payload;
+    use crate::Error as PulsarError;
 
     use super::*;
     use nom::lib::std::collections::BTreeSet;
@@ -263,8 +261,10 @@ mod tests {
         }
     }
 
-    use log::{Record, Metadata, LevelFilter};
-    pub struct SimpleLogger { pub tag: &'static str }
+    use log::{LevelFilter, Metadata, Record};
+    pub struct SimpleLogger {
+        pub tag: &'static str,
+    }
     impl log::Log for SimpleLogger {
         fn enabled(&self, _metadata: &Metadata) -> bool {
             //metadata.level() <= Level::Info
@@ -273,8 +273,14 @@ mod tests {
 
         fn log(&self, record: &Record) {
             if self.enabled(record.metadata()) {
-                println!("{} {} {}\t{}\t{}", chrono::Utc::now(), self.tag,
-                  record.level(), record.module_path().unwrap(), record.args());
+                println!(
+                    "{} {} {}\t{}\t{}",
+                    chrono::Utc::now(),
+                    self.tag,
+                    record.level(),
+                    record.module_path().unwrap(),
+                    record.args()
+                );
             }
         }
         fn flush(&self) {}
@@ -305,26 +311,24 @@ mod tests {
 
             info!("consumer created");
 
-            let mut producer = pulsar.producer()
-                .with_topic("test")
-                .build()
-                .await.unwrap();
+            let mut producer = pulsar.producer().with_topic("test").build().await.unwrap();
             info!("producer created");
 
             info!("will send message");
             for _ in 0u16..5000 {
-                producer.send(
-                    TestData {
+                producer
+                    .send(TestData {
                         data: "data".to_string(),
-                    },
-                ).await.unwrap();
+                    })
+                    .await
+                    .unwrap();
             }
 
             info!("sent");
             //let mut stream = consumer.take(5000);
             let mut count = 0usize;
             while let Ok(Some(msg)) = consumer.try_next().await {
-            //let res =  consumer.next().await.unwrap();
+                //let res =  consumer.next().await.unwrap();
                 //let msg = res.unwrap();
                 consumer.ack(&msg).await.unwrap();
                 let data = msg.deserialize().unwrap();
@@ -332,7 +336,7 @@ mod tests {
                     panic!("Unexpected payload: {}", &data.data);
                 }
 
-                count +=1;
+                count += 1;
 
                 if count % 500 == 0 {
                     info!("messages received: {}", count);
@@ -436,7 +440,10 @@ mod tests {
                 .map(|()| rand::thread_rng().sample(Alphanumeric))
                 .take(7)
                 .collect();
-            let mut producer = pulsar.create_producer(&topic, None, ProducerOptions::default()).await.unwrap();
+            let mut producer = pulsar
+                .create_producer(&topic, None, ProducerOptions::default())
+                .await
+                .unwrap();
 
             let mut consumer: Consumer<TestData> = pulsar
                 .consumer()
@@ -449,18 +456,17 @@ mod tests {
                 .await
                 .unwrap();
 
-
             for i in 0u8..message_count {
-                producer.send(
-                    TestData {
+                producer
+                    .send(TestData {
                         data: i.to_string(),
-                    },
-                    ).await.unwrap();
+                    })
+                    .await
+                    .unwrap();
             }
 
             let mut count = 0usize;
             while let Some(res) = consumer.next().await {
-
                 let message = res.unwrap();
                 let data = message.deserialize().unwrap();
                 tx.send(data.data.clone()).unwrap();
@@ -476,9 +482,8 @@ mod tests {
                     break;
                 }
             }
-                //FIXME .timeout(Duration::from_secs(15))
+            //FIXME .timeout(Duration::from_secs(15))
         };
-
 
         runtime.spawn(Box::pin(f));
 

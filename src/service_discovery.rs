@@ -1,7 +1,10 @@
 use crate::connection_manager::{BrokerAddress, ConnectionManager};
-use crate::error::{ServiceDiscoveryError, ConnectionError};
-use crate::executor:: Executor;
-use crate::message::proto::{command_lookup_topic_response, CommandLookupTopicResponse, command_partitioned_topic_metadata_response};
+use crate::error::{ConnectionError, ServiceDiscoveryError};
+use crate::executor::Executor;
+use crate::message::proto::{
+    command_lookup_topic_response, command_partitioned_topic_metadata_response,
+    CommandLookupTopicResponse,
+};
 use futures::{future::try_join_all, FutureExt};
 use std::{sync::Arc, time::Duration};
 use url::Url;
@@ -17,12 +20,8 @@ pub struct ServiceDiscovery<Exe: Executor + ?Sized> {
 }
 
 impl<Exe: Executor> ServiceDiscovery<Exe> {
-    pub fn with_manager(
-        manager: Arc<ConnectionManager<Exe>>,
-    ) -> Self {
-        ServiceDiscovery {
-            manager,
-        }
+    pub fn with_manager(manager: Arc<ConnectionManager<Exe>>) -> Self {
+        ServiceDiscovery { manager }
     }
 
     /// get the broker address for a topic
@@ -39,28 +38,39 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
 
         let mut max_retries = 20u8;
         loop {
-            let response = match conn.sender().lookup_topic(topic.to_string(), is_authoritative).await {
+            let response = match conn
+                .sender()
+                .lookup_topic(topic.to_string(), is_authoritative)
+                .await
+            {
                 Ok(res) => res,
                 Err(ConnectionError::Disconnected) => {
                     error!("tried to lookup a topic but connection was closed, reconnecting...");
                     conn = self.manager.get_connection(&broker_address).await?;
-                    conn.sender().lookup_topic(topic.to_string(), is_authoritative).await?
-                },
+                    conn.sender()
+                        .lookup_topic(topic.to_string(), is_authoritative)
+                        .await?
+                }
                 Err(e) => return Err(e.into()),
             };
 
             if response.response.is_none()
-                || response.response == Some(command_lookup_topic_response::LookupType::Failed as i32)
-                {
+                || response.response
+                    == Some(command_lookup_topic_response::LookupType::Failed as i32)
+            {
                 let error = response.error.and_then(crate::error::server_error);
                 if error == Some(crate::message::proto::ServerError::ServiceNotReady)
-                    && max_retries > 0 {
+                    && max_retries > 0
+                {
                     error!("lookup({}) answered ServiceNotReady, retrying request after 500ms (max_retries = {})", topic, max_retries);
                     max_retries -= 1;
                     Exe::delay(Duration::from_millis(500)).await;
                     continue;
                 }
-                return Err(ServiceDiscoveryError::Query(error, response.message.clone()));
+                return Err(ServiceDiscoveryError::Query(
+                    error,
+                    response.message.clone(),
+                ));
             }
 
             let LookupResponse {
@@ -84,7 +94,11 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
 
             let broker_url = match broker_url_tls {
                 Some(u) => format!("{}:{}", u.host_str().unwrap(), u.port().unwrap_or(6651)),
-                None => format!("{}:{}", broker_url.host_str().unwrap(), broker_url.port().unwrap_or(6650)),
+                None => format!(
+                    "{}:{}",
+                    broker_url.host_str().unwrap(),
+                    broker_url.port().unwrap_or(6650)
+                ),
             };
 
             broker_address = BrokerAddress {
@@ -127,23 +141,27 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
                     error!("tried to lookup a topic but connection was closed, reconnecting...");
                     connection = self.manager.get_base_connection().await?;
                     connection.sender().lookup_partitioned_topic(&topic).await?
-                },
+                }
                 Err(e) => return Err(e.into()),
             };
 
             if response.response.is_none()
-                || response.response == Some(command_partitioned_topic_metadata_response::LookupType::Failed as i32)
-                {
+                || response.response
+                    == Some(command_partitioned_topic_metadata_response::LookupType::Failed as i32)
+            {
                 let error = response.error.and_then(crate::error::server_error);
                 if error == Some(crate::message::proto::ServerError::ServiceNotReady)
-                    && max_retries > 0 {
-
+                    && max_retries > 0
+                {
                     error!("lookup_partitioned_topic_number({}) answered ServiceNotReady, retrying request after 500ms (max_retries = {})", topic, max_retries);
                     max_retries -= 1;
                     Exe::delay(Duration::from_millis(500)).await;
                     continue;
                 }
-                return Err(ServiceDiscoveryError::Query(error, response.message.clone()));
+                return Err(ServiceDiscoveryError::Query(
+                    error,
+                    response.message.clone(),
+                ));
             }
 
             break response;
@@ -151,9 +169,10 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
 
         match response.partitions {
             Some(partitions) => Ok(partitions),
-            None => {
-                Err(ServiceDiscoveryError::Query(response.error.and_then(crate::error::server_error), response.message))
-            }
+            None => Err(ServiceDiscoveryError::Query(
+                response.error.and_then(crate::error::server_error),
+                response.message,
+            )),
         }
     }
 
@@ -190,14 +209,13 @@ struct LookupResponse {
 fn convert_lookup_response(
     response: &CommandLookupTopicResponse,
 ) -> Result<LookupResponse, ServiceDiscoveryError> {
-
     let proxy = response.proxy_through_service_url.unwrap_or(false);
     let authoritative = response.authoritative.unwrap_or(false);
     let redirect =
         response.response == Some(command_lookup_topic_response::LookupType::Redirect as i32);
 
     if response.broker_service_url.is_none() {
-      return Err(ServiceDiscoveryError::NotFound);
+        return Err(ServiceDiscoveryError::NotFound);
     }
 
     let broker_url = Url::parse(&response.broker_service_url.clone().unwrap()).map_err(|e| {

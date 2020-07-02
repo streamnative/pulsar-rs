@@ -1,24 +1,27 @@
 //! Topic subscriptions
-use std::collections::{BTreeMap, BTreeSet, VecDeque, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::Debug;
 use std::marker::PhantomData;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use std::pin::Pin;
 
 use chrono::{DateTime, Utc};
 use futures::channel::mpsc::{unbounded, UnboundedSender};
-use futures::{channel::{mpsc, oneshot}, Future, FutureExt, Stream, StreamExt, SinkExt};
-use futures::future::{Either, try_join_all};
+use futures::future::{try_join_all, Either};
 use futures::task::{Context, Poll};
+use futures::{
+    channel::{mpsc, oneshot},
+    Future, FutureExt, SinkExt, Stream, StreamExt,
+};
 use regex::Regex;
 
-use crate::connection:: Connection;
+use crate::connection::Connection;
 use crate::error::{ConnectionError, ConsumerError, Error};
 use crate::executor::Executor;
 use crate::message::{
     parse_batched_message,
-    proto::{self, command_subscribe::SubType, MessageIdData, Schema, MessageMetadata},
+    proto::{self, command_subscribe::SubType, MessageIdData, MessageMetadata, Schema},
     BatchedMessage, Message as RawMessage, Metadata, Payload,
 };
 use crate::{DeserializeMessage, Pulsar};
@@ -39,7 +42,7 @@ pub struct ConsumerOptions {
 pub struct Consumer<T: DeserializeMessage> {
     connection: Arc<Connection>,
     topic: String,
-    messages: Pin<Box<mpsc::Receiver<Result<(proto::MessageIdData,Payload), Error>>>>,
+    messages: Pin<Box<mpsc::Receiver<Result<(proto::MessageIdData, Payload), Error>>>>,
     ack_tx: mpsc::UnboundedSender<AckMessage>,
     #[allow(unused)]
     data_type: PhantomData<fn(Payload) -> T::Output>,
@@ -63,7 +66,8 @@ impl<T: DeserializeMessage> Consumer<T> {
         let (resolver, messages) = mpsc::unbounded();
         let batch_size = batch_size.unwrap_or(1000);
 
-        connection.sender()
+        connection
+            .sender()
             .subscribe(
                 resolver,
                 topic.clone(),
@@ -72,9 +76,12 @@ impl<T: DeserializeMessage> Consumer<T> {
                 consumer_id,
                 consumer_name.clone(),
                 options.clone(),
-            ).await.map_err(Error::Connection)?;
+            )
+            .await
+            .map_err(Error::Connection)?;
 
-        connection.sender()
+        connection
+            .sender()
             .send_flow(consumer_id, batch_size)
             .map_err(|e| Error::Consumer(ConsumerError::Connection(e)))?;
 
@@ -90,7 +97,10 @@ impl<T: DeserializeMessage> Consumer<T> {
             // if we receive a message, it indicates we want to stop this task
             if _res.is_err() {
                 if let Err(e) = conn.sender().close_consumer(consumer_id).await {
-                  error!("could not close consumer {:?}({}): {:?}", consumer_name, consumer_id, e);
+                    error!(
+                        "could not close consumer {:?}({}): {:?}",
+                        consumer_name, consumer_id, e
+                    );
                 }
             }
         }));
@@ -99,12 +109,14 @@ impl<T: DeserializeMessage> Consumer<T> {
             let mut redelivery_tx = ack_tx.clone();
             let mut interval = Exe::interval(Duration::from_millis(500));
             if Exe::spawn(Box::pin(async move {
-              while interval.next().await.is_some() {
-                  if let Err(e) = redelivery_tx.send(AckMessage::UnackedRedelivery).await {
-                      error!("could not send redelivery ticker: {:?}", e);
-                  }
-              }
-            })).is_err() {
+                while interval.next().await.is_some() {
+                    if let Err(e) = redelivery_tx.send(AckMessage::UnackedRedelivery).await {
+                        error!("could not send redelivery ticker: {:?}", e);
+                    }
+                }
+            }))
+            .is_err()
+            {
                 return Err(Error::Executor);
             }
         }
@@ -123,11 +135,14 @@ impl<T: DeserializeMessage> Consumer<T> {
             batch_size,
             unacked_message_redelivery_delay,
             options.clone(),
-            _drop_signal);
+            _drop_signal,
+        );
         let f = async move {
-            c.engine().map(|res| {
-                debug!("consumer engine stopped: {:?}", res);
-            }).await;
+            c.engine()
+                .map(|res| {
+                    debug!("consumer engine stopped: {:?}", res);
+                })
+                .await;
         };
         if Exe::spawn(Box::pin(f)).is_err() {
             return Err(Error::Executor);
@@ -152,32 +167,32 @@ impl<T: DeserializeMessage> Consumer<T> {
     }
 
     pub async fn check_connection(&self) -> Result<(), Error> {
-        self.connection
-            .sender()
-            .send_ping().await?;
+        self.connection.sender().send_ping().await?;
         Ok(())
     }
 
     pub async fn ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
-        self.ack_tx.send(AckMessage::Ack(msg.message_id.clone(), false)).await?;
+        self.ack_tx
+            .send(AckMessage::Ack(msg.message_id.clone(), false))
+            .await?;
         Ok(())
     }
 
     pub async fn cumulative_ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
-        self.ack_tx.send(AckMessage::Ack(msg.message_id.clone(), true)).await?;
+        self.ack_tx
+            .send(AckMessage::Ack(msg.message_id.clone(), true))
+            .await?;
         Ok(())
     }
 
     pub async fn nack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
-        self.ack_tx.send(AckMessage::Nack(msg.message_id.clone())).await?;
+        self.ack_tx
+            .send(AckMessage::Nack(msg.message_id.clone()))
+            .await?;
         Ok(())
     }
 
-    fn create_message(
-        &self,
-        message_id: proto::MessageIdData,
-        payload: Payload,
-    ) -> Message<T> {
+    fn create_message(&self, message_id: proto::MessageIdData, payload: Payload) -> Message<T> {
         Message {
             topic: self.topic.clone(),
             message_id: MessageData {
@@ -199,7 +214,7 @@ impl<T: DeserializeMessage> Stream for Consumer<T> {
             Poll::Ready(None) => {
                 Poll::Ready(Some(Err(Error::Connection(ConnectionError::Disconnected))))
             }
-            Poll::Ready(Some(Ok((id, payload )))) => {
+            Poll::Ready(Some(Ok((id, payload)))) => {
                 Poll::Ready(Some(Ok(self.create_message(id, payload))))
             }
             Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
@@ -215,7 +230,7 @@ struct ConsumerEngine<Exe: Executor + ?Sized> {
     sub_type: SubType,
     id: u64,
     name: Option<String>,
-    tx: mpsc::Sender<Result<(proto::MessageIdData,Payload), Error>>,
+    tx: mpsc::Sender<Result<(proto::MessageIdData, Payload), Error>>,
     messages_rx: Option<mpsc::UnboundedReceiver<RawMessage>>,
     ack_rx: Option<mpsc::UnboundedReceiver<AckMessage>>,
     batch_size: u32,
@@ -232,7 +247,7 @@ enum AckMessage {
     UnackedRedelivery,
 }
 
-impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
+impl<Exe: Executor + ?Sized> ConsumerEngine<Exe> {
     fn new(
         client: Pulsar<Exe>,
         connection: Arc<Connection>,
@@ -241,15 +256,14 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
         sub_type: SubType,
         id: u64,
         name: Option<String>,
-        tx: mpsc::Sender<Result<(proto::MessageIdData,Payload), Error>>,
+        tx: mpsc::Sender<Result<(proto::MessageIdData, Payload), Error>>,
         messages_rx: mpsc::UnboundedReceiver<RawMessage>,
         ack_rx: mpsc::UnboundedReceiver<AckMessage>,
         batch_size: u32,
         unacked_message_redelivery_delay: Option<Duration>,
         options: ConsumerOptions,
         _drop_signal: oneshot::Sender<()>,
-        ) -> ConsumerEngine<Exe> {
-
+    ) -> ConsumerEngine<Exe> {
         ConsumerEngine {
             client,
             connection,
@@ -281,19 +295,20 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
             }
 
             if self.remaining_messages < self.batch_size / 2 {
-                match self.connection
+                match self
+                    .connection
                     .sender()
-                    .send_flow(self.id, self.batch_size - self.remaining_messages) {
-                        Ok(()) => {},
-                        Err(ConnectionError::Disconnected) => {
-                            self.reconnect().await?;
-                            self.connection
-                                .sender()
-                                .send_flow(self.id, self.batch_size - self.remaining_messages)?;
-                        },
-                        Err(e) => return Err(e.into()),
-
+                    .send_flow(self.id, self.batch_size - self.remaining_messages)
+                {
+                    Ok(()) => {}
+                    Err(ConnectionError::Disconnected) => {
+                        self.reconnect().await?;
+                        self.connection
+                            .sender()
+                            .send_flow(self.id, self.batch_size - self.remaining_messages)?;
                     }
+                    Err(e) => return Err(e.into()),
+                }
                 self.remaining_messages = self.batch_size;
             }
 
@@ -314,7 +329,7 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
                             self.reconnect().await?;
                             continue;
                             //return Err(Error::Consumer(ConsumerError::Connection(ConnectionError::Disconnected)).into());
-                        },
+                        }
                         Some(message) => {
                             self.remaining_messages -= 1;
                             if let Err(e) = self.process_message(message).await {
@@ -324,9 +339,8 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
                                 }
                             }
                         }
-
                     }
-                },
+                }
                 Either::Right(((ack_opt, ack_rx), messages_rx)) => {
                     self.messages_rx = messages_rx.into_inner();
                     self.ack_rx = Some(ack_rx);
@@ -335,29 +349,34 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
                         None => {
                             trace!("ack channel was closed");
                             return Ok(());
-                        },
+                        }
                         Some(AckMessage::Ack(message_id, cumulative)) => {
                             //FIXME: this does not handle cumulative acks
                             self.unacked_messages.remove(&message_id.id);
-                            let res = self
-                                .connection
-                                .sender()
-                                .send_ack(
-                                    self.id,
-                                    vec![message_id.id.clone()],
-                                    cumulative);
+                            let res = self.connection.sender().send_ack(
+                                self.id,
+                                vec![message_id.id.clone()],
+                                cumulative,
+                            );
                             if res.is_err() {
                                 error!("ack error: {:?}", res);
                             }
-                        },
+                        }
                         Some(AckMessage::Nack(message_id)) => {
                             if let Err(e) = self
                                 .connection
                                 .sender()
-                                .send_redeliver_unacknowleged_messages(self.id, vec![message_id.id.clone()]) {
-                                    error!("could not ask for redelivery for message {:?}: {:?}", message_id, e);
-                                }
-                        },
+                                .send_redeliver_unacknowleged_messages(
+                                    self.id,
+                                    vec![message_id.id.clone()],
+                                )
+                            {
+                                error!(
+                                    "could not ask for redelivery for message {:?}: {:?}",
+                                    message_id, e
+                                );
+                            }
+                        }
                         Some(AckMessage::UnackedRedelivery) => {
                             let mut h = HashSet::new();
                             let now = Instant::now();
@@ -368,15 +387,14 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
                                 }
                             }
 
-
                             let ids: Vec<_> = h.iter().cloned().collect();
                             if !ids.is_empty() {
                                 //info!("will unack ids: {:?}", ids);
                                 if let Err(e) = self
                                     .connection
                                     .sender()
-                                    .send_redeliver_unacknowleged_messages(self.id, ids) {
-
+                                    .send_redeliver_unacknowleged_messages(self.id, ids)
+                                {
                                     error!("could not ask for redelivery: {:?}", e);
                                 } else {
                                     for i in h.iter() {
@@ -384,7 +402,7 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
                                     }
                                 }
                             }
-                        },
+                        }
                     }
                 }
             };
@@ -396,17 +414,22 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
         let (message, mut payload) = match (command.message.clone(), payload) {
             (Some(message), Some(payload)) => (message, payload),
             (Some(message), None) => {
-                return Err(Error::Consumer(ConsumerError::MissingPayload(
-                                format!("expecting payload with {:?}", message))));
+                return Err(Error::Consumer(ConsumerError::MissingPayload(format!(
+                    "expecting payload with {:?}",
+                    message
+                ))));
             }
             (None, Some(_)) => {
-                return Err(Error::Consumer(ConsumerError::MissingPayload(
-                                format!("expecting 'message' command in {:?}", command))));
-
+                return Err(Error::Consumer(ConsumerError::MissingPayload(format!(
+                    "expecting 'message' command in {:?}",
+                    command
+                ))));
             }
             (None, None) => {
-                return Err(Error::Consumer(ConsumerError::MissingPayload(
-                                format!("expecting 'message' command and payload in {:?}", command))));
+                return Err(Error::Consumer(ConsumerError::MissingPayload(format!(
+                    "expecting 'message' command and payload in {:?}",
+                    command
+                ))));
             }
         };
 
@@ -419,8 +442,10 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
                 #[cfg(not(feature = "lz4"))]
                 {
                     return Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
-                                    std::io::ErrorKind::Other,
-                                    "got a LZ4 compressed message but 'lz4' cargo feature is deactivated"))).into());
+                        std::io::ErrorKind::Other,
+                        "got a LZ4 compressed message but 'lz4' cargo feature is deactivated",
+                    )))
+                    .into());
                 }
 
                 #[cfg(feature = "lz4")]
@@ -428,59 +453,70 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
                     use std::io::Read;
 
                     let mut decompressed_payload = Vec::new();
-                    let mut decoder = lz4::Decoder::new(&payload.data[..]).map_err(ConsumerError::Io)?;
-                    decoder.read_to_end(&mut decompressed_payload).map_err(ConsumerError::Io)?;
+                    let mut decoder =
+                        lz4::Decoder::new(&payload.data[..]).map_err(ConsumerError::Io)?;
+                    decoder
+                        .read_to_end(&mut decompressed_payload)
+                        .map_err(ConsumerError::Io)?;
 
                     payload.data = decompressed_payload;
                     payload
                 }
-            },
+            }
             // zlib
             Some(2) => {
                 #[cfg(not(feature = "flate2"))]
                 {
                     return Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
-                                    std::io::ErrorKind::Other,
-                                    "got a zlib compressed message but 'flate2' cargo feature is deactivated"))).into());
+                        std::io::ErrorKind::Other,
+                        "got a zlib compressed message but 'flate2' cargo feature is deactivated",
+                    )))
+                    .into());
                 }
 
                 #[cfg(feature = "flate2")]
                 {
-                    use std::io::Read;
                     use flate2::read::ZlibDecoder;
+                    use std::io::Read;
 
                     let mut d = ZlibDecoder::new(&payload.data[..]);
                     let mut decompressed_payload = Vec::new();
-                    d.read_to_end(&mut decompressed_payload).map_err(ConsumerError::Io)?;
+                    d.read_to_end(&mut decompressed_payload)
+                        .map_err(ConsumerError::Io)?;
 
                     payload.data = decompressed_payload;
                     payload
                 }
-            },
+            }
             // zstd
             Some(3) => {
                 #[cfg(not(feature = "zstd"))]
                 {
                     return Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
-                                    std::io::ErrorKind::Other,
-                                    "got a zstd compressed message but 'zstd' cargo feature is deactivated"))).into());
+                        std::io::ErrorKind::Other,
+                        "got a zstd compressed message but 'zstd' cargo feature is deactivated",
+                    )))
+                    .into());
                 }
 
                 #[cfg(feature = "zstd")]
                 {
-                    let decompressed_payload = zstd::decode_all(&payload.data[..]).map_err(ConsumerError::Io)?;
+                    let decompressed_payload =
+                        zstd::decode_all(&payload.data[..]).map_err(ConsumerError::Io)?;
 
                     payload.data = decompressed_payload;
                     payload
                 }
-            },
+            }
             //Snappy
             Some(4) => {
                 #[cfg(not(feature = "snap"))]
                 {
                     return Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
-                                    std::io::ErrorKind::Other,
-                                    "got a Snappy compressed message but 'snap' cargo feature is deactivated"))).into());
+                        std::io::ErrorKind::Other,
+                        "got a Snappy compressed message but 'snap' cargo feature is deactivated",
+                    )))
+                    .into());
                 }
 
                 #[cfg(feature = "snap")]
@@ -489,17 +525,20 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
 
                     let mut decompressed_payload = Vec::new();
                     let mut decoder = snap::read::FrameDecoder::new(&payload.data[..]);
-                    decoder.read_to_end(&mut decompressed_payload).map_err(ConsumerError::Io)?;
+                    decoder
+                        .read_to_end(&mut decompressed_payload)
+                        .map_err(ConsumerError::Io)?;
 
                     payload.data = decompressed_payload;
                     payload
                 }
-            },
+            }
             Some(i) => {
                 error!("unknown compression type: {}", i);
                 return Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
-                                std::io::ErrorKind::Other,
-                                format!("unknown compression type: {}", i)))));
+                    std::io::ErrorKind::Other,
+                    format!("unknown compression type: {}", i),
+                ))));
             }
         };
 
@@ -508,8 +547,7 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
                 let it = BatchedMessageIterator::new(message.message_id, payload)?;
                 let now = Instant::now();
                 for (id, payload) in it {
-                    self.tx.send(Ok((id.clone(), payload))).await
-                    .map_err(|e| {
+                    self.tx.send(Ok((id.clone(), payload))).await.map_err(|e| {
                         error!("tx returned {:?}", e);
                         Error::Custom("tx closed".to_string())
                     })?;
@@ -519,7 +557,9 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
                 }
             }
             None => {
-                self.tx.send(Ok((message.message_id.clone(), payload))).await
+                self.tx
+                    .send(Ok((message.message_id.clone(), payload)))
+                    .await
                     .map_err(|e| {
                         error!("tx returned {:?}", e);
                         Error::Custom("tx closed".to_string())
@@ -527,7 +567,8 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
                 if let Some(duration) = self.unacked_message_redelivery_delay {
                     //info!("inserting id {:?} to trigger unack at {:?}",
                     //      message.message_id, Instant::now()+duration);
-                    self.unacked_messages.insert(message.message_id, Instant::now() + duration);
+                    self.unacked_messages
+                        .insert(message.message_id, Instant::now() + duration);
                 }
             }
         }
@@ -545,7 +586,8 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
         let topic = self.topic.clone();
         let (resolver, messages) = mpsc::unbounded();
 
-        self.connection.sender()
+        self.connection
+            .sender()
             .subscribe(
                 resolver,
                 topic.clone(),
@@ -554,9 +596,12 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
                 self.id,
                 self.name.clone(),
                 self.options.clone(),
-                ).await.map_err(Error::Connection)?;
+            )
+            .await
+            .map_err(Error::Connection)?;
 
-        self.connection.sender()
+        self.connection
+            .sender()
             .send_flow(self.id, self.batch_size)
             .map_err(|e| Error::Consumer(ConsumerError::Connection(e)))?;
 
@@ -579,12 +624,14 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe>{
         }));
         let old_signal = std::mem::replace(&mut self._drop_signal, _drop_signal);
         if let Err(e) = old_signal.send(()) {
-            error!("could not send the drop signal to the old consumer(id={}): {:?}", id, e);
+            error!(
+                "could not send the drop signal to the old consumer(id={}): {:?}",
+                id, e
+            );
         }
 
         Ok(())
     }
-
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -689,16 +736,18 @@ impl<'a, Exe: Executor> ConsumerBuilder<'a, Set<String>, Set<String>, Set<SubTyp
             ..
         } = self;
 
-        pulsar.create_consumer(
-            topic,
-            subscription,
-            sub_type,
-            batch_size,
-            consumer_name,
-            consumer_id,
-            unacked_message_resend_delay,
-            consumer_options.unwrap_or_else(ConsumerOptions::default),
-        ).await
+        pulsar
+            .create_consumer(
+                topic,
+                subscription,
+                sub_type,
+                batch_size,
+                consumer_name,
+                consumer_id,
+                unacked_message_resend_delay,
+                consumer_options.unwrap_or_else(ConsumerOptions::default),
+            )
+            .await
     }
 }
 
@@ -803,7 +852,9 @@ impl<'a, Subscription, SubscriptionType, Exe: Executor + ?Sized>
     }
 }
 
-impl<'a, Topic, SubscriptionType, Exe: Executor + ?Sized> ConsumerBuilder<'a, Topic, Unset, SubscriptionType, Exe> {
+impl<'a, Topic, SubscriptionType, Exe: Executor + ?Sized>
+    ConsumerBuilder<'a, Topic, Unset, SubscriptionType, Exe>
+{
     pub fn with_subscription<S: Into<String>>(
         self,
         subscription: S,
@@ -824,7 +875,9 @@ impl<'a, Topic, SubscriptionType, Exe: Executor + ?Sized> ConsumerBuilder<'a, To
     }
 }
 
-impl<'a, Topic, Subscription, Exe: Executor + ?Sized> ConsumerBuilder<'a, Topic, Subscription, Unset, Exe> {
+impl<'a, Topic, Subscription, Exe: Executor + ?Sized>
+    ConsumerBuilder<'a, Topic, Subscription, Unset, Exe>
+{
     pub fn with_subscription_type(
         self,
         subscription_type: SubType,
@@ -981,9 +1034,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
             topics: VecDeque::new(),
             new_consumers: None,
             refresh: Box::pin(
-                Exe::interval(topic_refresh)
-                    .map(drop)
-                    //.map_err(|e| panic!("error creating referesh timer: {}", e)),
+                Exe::interval(topic_refresh).map(drop), //.map_err(|e| panic!("error creating referesh timer: {}", e)),
             ),
             subscription: subscription.into(),
             sub_type,
@@ -1078,14 +1129,14 @@ pub struct Message<T> {
 }
 
 impl<T> Message<T> {
-  pub fn metadata(&self) -> &MessageMetadata {
-    &self.payload.metadata
-  }
+    pub fn metadata(&self) -> &MessageMetadata {
+        &self.payload.metadata
+    }
 }
 impl<T: DeserializeMessage> Message<T> {
-  pub fn deserialize(&self) -> T::Output {
-      T::deserialize_message(&self.payload)
-  }
+    pub fn deserialize(&self) -> T::Output {
+        T::deserialize_message(&self.payload)
+    }
 }
 
 impl<T: DeserializeMessage, Exe: Executor> Debug for MultiTopicConsumer<T, Exe> {
@@ -1130,16 +1181,14 @@ impl<T: 'static + DeserializeMessage, Exe: Executor> Stream for MultiTopicConsum
 
             let new_consumers = Box::pin(async move {
                 let topics: Vec<String> = pulsar
-                    .get_topics_of_namespace(namespace.clone(), proto::get_topics::Mode::All).await?;
+                    .get_topics_of_namespace(namespace.clone(), proto::get_topics::Mode::All)
+                    .await?;
                 trace!("fetched topics: {:?}", &topics);
 
                 let mut v = vec![];
-                for topic in topics
-                             .into_iter()
-                             .filter(move |topic| {
-                                 !existing_topics.contains(topic)
-                                     && regex.is_match(topic.as_str())
-                             }) {
+                for topic in topics.into_iter().filter(move |topic| {
+                    !existing_topics.contains(topic) && regex.is_match(topic.as_str())
+                }) {
                     trace!("creating consumer for topic {}", topic);
                     //let pulsar = pulsar.clone();
                     let subscription = subscription.clone();
@@ -1168,7 +1217,11 @@ impl<T: 'static + DeserializeMessage, Exe: Executor> Stream for MultiTopicConsum
                 break;
             }
             let topic = self.topics.pop_front().unwrap();
-            if let Some(item) = self.consumers.get_mut(&topic).map(|c| c.as_mut().poll_next(cx)) {
+            if let Some(item) = self
+                .consumers
+                .get_mut(&topic)
+                .map(|c| c.as_mut().poll_next(cx))
+            {
                 match item {
                     Poll::Pending => {}
                     Poll::Ready(Some(Ok(msg))) => result = Some(msg),
@@ -1206,14 +1259,14 @@ mod tests {
     use std::sync::Mutex;
     use std::thread;
 
+    use log::LevelFilter;
     use regex::Regex;
     #[cfg(feature = "tokio-runtime")]
     use tokio::runtime::Runtime;
-    use log::{LevelFilter};
 
-    use crate::{producer, Pulsar, SerializeMessage, tests::TEST_LOGGER};
     #[cfg(feature = "tokio-runtime")]
     use crate::executor::TokioExecutor;
+    use crate::{producer, tests::TEST_LOGGER, Pulsar, SerializeMessage};
 
     use super::*;
 
@@ -1241,7 +1294,9 @@ mod tests {
         }
     }
 
-    pub static MULTI_LOGGER: crate::tests::SimpleLogger = crate::tests::SimpleLogger { tag: "multi_consumer" };
+    pub static MULTI_LOGGER: crate::tests::SimpleLogger = crate::tests::SimpleLogger {
+        tag: "multi_consumer",
+    };
     #[test]
     #[cfg(feature = "tokio-runtime")]
     fn multi_consumer() {
@@ -1297,7 +1352,10 @@ mod tests {
                 .with_subscription_type(SubType::Shared)
                 .with_topic_refresh(Duration::from_secs(1))
                 // get earliest messages
-                .with_options(ConsumerOptions { initial_position: Some(1), ..Default::default() })
+                .with_options(ConsumerOptions {
+                    initial_position: Some(1),
+                    ..Default::default()
+                })
                 .build();
 
             let consumer_state = consumer.start_state_stream();
@@ -1313,12 +1371,12 @@ mod tests {
                         } else {
                             succ.fetch_add(1, Ordering::Relaxed);
                         }
-                    },
+                    }
                     Err(e) => {
                         let err = err.clone();
                         let mut error = err.lock().unwrap();
                         *error = Some(e);
-                    },
+                    }
                 }
 
                 counter += 1;
@@ -1327,7 +1385,8 @@ mod tests {
                 }
             }
 
-            let consumer_state: Vec<ConsumerState> = consumer_state.collect::<Vec<ConsumerState>>().await;
+            let consumer_state: Vec<ConsumerState> =
+                consumer_state.collect::<Vec<ConsumerState>>().await;
             let latest_state = consumer_state.last().unwrap();
             assert!(latest_state.messages_received >= 4);
             assert!(latest_state.connected_topics.len() >= 2);
@@ -1346,13 +1405,12 @@ mod tests {
             }
             thread::sleep(Duration::from_millis(100));
         }
-
     }
 
     #[test]
     #[cfg(feature = "tokio-runtime")]
     fn consumer_dropped_with_lingering_acks() {
-        use rand::{Rng, distributions::Alphanumeric};
+        use rand::{distributions::Alphanumeric, Rng};
         let _ = log::set_logger(&TEST_LOGGER);
         let _ = log::set_max_level(LevelFilter::Debug);
         let addr = "pulsar://127.0.0.1:6650";
@@ -1364,16 +1422,18 @@ mod tests {
             let client: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await.unwrap();
 
             let message = TestData {
-                topic: std::iter::repeat(()).map(|()| rand::thread_rng().sample(Alphanumeric))
-                    .take(8).collect(),
+                topic: std::iter::repeat(())
+                    .map(|()| rand::thread_rng().sample(Alphanumeric))
+                    .take(8)
+                    .collect(),
                 msg: 1,
             };
 
             {
-                let mut producer = client.create_producer(
-                    topic,
-                    None,
-                    producer::ProducerOptions::default()).await.unwrap();
+                let mut producer = client
+                    .create_producer(topic, None, producer::ProducerOptions::default())
+                    .await
+                    .unwrap();
 
                 producer.send(message.clone()).await.unwrap();
                 println!("producer sends done");
@@ -1387,15 +1447,24 @@ mod tests {
                     .with_subscription("dropped_ack")
                     .with_subscription_type(SubType::Shared)
                     // get earliest messages
-                    .with_options(ConsumerOptions { initial_position: Some(1), ..Default::default() })
-                    .build().await.unwrap();
+                    .with_options(ConsumerOptions {
+                        initial_position: Some(1),
+                        ..Default::default()
+                    })
+                    .build()
+                    .await
+                    .unwrap();
 
                 println!("created consumer");
 
                 //consumer.next().await
                 let msg = consumer.next().await.unwrap().unwrap();
                 println!("got message: {:?}", msg.payload);
-                assert_eq!(message, msg.deserialize().unwrap(), "we probably receive a message from a previous run of the test");
+                assert_eq!(
+                    message,
+                    msg.deserialize().unwrap(),
+                    "we probably receive a message from a previous run of the test"
+                );
                 consumer.ack(&msg).await.unwrap();
             }
 
@@ -1406,13 +1475,19 @@ mod tests {
                     .with_topic(topic)
                     .with_subscription("dropped_ack")
                     .with_subscription_type(SubType::Shared)
-                    .with_options(ConsumerOptions { initial_position: Some(1), ..Default::default() })
-                    .build().await.unwrap();
+                    .with_options(ConsumerOptions {
+                        initial_position: Some(1),
+                        ..Default::default()
+                    })
+                    .build()
+                    .await
+                    .unwrap();
 
                 println!("created second consumer");
 
                 // the message has already been acked, so we should not receive anything
-                let res: Result<_, tokio::time::Elapsed> = tokio::time::timeout(Duration::from_secs(1), consumer.next()).await;
+                let res: Result<_, tokio::time::Elapsed> =
+                    tokio::time::timeout(Duration::from_secs(1), consumer.next()).await;
                 let is_err = res.is_err();
                 if let Ok(val) = res {
                     let msg = val.unwrap().unwrap();

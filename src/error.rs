@@ -98,7 +98,9 @@ impl fmt::Display for ConnectionError {
         match self {
             ConnectionError::Io(e) => write!(f, "{}", e),
             ConnectionError::Disconnected => write!(f, "Disconnected"),
-            ConnectionError::PulsarError(e, s) => write!(f, "Server error ({:?}): {}", e, s.as_deref().unwrap_or("")),
+            ConnectionError::PulsarError(e, s) => {
+                write!(f, "Server error ({:?}): {}", e, s.as_deref().unwrap_or(""))
+            }
             ConnectionError::Unexpected(e) => write!(f, "{}", e),
             ConnectionError::Decoding(e) => write!(f, "Error decoding message: {}", e),
             ConnectionError::Encoding(e) => write!(f, "Error encoding message: {}", e),
@@ -160,8 +162,14 @@ impl fmt::Display for ConsumerError {
             ConsumerError::Connection(e) => write!(f, "Connection error: {}", e),
             ConsumerError::MissingPayload(s) => write!(f, "Missing payload: {}", s),
             ConsumerError::Io(s) => write!(f, "Decompression error: {}", s),
-            ConsumerError::ChannelFull => write!(f, "cannot send message to the consumer engine: the channel is full"),
-            ConsumerError::Closed => write!(f, "cannot send message to the consumer engine: the channel is closed"),
+            ConsumerError::ChannelFull => write!(
+                f,
+                "cannot send message to the consumer engine: the channel is full"
+            ),
+            ConsumerError::Closed => write!(
+                f,
+                "cannot send message to the consumer engine: the channel is closed"
+            ),
         }
     }
 }
@@ -235,7 +243,9 @@ impl fmt::Display for ServiceDiscoveryError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             ServiceDiscoveryError::Connection(e) => write!(f, "Connection error: {}", e),
-            ServiceDiscoveryError::Query(e, s) => write!(f, "Query error ({:?}): {}", e, s.as_deref().unwrap_or("")),
+            ServiceDiscoveryError::Query(e, s) => {
+                write!(f, "Query error ({:?}): {}", e, s.as_deref().unwrap_or(""))
+            }
             ServiceDiscoveryError::NotFound => write!(f, "cannot find topic"),
             ServiceDiscoveryError::DnsLookupError => write!(f, "cannot lookup broker address"),
             ServiceDiscoveryError::Canceled => write!(f, "canceled request"),
@@ -313,6 +323,6 @@ pub(crate) fn server_error(i: i32) -> Option<ServerError> {
         20 => Some(ServerError::TransactionCoordinatorNotFound),
         21 => Some(ServerError::InvalidTxnStatus),
         */
-        _  => None,
+        _ => None,
     }
 }

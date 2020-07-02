@@ -1,14 +1,14 @@
 //! Message publication
-use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
-use std::io::Write;
 use futures::channel::oneshot;
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::io::Write;
+use std::sync::{Arc, Mutex};
 
 use crate::client::SerializeMessage;
 use crate::connection::{Connection, SerialId};
-use crate::error::{ProducerError, ConnectionError};
+use crate::error::{ConnectionError, ProducerError};
 use crate::executor::Executor;
-use crate::message::proto::{self, EncryptionKeys, Schema, CompressionType};
+use crate::message::proto::{self, CompressionType, EncryptionKeys, Schema};
 use crate::message::BatchedMessage;
 use crate::{Error, Pulsar};
 
@@ -74,7 +74,6 @@ impl From<Message> for ProducerMessage {
             schema_version: m.schema_version,
             ..Default::default()
         }
-
     }
 }
 
@@ -128,10 +127,13 @@ impl<Exe: Executor + ?Sized> MultiTopicProducer<Exe> {
         &mut self,
         topic: S,
         message: ProducerMessage,
-    ) ->  Result<proto::CommandSendReceipt, Error> {
+    ) -> Result<proto::CommandSendReceipt, Error> {
         let topic = topic.into();
         if !self.producers.contains_key(&topic) {
-            let producer = self.client.create_producer(&topic, None, self.options.clone()).await?;
+            let producer = self
+                .client
+                .create_producer(&topic, None, self.options.clone())
+                .await?;
             self.producers.insert(topic.clone(), producer);
         }
 
@@ -201,35 +203,38 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
 
         let _ = connection
             .sender()
-            .lookup_topic(topic.clone(), false).await?;
+            .lookup_topic(topic.clone(), false)
+            .await?;
 
         let topic = topic.clone();
         let batch_size = options.batch_size;
         let compression = options.compression;
 
         match compression {
-            None | Some(CompressionType::None) => {},
+            None | Some(CompressionType::None) => {}
             Some(CompressionType::Lz4) => {
                 #[cfg(not(feature = "lz4"))]
                 return Err(Error::Custom("cannot create a producer with LZ4 compression because the 'lz4' cargo feature is not active".to_string()));
-            },
+            }
             Some(CompressionType::Zlib) => {
                 #[cfg(not(feature = "flate2"))]
                 return Err(Error::Custom("cannot create a producer with zlib compression because the 'flate2' cargo feature is not active".to_string()));
-            },
+            }
             Some(CompressionType::Zstd) => {
                 #[cfg(not(feature = "zstd"))]
                 return Err(Error::Custom("cannot create a producer with zstd compression because the 'zstd' cargo feature is not active".to_string()));
-            },
+            }
             Some(CompressionType::Snappy) => {
                 #[cfg(not(feature = "snap"))]
                 return Err(Error::Custom("cannot create a producer with Snappy compression because the 'snap' cargo feature is not active".to_string()));
-            },
+            }
             //Some() => unimplemented!(),
         };
 
-        let success = connection.sender()
-            .create_producer(topic.clone(), producer_id, name, options.clone()).await?;
+        let success = connection
+            .sender()
+            .create_producer(topic.clone(), producer_id, name, options.clone())
+            .await?;
 
         // drop_signal will be dropped when the TopicProducer is dropped, then
         // drop_receiver will return, and we can close the producer
@@ -237,7 +242,7 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
         let conn = connection.clone();
         let _ = Exe::spawn(Box::pin(async move {
             let _res = drop_receiver.await;
-             let _ = conn.sender().close_producer(producer_id).await;
+            let _ = conn.sender().close_producer(producer_id).await;
         }));
 
         Ok(Producer {
@@ -271,9 +276,7 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
     }
 
     pub async fn check_connection(&self) -> Result<(), Error> {
-        self.connection
-            .sender()
-            .send_ping().await?;
+        self.connection.sender().send_ping().await?;
         Ok(())
     }
 
@@ -326,9 +329,7 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
         message: ProducerMessage,
     ) -> Result<proto::CommandSendReceipt, Error> {
         match self.batch.as_ref() {
-            None => {
-                self.send_compress(message).await
-            },
+            None => self.send_compress(message).await,
             Some(batch) => {
                 let (tx, rx) = oneshot::channel();
                 let mut payload: Vec<u8> = Vec::new();
@@ -350,9 +351,9 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
 
                 if counter > 0 {
                     let message = ProducerMessage {
-                      payload,
-                      num_messages_in_batch: Some(counter),
-                      ..Default::default()
+                        payload,
+                        num_messages_in_batch: Some(counter),
+                        ..Default::default()
                     };
 
                     let send_receipt = self.send_compress(message).await?;
@@ -362,10 +363,9 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
                         let _ = tx.send(send_receipt.clone());
                     }
                 }
-                rx.await.map_err(|_| ProducerError::Custom("could not send message".to_string()).into())
+                rx.await
+                    .map_err(|_| ProducerError::Custom("could not send message".to_string()).into())
             }
-
-
         }
     }
 
@@ -374,9 +374,7 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
         mut message: ProducerMessage,
     ) -> Result<proto::CommandSendReceipt, Error> {
         let compressed_message = match self.compression {
-            None | Some(CompressionType::None) => {
-                message
-            },
+            None | Some(CompressionType::None) => message,
             Some(CompressionType::Lz4) => {
                 #[cfg(not(feature = "lz4"))]
                 return unimplemented!();
@@ -384,8 +382,12 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
                 #[cfg(feature = "lz4")]
                 {
                     let v: Vec<u8> = Vec::new();
-                    let mut encoder = lz4::EncoderBuilder::new().build(v).map_err(ProducerError::Io)?;
-                    encoder.write(&message.payload[..]).map_err(ProducerError::Io)?;
+                    let mut encoder = lz4::EncoderBuilder::new()
+                        .build(v)
+                        .map_err(ProducerError::Io)?;
+                    encoder
+                        .write(&message.payload[..])
+                        .map_err(ProducerError::Io)?;
                     let (compressed_payload, result) = encoder.finish();
 
                     result.map_err(ProducerError::Io)?;
@@ -393,34 +395,37 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
                     message.compression = Some(1);
                     message
                 }
-            },
+            }
             Some(CompressionType::Zlib) => {
                 #[cfg(not(feature = "flate2"))]
                 return unimplemented!();
 
                 #[cfg(feature = "flate2")]
                 {
-                    let mut e = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
-                    e.write_all(&message.payload[..]).map_err(ProducerError::Io)?;
+                    let mut e =
+                        flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+                    e.write_all(&message.payload[..])
+                        .map_err(ProducerError::Io)?;
                     let compressed_payload = e.finish().map_err(ProducerError::Io)?;
 
                     message.payload = compressed_payload;
                     message.compression = Some(2);
                     message
                 }
-            },
+            }
             Some(CompressionType::Zstd) => {
                 #[cfg(not(feature = "zstd"))]
                 return unimplemented!();
 
                 #[cfg(feature = "zstd")]
                 {
-                    let compressed_payload = zstd::encode_all(&message.payload[..], 0).map_err(ProducerError::Io)?;
+                    let compressed_payload =
+                        zstd::encode_all(&message.payload[..], 0).map_err(ProducerError::Io)?;
                     message.compression = Some(3);
                     message.payload = compressed_payload;
                     message
                 }
-            },
+            }
             Some(CompressionType::Snappy) => {
                 #[cfg(not(feature = "snap"))]
                 return unimplemented!();
@@ -429,18 +434,25 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
                 {
                     let compressed_payload: Vec<u8> = Vec::new();
                     let mut encoder = snap::write::FrameEncoder::new(compressed_payload);
-                    encoder.write(&message.payload[..]).map_err(ProducerError::Io)?;
-                    let compressed_payload = encoder.into_inner()
+                    encoder
+                        .write(&message.payload[..])
+                        .map_err(ProducerError::Io)?;
+                    let compressed_payload = encoder
+                        .into_inner()
                         //FIXME
-                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other,
-                                                         format!("Snappy compression error: {:?}", e)))
+                        .map_err(|e| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::Other,
+                                format!("Snappy compression error: {:?}", e),
+                            )
+                        })
                         .map_err(ProducerError::Io)?;
 
                     message.payload = compressed_payload;
                     message.compression = Some(4);
                     message
                 }
-            },
+            }
         };
 
         self.send_inner(compressed_message).await
@@ -451,40 +463,35 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
         message: ProducerMessage,
     ) -> Result<proto::CommandSendReceipt, Error> {
         let msg = message.clone();
-        match self.connection
+        match self
+            .connection
             .sender()
-            .send(
-                self.id,
-                self.name.clone(),
-                self.message_id.get(),
-                message,
-                ).await {
-                Ok(receipt) => return Ok(receipt),
-                Err(ConnectionError::Disconnected) => {},
-                Err(e) => {
-                    error!("send_inner got error: {:?}", e);
-                    return Err(ProducerError::Connection(e).into());
-                }
-            };
+            .send(self.id, self.name.clone(), self.message_id.get(), message)
+            .await
+        {
+            Ok(receipt) => return Ok(receipt),
+            Err(ConnectionError::Disconnected) => {}
+            Err(e) => {
+                error!("send_inner got error: {:?}", e);
+                return Err(ProducerError::Connection(e).into());
+            }
+        };
 
         error!("send_inner disconnected");
         self.reconnect().await?;
 
-        match self.connection
+        match self
+            .connection
             .sender()
-            .send(
-                self.id,
-                self.name.clone(),
-                self.message_id.get(),
-                msg,
-                ).await {
-                Ok(receipt) => Ok(receipt),
-                Err(e) => {
-                    error!("send_inner got error: {:?}", e);
-                    Err(ProducerError::Connection(e).into())
-                }
+            .send(self.id, self.name.clone(), self.message_id.get(), msg)
+            .await
+        {
+            Ok(receipt) => Ok(receipt),
+            Err(e) => {
+                error!("send_inner got error: {:?}", e);
+                Err(ProducerError::Connection(e).into())
             }
-
+        }
     }
 
     async fn reconnect(&mut self) -> Result<(), Error> {
@@ -497,18 +504,26 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
         let topic = self.topic.clone();
         let batch_size = self.options.batch_size;
 
-        let _ = self.connection.sender()
-            .create_producer(topic.clone(), self.id, Some(self.name.clone()), self.options.clone()).await?;
+        let _ = self
+            .connection
+            .sender()
+            .create_producer(
+                topic.clone(),
+                self.id,
+                Some(self.name.clone()),
+                self.options.clone(),
+            )
+            .await?;
 
         // drop_signal will be dropped when the TopicProducer is dropped, then
         // drop_receiver will return, and we can close the producer
         let (_drop_signal, drop_receiver) = oneshot::channel::<()>();
-        let batch =  batch_size.map(Batch::new).map(Mutex::new);
+        let batch = batch_size.map(Batch::new).map(Mutex::new);
         let conn = self.connection.clone();
         let producer_id = self.id;
         let _ = Exe::spawn(Box::pin(async move {
             let _res = drop_receiver.await;
-             let _ = conn.sender().close_producer(producer_id).await;
+            let _ = conn.sender().close_producer(producer_id).await;
         }));
 
         self.batch = batch;
@@ -527,7 +542,6 @@ pub struct ProducerBuilder<'a, Topic, Exe: Executor + ?Sized> {
     name: Option<String>,
     producer_options: Option<ProducerOptions>,
 }
-
 
 impl<'a, Exe: Executor + ?Sized> ProducerBuilder<'a, Set<String>, Exe> {
     pub async fn build(self) -> Result<Producer<Exe>, Error> {

@@ -1,18 +1,18 @@
+use std::marker::PhantomData;
 use std::string::FromUtf8Error;
 use std::sync::Arc;
 use std::time::Duration;
-use std::marker::PhantomData;
 
 use futures::future;
 
 use crate::connection::Authentication;
-use crate::connection_manager::{BrokerAddress, ConnectionManager, BackOffOptions, TlsOptions};
+use crate::connection_manager::{BackOffOptions, BrokerAddress, ConnectionManager, TlsOptions};
 use crate::consumer::{Consumer, ConsumerBuilder, ConsumerOptions, MultiTopicConsumer, Unset};
 use crate::error::Error;
 use crate::executor::Executor;
 use crate::message::proto::{self, command_subscribe::SubType, CommandSendReceipt};
 use crate::message::Payload;
-use crate::producer::{self, Producer, ProducerOptions, MultiTopicProducer, ProducerBuilder};
+use crate::producer::{self, MultiTopicProducer, Producer, ProducerBuilder, ProducerOptions};
 use crate::service_discovery::ServiceDiscovery;
 
 /// Helper trait for consumer deserialization
@@ -116,9 +116,7 @@ impl<Exe: Executor> Pulsar<Exe> {
         let url: String = url.into();
         let manager = ConnectionManager::new(url, auth, backoff_parameters, tls_options).await?;
         let manager = Arc::new(manager);
-        let service_discovery = Arc::new(ServiceDiscovery::with_manager(
-                manager.clone(),
-        ));
+        let service_discovery = Arc::new(ServiceDiscovery::with_manager(manager.clone()));
         Ok(Pulsar {
             manager,
             service_discovery,
@@ -173,11 +171,11 @@ impl<Exe: Executor> Pulsar<Exe> {
     }
 
     /// gets the address of a broker handling the topic
-    pub async fn lookup_topic<S: Into<String>>(
-        &self,
-        topic: S,
-    ) -> Result<BrokerAddress, Error> {
-        self.service_discovery.lookup_topic(topic).await.map_err(|e| e.into())
+    pub async fn lookup_topic<S: Into<String>>(&self, topic: S) -> Result<BrokerAddress, Error> {
+        self.service_discovery
+            .lookup_topic(topic)
+            .await
+            .map_err(|e| e.into())
     }
 
     /// gets the number of partitions for a partitioned topic
@@ -185,7 +183,9 @@ impl<Exe: Executor> Pulsar<Exe> {
         &self,
         topic: S,
     ) -> Result<u32, Error> {
-        self.service_discovery.lookup_partitioned_topic_number(topic).await
+        self.service_discovery
+            .lookup_partitioned_topic_number(topic)
+            .await
             .map_err(|e| e.into())
     }
 
@@ -195,7 +195,8 @@ impl<Exe: Executor> Pulsar<Exe> {
         topic: S,
     ) -> Result<Vec<(String, BrokerAddress)>, Error> {
         self.service_discovery
-            .lookup_partitioned_topic(topic).await
+            .lookup_partitioned_topic(topic)
+            .await
             .map_err(|e| e.into())
     }
 
@@ -205,9 +206,11 @@ impl<Exe: Executor> Pulsar<Exe> {
         namespace: String,
         mode: proto::get_topics::Mode,
     ) -> Result<Vec<String>, Error> {
-        let conn = self.manager
-            .get_base_connection().await?;
-        let topics = conn.sender().get_topics_of_namespace(namespace, mode).await?;
+        let conn = self.manager.get_base_connection().await?;
+        let topics = conn
+            .sender()
+            .get_topics_of_namespace(namespace, mode)
+            .await?;
         Ok(topics.topics)
     }
 
@@ -258,8 +261,7 @@ impl<Exe: Executor> Pulsar<Exe> {
         let manager = self.manager.clone();
         let topic = topic.into();
 
-        let broker_address = self.service_discovery
-            .lookup_topic(topic.clone()).await?;
+        let broker_address = self.service_discovery.lookup_topic(topic.clone()).await?;
         let conn = manager.get_connection(&broker_address).await?;
         Consumer::from_connection(
             self.clone(),
@@ -272,7 +274,8 @@ impl<Exe: Executor> Pulsar<Exe> {
             batch_size,
             unacked_message_redelivery_delay,
             options,
-        ).await
+        )
+        .await
     }
 
     pub async fn create_partitioned_consumers<
@@ -288,27 +291,29 @@ impl<Exe: Executor> Pulsar<Exe> {
     ) -> Result<Vec<Consumer<T>>, Error> {
         let manager = self.manager.clone();
 
-        let v = self.service_discovery
-            .lookup_partitioned_topic(topic).await?;
+        let v = self
+            .service_discovery
+            .lookup_partitioned_topic(topic)
+            .await?;
 
         let mut res = Vec::new();
         for (topic, broker_address) in v.iter() {
-                let subscription = subscription.clone();
-                let options = options.clone();
+            let subscription = subscription.clone();
+            let options = options.clone();
 
-                let conn = manager.get_connection(&broker_address).await?;
-                res.push(Consumer::from_connection(
-                    self.clone(),
-                    conn,
-                    topic.to_string(),
-                    subscription.into(),
-                    sub_type,
-                    None,
-                    None,
-                    None,
-                    None, //TODO make configurable
-                    options,
-                    ))
+            let conn = manager.get_connection(&broker_address).await?;
+            res.push(Consumer::from_connection(
+                self.clone(),
+                conn,
+                topic.to_string(),
+                subscription.into(),
+                sub_type,
+                None,
+                None,
+                None,
+                None, //TODO make configurable
+                options,
+            ))
         }
 
         future::try_join_all(res).await
@@ -322,8 +327,7 @@ impl<Exe: Executor> Pulsar<Exe> {
     ) -> Result<Producer<Exe>, Error> {
         let manager = self.manager.clone();
         let topic = topic.into();
-        let broker_address = self.service_discovery
-            .lookup_topic(topic.clone()).await?;
+        let broker_address = self.service_discovery.lookup_topic(topic.clone()).await?;
         let conn = manager.get_connection(&broker_address).await?;
 
         Producer::from_connection::<_>(self.clone(), conn, topic, name, options).await
@@ -336,13 +340,21 @@ impl<Exe: Executor> Pulsar<Exe> {
     ) -> Result<Vec<Producer<Exe>>, Error> {
         let manager = self.manager.clone();
 
-        let v = self.service_discovery
-            .lookup_partitioned_topic(topic).await?;
+        let v = self
+            .service_discovery
+            .lookup_partitioned_topic(topic)
+            .await?;
 
         let mut res = Vec::new();
         for (topic, broker_address) in v.iter() {
             let conn = manager.get_connection(&broker_address).await?;
-            res.push(Producer::from_connection::<_>(self.clone(), conn, topic, None, options.clone()));
+            res.push(Producer::from_connection::<_>(
+                self.clone(),
+                conn,
+                topic,
+                None,
+                options.clone(),
+            ));
         }
 
         future::try_join_all(res).await
@@ -373,7 +385,10 @@ impl<Exe: Executor> Pulsar<Exe> {
         producer.send_raw(message.into()).await
     }
 
-    pub fn create_multi_topic_producer(&self, options: Option<ProducerOptions>) -> MultiTopicProducer<Exe> {
+    pub fn create_multi_topic_producer(
+        &self,
+        options: Option<ProducerOptions>,
+    ) -> MultiTopicProducer<Exe> {
         MultiTopicProducer::new(self.clone(), options.unwrap_or_default())
     }
 }
@@ -417,14 +432,17 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
             auth: self.auth,
             back_off_options: self.back_off_options,
             tls_options: Some(TlsOptions {
-                certificate_chain: Some(certificate_chain)
+                certificate_chain: Some(certificate_chain),
             }),
             executor: self.executor,
         }
     }
 
     /// add a custom certificate chain from a file to authenticate the server in TLS connectioons
-    pub fn with_certificate_chain_file<P: AsRef<std::path::Path>>(self, path: P) -> Result<Self, std::io::Error> {
+    pub fn with_certificate_chain_file<P: AsRef<std::path::Path>>(
+        self,
+        path: P,
+    ) -> Result<Self, std::io::Error> {
         use std::io::Read;
 
         let mut file = std::fs::File::open(path)?;
@@ -436,7 +454,13 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
 
     /// creates the Pulsar client and connects it
     pub async fn build(self) -> Result<Pulsar<Exe>, Error> {
-        let PulsarBuilder { url, auth, back_off_options, tls_options, executor: _ } = self;
+        let PulsarBuilder {
+            url,
+            auth,
+            back_off_options,
+            tls_options,
+            executor: _,
+        } = self;
         Pulsar::new(url, auth, back_off_options, tls_options).await
     }
 }
