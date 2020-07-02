@@ -265,6 +265,7 @@ struct ConsumerEngine<Exe: Executor + ?Sized> {
     remaining_messages: u32,
     unacked_message_redelivery_delay: Option<Duration>,
     unacked_messages: HashMap<MessageIdData, Instant>,
+    dead_letter_policy: Option<DeadLetterPolicy>,
     options: ConsumerOptions,
     _drop_signal: oneshot::Sender<()>,
 }
@@ -764,6 +765,7 @@ impl<'a, Exe: Executor> ConsumerBuilder<'a, Set<String>, Set<String>, Set<SubTyp
             consumer_options,
             batch_size,
             unacked_message_resend_delay,
+            dead_letter_policy,
             ..
         } = self;
 
@@ -776,6 +778,7 @@ impl<'a, Exe: Executor> ConsumerBuilder<'a, Set<String>, Set<String>, Set<SubTyp
                 consumer_name,
                 consumer_id,
                 unacked_message_resend_delay,
+                dead_letter_policy,
                 consumer_options.unwrap_or_else(ConsumerOptions::default),
             )
             .await
@@ -796,6 +799,7 @@ impl<'a, Exe: Executor> ConsumerBuilder<'a, Set<Regex>, Set<String>, Set<SubType
             topic_refresh,
             namespace,
             unacked_message_resend_delay,
+            dead_letter_policy,
             ..
         } = self;
         if consumer_id.is_some() {
@@ -817,6 +821,7 @@ impl<'a, Exe: Executor> ConsumerBuilder<'a, Set<Regex>, Set<String>, Set<SubType
             sub_type,
             topic_refresh,
             unacked_message_resend_delay,
+            dead_letter_policy,
             consumer_options.unwrap_or_else(ConsumerOptions::default),
         )
     }
@@ -1051,6 +1056,7 @@ pub struct MultiTopicConsumer<T: DeserializeMessage, Exe: Executor> {
     topic_regex: Regex,
     pulsar: Pulsar<Exe>,
     unacked_message_resend_delay: Option<Duration>,
+    dead_letter_policy: Option<DeadLetterPolicy>,
     consumers: BTreeMap<String, Pin<Box<Consumer<T>>>>,
     topics: VecDeque<String>,
     new_consumers: Option<Pin<Box<dyn Future<Output = Result<Vec<Consumer<T>>, Error>> + Send>>>,
@@ -1072,6 +1078,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
         sub_type: SubType,
         topic_refresh: Duration,
         unacked_message_resend_delay: Option<Duration>,
+        dead_letter_policy: Option<DeadLetterPolicy>,
         options: ConsumerOptions,
     ) -> Self
     where
@@ -1083,6 +1090,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
             topic_regex,
             pulsar,
             unacked_message_resend_delay,
+            dead_letter_policy,
             consumers: BTreeMap::new(),
             topics: VecDeque::new(),
             new_consumers: None,
@@ -1231,6 +1239,7 @@ impl<T: 'static + DeserializeMessage, Exe: Executor> Stream for MultiTopicConsum
             let existing_topics: BTreeSet<String> = self.consumers.keys().cloned().collect();
             let options = self.options.clone();
             let unacked_message_resend_delay = self.unacked_message_resend_delay;
+            let dead_letter_policy = self.dead_letter_policy.clone();
 
             let new_consumers = Box::pin(async move {
                 let topics: Vec<String> = pulsar
@@ -1253,6 +1262,7 @@ impl<T: 'static + DeserializeMessage, Exe: Executor> Stream for MultiTopicConsum
                         None,
                         None,
                         unacked_message_resend_delay,
+                        dead_letter_policy.clone(),
                         options.clone(),
                     ));
                 }
