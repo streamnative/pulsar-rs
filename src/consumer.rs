@@ -1363,10 +1363,10 @@ mod tests {
             let mut producer = client.create_multi_topic_producer(None);
 
             let send_start = Utc::now();
-            producer.send(topic1, data1.clone()).await.unwrap();
-            producer.send(topic1, data2.clone()).await.unwrap();
-            producer.send(topic2, data3.clone()).await.unwrap();
-            producer.send(topic2, data4.clone()).await.unwrap();
+            producer.send(topic1, data1.clone()).await.unwrap().await;
+            producer.send(topic1, data2.clone()).await.unwrap().await;
+            producer.send(topic2, data3.clone()).await.unwrap().await;
+            producer.send(topic2, data4.clone()).await.unwrap().await;
 
             let data = vec![data1, data2, data3, data4];
 
@@ -1461,7 +1461,7 @@ mod tests {
                     .await
                     .unwrap();
 
-                producer.send(message.clone()).await.unwrap();
+                producer.send(message.clone()).await.unwrap().await;
                 println!("producer sends done");
             }
 
