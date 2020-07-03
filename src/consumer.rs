@@ -731,6 +731,11 @@ pub struct Set<T>(pub T);
 
 pub struct Unset;
 
+pub enum MultiTopic {
+    Regex(Regex),
+    List(Vec<String>),
+}
+
 pub struct ConsumerBuilder<'a, Topic, Subscription, SubscriptionType, Exe: Executor + ?Sized> {
     pulsar: &'a Pulsar<Exe>,
     topic: Topic,
@@ -777,7 +782,7 @@ impl<'a, Exe: Executor> ConsumerBuilder<'a, Set<String>, Set<String>, Set<SubTyp
     }
 }
 
-impl<'a, Exe: Executor> ConsumerBuilder<'a, Set<Regex>, Set<String>, Set<SubType>, Exe> {
+impl<'a, Exe: Executor> ConsumerBuilder<'a, Set<MultiTopic>, Set<String>, Set<SubType>, Exe> {
     pub fn build<T: DeserializeMessage>(self) -> MultiTopicConsumer<T, Exe> {
         let ConsumerBuilder {
             pulsar,
@@ -805,10 +810,17 @@ impl<'a, Exe: Executor> ConsumerBuilder<'a, Set<Regex>, Set<String>, Set<SubType
         let namespace = namespace.unwrap_or_else(|| "public/default".to_owned());
         let topic_refresh = topic_refresh.unwrap_or_else(|| Duration::from_secs(30));
 
-        pulsar.create_multi_topic_consumer(
-            topic,
-            subscription,
+        let (topic_regex, topic_list) = match topic {
+            MultiTopic::Regex(regex) => (Some(regex), None),
+            MultiTopic::List(list) => (None, Some(list)),
+        };
+
+        MultiTopicConsumer::new(
+            pulsar.clone(),
             namespace,
+            topic_regex,
+            topic_list,
+            subscription,
             sub_type,
             topic_refresh,
             unacked_message_resend_delay,
@@ -858,13 +870,40 @@ impl<'a, Subscription, SubscriptionType, Exe: Executor + ?Sized>
         }
     }
 
+    pub fn with_topics<S: AsRef<str>>(
+        self,
+        topics: &[S]
+    ) -> ConsumerBuilder<'a, Set<MultiTopic>, Subscription, SubscriptionType, Exe> {
+        let topics = topics.into_iter().map(|t| t.as_ref().into()).collect();
+        ConsumerBuilder {
+            pulsar: self.pulsar,
+            topic: Set(MultiTopic::List(topics)),
+            subscription: self.subscription,
+            subscription_type: self.subscription_type,
+            consumer_id: self.consumer_id,
+            consumer_name: self.consumer_name,
+            consumer_options: self.consumer_options,
+            batch_size: self.batch_size,
+            namespace: self.namespace,
+            topic_refresh: self.topic_refresh,
+            unacked_message_resend_delay: self.unacked_message_resend_delay,
+        }
+    }
+
     pub fn multi_topic(
         self,
         regex: Regex,
-    ) -> ConsumerBuilder<'a, Set<Regex>, Subscription, SubscriptionType, Exe> {
+    ) -> ConsumerBuilder<'a, Set<MultiTopic>, Subscription, SubscriptionType, Exe> {
+        self.with_topic_regex(regex)
+    }
+
+    pub fn with_topic_regex(
+        self,
+        regex: Regex,
+    ) -> ConsumerBuilder<'a, Set<MultiTopic>, Subscription, SubscriptionType, Exe> {
         ConsumerBuilder {
             pulsar: self.pulsar,
-            topic: Set(regex),
+            topic: Set(MultiTopic::Regex(regex)),
             subscription: self.subscription,
             subscription_type: self.subscription_type,
             consumer_id: self.consumer_id,
@@ -925,12 +964,12 @@ impl<'a, Topic, Subscription, Exe: Executor + ?Sized>
 }
 
 impl<'a, Subscription, SubscriptionType, Exe: Executor + ?Sized>
-    ConsumerBuilder<'a, Set<Regex>, Subscription, SubscriptionType, Exe>
+    ConsumerBuilder<'a, Set<MultiTopic>, Subscription, SubscriptionType, Exe>
 {
     pub fn with_namespace<S: Into<String>>(
         self,
         namespace: S,
-    ) -> ConsumerBuilder<'a, Set<Regex>, Subscription, SubscriptionType, Exe> {
+    ) -> ConsumerBuilder<'a, Set<MultiTopic>, Subscription, SubscriptionType, Exe> {
         ConsumerBuilder {
             pulsar: self.pulsar,
             topic: self.topic,
@@ -949,7 +988,7 @@ impl<'a, Subscription, SubscriptionType, Exe: Executor + ?Sized>
     pub fn with_topic_refresh(
         self,
         refresh_interval: Duration,
-    ) -> ConsumerBuilder<'a, Set<Regex>, Subscription, SubscriptionType, Exe> {
+    ) -> ConsumerBuilder<'a, Set<MultiTopic>, Subscription, SubscriptionType, Exe> {
         ConsumerBuilder {
             pulsar: self.pulsar,
             topic: self.topic,
@@ -1021,7 +1060,8 @@ pub struct ConsumerState {
 /// A consumer that can subscribe on multiple topics, from a rege matching topic names
 pub struct MultiTopicConsumer<T: DeserializeMessage, Exe: Executor> {
     namespace: String,
-    topic_regex: Regex,
+    topic_regex: Option<Regex>,
+    topic_list: Option<Vec<String>>,
     pulsar: Pulsar<Exe>,
     unacked_message_resend_delay: Option<Duration>,
     consumers: BTreeMap<String, Pin<Box<Consumer<T>>>>,
@@ -1040,7 +1080,8 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
     pub fn new<S1, S2>(
         pulsar: Pulsar<Exe>,
         namespace: S1,
-        topic_regex: Regex,
+        topic_regex: Option<Regex>,
+        topic_list: Option<Vec<String>>,
         subscription: S2,
         sub_type: SubType,
         topic_refresh: Duration,
@@ -1054,6 +1095,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
         MultiTopicConsumer {
             namespace: namespace.into(),
             topic_regex,
+            topic_list,
             pulsar,
             unacked_message_resend_delay,
             consumers: BTreeMap::new(),
@@ -1119,6 +1161,67 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
             self.consumers.remove(topic);
         }
         self.send_state();
+    }
+
+    fn update_topics(&mut self) {
+        let regex = self.topic_regex.clone();
+        let topic_list =  self.topic_list.clone();
+        let pulsar = self.pulsar.clone();
+        let namespace = self.namespace.clone();
+        let subscription = self.subscription.clone();
+        let sub_type = self.sub_type;
+        let existing_topics: BTreeSet<String> = self.consumers.keys().cloned().collect();
+        let options = self.options.clone();
+        let unacked_message_resend_delay = self.unacked_message_resend_delay;
+
+        let new_consumers = Box::pin(async move {
+            let topics: Vec<String> = pulsar
+                .get_topics_of_namespace(namespace.clone(), proto::get_topics::Mode::All)
+                .await?;
+            trace!("fetched topics: {:?}", &topics);
+
+            let mut v = vec![];
+            let new_topics = topics.into_iter()
+                .filter(move |topic| {
+                    if existing_topics.contains(topic) {
+                        return false;
+                    }
+                    let prefix_idx = topic.rfind("/")
+                        .map(|i| i + 1)
+                        .unwrap_or(0);
+
+                    let trimmed_topic = topic[prefix_idx..].to_string();
+                    if let Some(regex) = &regex {
+                        if regex.is_match(&topic) || regex.is_match(&trimmed_topic) {
+                            return true;
+                        }
+                    }
+                    if let Some(topic_list) = &topic_list {
+                        if topic_list.contains(topic) || topic_list.contains(&trimmed_topic) {
+                            return true;
+                        }
+                    }
+                    return false;
+                });
+            for topic in new_topics {
+                trace!("creating consumer for topic {}", topic);
+                //let pulsar = pulsar.clone();
+                let subscription = subscription.clone();
+                v.push(pulsar.create_consumer(
+                    topic,
+                    subscription,
+                    sub_type,
+                    None,
+                    None,
+                    None,
+                    unacked_message_resend_delay,
+                    options.clone(),
+                ));
+            }
+
+            try_join_all(v).await
+        });
+        self.new_consumers = Some(new_consumers);
     }
 
     pub async fn ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
@@ -1196,43 +1299,7 @@ impl<T: 'static + DeserializeMessage, Exe: Executor> Stream for MultiTopicConsum
         }
 
         if let Poll::Ready(Some(_)) = self.refresh.as_mut().poll_next(cx) {
-            let regex = self.topic_regex.clone();
-            let pulsar = self.pulsar.clone();
-            let namespace = self.namespace.clone();
-            let subscription = self.subscription.clone();
-            let sub_type = self.sub_type;
-            let existing_topics: BTreeSet<String> = self.consumers.keys().cloned().collect();
-            let options = self.options.clone();
-            let unacked_message_resend_delay = self.unacked_message_resend_delay;
-
-            let new_consumers = Box::pin(async move {
-                let topics: Vec<String> = pulsar
-                    .get_topics_of_namespace(namespace.clone(), proto::get_topics::Mode::All)
-                    .await?;
-                trace!("fetched topics: {:?}", &topics);
-
-                let mut v = vec![];
-                for topic in topics.into_iter().filter(move |topic| {
-                    !existing_topics.contains(topic) && regex.is_match(topic.as_str())
-                }) {
-                    trace!("creating consumer for topic {}", topic);
-                    //let pulsar = pulsar.clone();
-                    let subscription = subscription.clone();
-                    v.push(pulsar.create_consumer(
-                        topic,
-                        subscription,
-                        sub_type,
-                        None,
-                        None,
-                        None,
-                        unacked_message_resend_delay,
-                        options.clone(),
-                    ));
-                }
-
-                try_join_all(v).await
-            });
-            self.new_consumers = Some(new_consumers);
+            self.update_topics();
             return self.poll_next(cx);
         }
 
@@ -1372,7 +1439,9 @@ mod tests {
 
             let mut consumer: MultiTopicConsumer<TestData, _> = client
                 .consumer()
-                .multi_topic(Regex::new("mt_test_[ab]").unwrap())
+                // TODO extract out test functionality to test both multi-topic cases
+                // .with_topics(&["mt_test_a", "mt_test_b"])
+                .with_topic_regex(Regex::new("mt_test_[ab]").unwrap())
                 .with_namespace(namespace)
                 .with_subscription("test_sub")
                 .with_subscription_type(SubType::Shared)

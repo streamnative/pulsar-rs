@@ -233,7 +233,8 @@ impl<Exe: Executor> Pulsar<Exe> {
         MultiTopicConsumer::new(
             self.clone(),
             namespace.into(),
-            topic_regex,
+            Some(topic_regex),
+            None,
             subscription.into(),
             sub_type,
             topic_refresh,
