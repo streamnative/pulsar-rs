@@ -117,7 +117,7 @@ impl<Exe: Executor + ?Sized> MultiTopicProducer<Exe> {
         message: T,
     ) -> Result<oneshot::Receiver<proto::CommandSendReceipt>, Error> {
         let topic = topic.into();
-        match T::serialize_message(&message) {
+        match T::serialize_message(message) {
             Ok(message) => self.send_message(topic, message.into()).await,
             Err(e) => Err(e),
         }
@@ -148,8 +148,8 @@ impl<Exe: Executor + ?Sized> MultiTopicProducer<Exe> {
     ) -> Result<Vec<oneshot::Receiver<proto::CommandSendReceipt>>, Error>
     where
         'b: 'a,
-        T: 'b + SerializeMessage + ?Sized,
-        I: IntoIterator<Item = &'a T>,
+        T: 'b + SerializeMessage + Sized,
+        I: IntoIterator<Item = T>,
         S: Into<String>,
     {
         let topic = topic.into();
@@ -300,7 +300,7 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
         &mut self,
         message: T,
     ) -> Result<oneshot::Receiver<proto::CommandSendReceipt>, Error> {
-        match T::serialize_message(&message) {
+        match T::serialize_message(message) {
             Ok(message) => self.send_raw(message.into()).await,
             Err(e) => Err(e),
         }
@@ -312,8 +312,8 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
     ) -> Result<Vec<oneshot::Receiver<proto::CommandSendReceipt>>, Error>
     where
         'b: 'a,
-        T: 'b + SerializeMessage + ?Sized,
-        I: IntoIterator<Item = &'a T>,
+        T: 'b + SerializeMessage + Sized,
+        I: IntoIterator<Item = T>,
     {
         // TODO determine whether to keep this approach or go with the partial send, but more mem friendly lazy approach.
         // serialize all messages before sending to avoid a partial send
@@ -773,7 +773,7 @@ impl<'a, T: SerializeMessage + Sized, Exe: Executor + ?Sized> MessageBuilder<'a,
             content: Set(content),
         } = self;
 
-        let mut message = T::serialize_message(&content)?;
+        let mut message = T::serialize_message(content)?;
         message.properties = properties;
         message.partition_key = partition_key;
         producer.send_raw(message.into()).await
