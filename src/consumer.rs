@@ -158,6 +158,7 @@ impl<T: DeserializeMessage> Consumer<T> {
             name,
             tx,
             messages,
+            ack_tx.clone(),
             ack_rx,
             batch_size,
             unacked_message_redelivery_delay,
@@ -260,6 +261,7 @@ struct ConsumerEngine<Exe: Executor + ?Sized> {
     name: Option<String>,
     tx: mpsc::Sender<Result<(proto::MessageIdData, Payload), Error>>,
     messages_rx: Option<mpsc::UnboundedReceiver<RawMessage>>,
+    ack_tx: mpsc::UnboundedSender<AckMessage>,
     ack_rx: Option<mpsc::UnboundedReceiver<AckMessage>>,
     batch_size: u32,
     remaining_messages: u32,
@@ -287,6 +289,7 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe> {
         name: Option<String>,
         tx: mpsc::Sender<Result<(proto::MessageIdData, Payload), Error>>,
         messages_rx: mpsc::UnboundedReceiver<RawMessage>,
+        ack_tx: mpsc::UnboundedSender<AckMessage>,
         ack_rx: mpsc::UnboundedReceiver<AckMessage>,
         batch_size: u32,
         unacked_message_redelivery_delay: Option<Duration>,
@@ -304,6 +307,7 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe> {
             name,
             tx,
             messages_rx: Some(messages_rx),
+            ack_tx,
             ack_rx: Some(ack_rx),
             batch_size,
             remaining_messages: batch_size,
@@ -588,19 +592,54 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe> {
                 }
             }
             None => {
-                println!("message: {:?}", message);
-                self.tx
-                    .send(Ok((message.message_id.clone(), payload)))
-                    .await
-                    .map_err(|e| {
-                        error!("tx returned {:?}", e);
-                        Error::Custom("tx closed".to_string())
-                    })?;
-                if let Some(duration) = self.unacked_message_redelivery_delay {
-                    //info!("inserting id {:?} to trigger unack at {:?}",
-                    //      message.message_id, Instant::now()+duration);
-                    self.unacked_messages
-                        .insert(message.message_id, Instant::now() + duration);
+                match (message.redelivery_count, self.dead_letter_policy.as_ref()) {
+                    (Some(redelivery_count), Some(dead_letter_policy)) => {
+                        if redelivery_count as usize >= dead_letter_policy.max_redeliver_count {
+                            let options = crate::producer::ProducerOptions::default();
+                            self.client
+                                .send(
+                                    dead_letter_policy.dead_letter_topic.clone(),
+                                    &payload.data,
+                                    options,
+                                )
+                                .await?;
+
+                            let message_data = MessageData {
+                                id: message.message_id,
+                                batch_size: None,
+                            };
+
+                            self.ack_tx.send(AckMessage::Ack(message_data, false)).await;
+                        } else {
+                            // TODO DRY this
+                            self.tx
+                                .send(Ok((message.message_id.clone(), payload)))
+                                .await
+                                .map_err(|e| {
+                                    error!("tx returned {:?}", e);
+                                    Error::Custom("tx closed".to_string())
+                                })?;
+                            if let Some(duration) = self.unacked_message_redelivery_delay {
+                                self.unacked_messages
+                                    .insert(message.message_id, Instant::now() + duration);
+                            }
+                        }
+                    }
+                    _ => {
+                        self.tx
+                            .send(Ok((message.message_id.clone(), payload)))
+                            .await
+                            .map_err(|e| {
+                                error!("tx returned {:?}", e);
+                                Error::Custom("tx closed".to_string())
+                            })?;
+                        if let Some(duration) = self.unacked_message_redelivery_delay {
+                            //info!("inserting id {:?} to trigger unack at {:?}",
+                            //      message.message_id, Instant::now()+duration);
+                            self.unacked_messages
+                                .insert(message.message_id, Instant::now() + duration);
+                        }
+                    }
                 }
             }
         }
@@ -987,11 +1026,9 @@ impl<'a, Subscription, SubscriptionType, Exe: Executor + ?Sized>
 #[derive(Debug, Clone)]
 pub struct DeadLetterPolicy {
     //Maximum number of times that a message will be redelivered before being sent to the dead letter queue.
-    max_redeliver_count: usize,
-    // Name of the retry topic where the failing messages will be sent.
-    retry_letter_topic: String,
+    pub max_redeliver_count: usize,
     //Name of the dead topic where the failing messages will be sent.
-    dead_letter_topic: String,
+    pub dead_letter_topic: String,
 }
 
 impl<'a, Topic, Subscription, SubscriptionType, Exe: Executor + ?Sized>
