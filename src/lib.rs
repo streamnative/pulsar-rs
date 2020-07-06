@@ -470,8 +470,6 @@ mod tests {
         while let Some(res) = consumer.next().await {
             let message = res.unwrap();
             let data = message.deserialize().unwrap();
-
-            println!("{:?}", data);
             consumer.nack(&message).await.unwrap();
         }
     }

@@ -737,8 +737,6 @@ pub mod proto {
         pub message_id: MessageIdData,
         #[prost(uint32, optional, tag="3", default="0")]
         pub redelivery_count: ::std::option::Option<u32>,
-        #[prost(message, required, tag="4")]
-        pub ack_set: i64,
     }
     #[derive(Clone, PartialEq, Message)]
     pub struct CommandAck {
