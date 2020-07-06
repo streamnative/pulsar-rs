@@ -40,12 +40,17 @@ impl DeserializeMessage for String {
 
 /// Helper trait for message serialization
 pub trait SerializeMessage {
-    fn serialize_message(input: &Self) -> Result<producer::Message, Error>;
+    fn serialize_message(input: Self) -> Result<producer::Message, Error>;
 }
 
-impl SerializeMessage for [u8] {
-    fn serialize_message(input: &Self) -> Result<producer::Message, Error> {
-        //TODO figure out how to avoid copying here
+impl SerializeMessage for producer::Message {
+    fn serialize_message(input: Self) -> Result<producer::Message, Error> {
+        Ok(input)
+    }
+}
+
+impl<'a> SerializeMessage for &'a [u8] {
+    fn serialize_message(input: Self) -> Result<producer::Message, Error> {
         Ok(producer::Message {
             payload: input.to_vec(),
             ..Default::default()
@@ -54,17 +59,17 @@ impl SerializeMessage for [u8] {
 }
 
 impl SerializeMessage for Vec<u8> {
-    fn serialize_message(input: &Self) -> Result<producer::Message, Error> {
+    fn serialize_message(input: Self) -> Result<producer::Message, Error> {
         Ok(producer::Message {
-            payload: input.clone(),
+            payload: input,
             ..Default::default()
         })
     }
 }
 
 impl SerializeMessage for String {
-    fn serialize_message(input: &Self) -> Result<producer::Message, Error> {
-        let payload = input.as_bytes().to_vec();
+    fn serialize_message(input: Self) -> Result<producer::Message, Error> {
+        let payload = input.into_bytes();
         Ok(producer::Message {
             payload,
             ..Default::default()
@@ -72,8 +77,8 @@ impl SerializeMessage for String {
     }
 }
 
-impl SerializeMessage for str {
-    fn serialize_message(input: &Self) -> Result<producer::Message, Error> {
+impl<'a> SerializeMessage for &'a str {
+    fn serialize_message(input: Self) -> Result<producer::Message, Error> {
         let payload = input.as_bytes().to_vec();
         Ok(producer::Message {
             payload,
@@ -364,10 +369,10 @@ impl<Exe: Executor> Pulsar<Exe> {
     /// sends one mssage on a topic (not recommended for multiple messages)
     ///
     /// this function will create a producer, send the message then drop the producer
-    pub async fn send<S: Into<String>, M: SerializeMessage + ?Sized>(
+    pub async fn send<S: Into<String>, M: SerializeMessage + Sized>(
         &self,
         topic: S,
-        message: &M,
+        message: M,
         options: ProducerOptions,
     ) -> Result<oneshot::Receiver<CommandSendReceipt>, Error> {
         match M::serialize_message(message) {

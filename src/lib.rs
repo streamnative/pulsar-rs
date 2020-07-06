@@ -29,8 +29,8 @@
 //! }
 //!
 //! impl SerializeMessage for TestData {
-//!     fn serialize_message(input: &Self) -> Result<producer::Message, PulsarError> {
-//!         let payload = serde_json::to_vec(input).map_err(|e| PulsarError::Custom(e.to_string()))?;
+//!     fn serialize_message(input: Self) -> Result<producer::Message, PulsarError> {
+//!         let payload = serde_json::to_vec(&input).map_err(|e| PulsarError::Custom(e.to_string()))?;
 //!         Ok(producer::Message {
 //!             payload,
 //!             ..Default::default()
@@ -200,9 +200,9 @@ mod tests {
     }
 
     impl SerializeMessage for TestData {
-        fn serialize_message(input: &Self) -> Result<producer::Message, PulsarError> {
+        fn serialize_message(input: Self) -> Result<producer::Message, PulsarError> {
             let payload =
-                serde_json::to_vec(input).map_err(|e| PulsarError::Custom(e.to_string()))?;
+                serde_json::to_vec(&input).map_err(|e| PulsarError::Custom(e.to_string()))?;
             Ok(producer::Message {
                 payload,
                 ..Default::default()
@@ -322,7 +322,8 @@ mod tests {
                     })
                     .await
                     .unwrap()
-                    .await;
+                    .await
+                    .unwrap();
             }
 
             info!("sent");
@@ -382,7 +383,8 @@ mod tests {
                     .send(topic, send_data.to_string())
                     .await
                     .unwrap()
-                    .await;
+                    .await
+                    .unwrap();
 
                 let msg = consumer.next().await.unwrap().unwrap();
                 consumer.ack(&msg).await.unwrap();
@@ -412,7 +414,8 @@ mod tests {
                     .send(topic, send_data.to_vec())
                     .await
                     .unwrap()
-                    .await;
+                    .await
+                    .unwrap();
 
                 let msg = consumer.next().await.unwrap().unwrap();
                 consumer.ack(&msg).await.unwrap();
@@ -472,7 +475,8 @@ mod tests {
                     })
                     .await
                     .unwrap()
-                    .await;
+                    .await
+                    .unwrap();
             }
 
             let mut count = 0usize;

@@ -1303,8 +1303,8 @@ mod tests {
     }
 
     impl SerializeMessage for TestData {
-        fn serialize_message(input: &Self) -> Result<producer::Message, Error> {
-            let payload = serde_json::to_vec(input).map_err(|e| Error::Custom(e.to_string()))?;
+        fn serialize_message(input: Self) -> Result<producer::Message, Error> {
+            let payload = serde_json::to_vec(&input).map_err(|e| Error::Custom(e.to_string()))?;
             Ok(producer::Message {
                 payload,
                 ..Default::default()
@@ -1363,10 +1363,30 @@ mod tests {
             let mut producer = client.create_multi_topic_producer(None);
 
             let send_start = Utc::now();
-            producer.send(topic1, data1.clone()).await.unwrap().await;
-            producer.send(topic1, data2.clone()).await.unwrap().await;
-            producer.send(topic2, data3.clone()).await.unwrap().await;
-            producer.send(topic2, data4.clone()).await.unwrap().await;
+            producer
+                .send(topic1, data1.clone())
+                .await
+                .unwrap()
+                .await
+                .unwrap();
+            producer
+                .send(topic1, data2.clone())
+                .await
+                .unwrap()
+                .await
+                .unwrap();
+            producer
+                .send(topic2, data3.clone())
+                .await
+                .unwrap()
+                .await
+                .unwrap();
+            producer
+                .send(topic2, data4.clone())
+                .await
+                .unwrap()
+                .await
+                .unwrap();
 
             let data = vec![data1, data2, data3, data4];
 
@@ -1461,7 +1481,7 @@ mod tests {
                     .await
                     .unwrap();
 
-                producer.send(message.clone()).await.unwrap().await;
+                producer.send(message.clone()).await.unwrap().await.unwrap();
                 println!("producer sends done");
             }
 

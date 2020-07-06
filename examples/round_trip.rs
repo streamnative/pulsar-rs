@@ -12,8 +12,8 @@ struct TestData {
 }
 
 impl SerializeMessage for TestData {
-    fn serialize_message(input: &Self) -> Result<producer::Message, PulsarError> {
-        let payload = serde_json::to_vec(input).map_err(|e| PulsarError::Custom(e.to_string()))?;
+    fn serialize_message(input: Self) -> Result<producer::Message, PulsarError> {
+        let payload = serde_json::to_vec(&input).map_err(|e| PulsarError::Custom(e.to_string()))?;
         Ok(producer::Message {
             payload,
             ..Default::default()
@@ -56,6 +56,8 @@ async fn main() -> Result<(), pulsar::Error> {
                 .send(TestData {
                     data: "data".to_string(),
                 })
+                .await
+                .unwrap()
                 .await
                 .unwrap();
             counter += 1;
