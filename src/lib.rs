@@ -429,6 +429,53 @@ mod tests {
         runtime.block_on(Box::pin(f));
     }
 
+    #[tokio::test]
+    async fn redelivery_count() {
+        let _ = log::set_logger(&TEST_LOGGER);
+        let _ = log::set_max_level(LevelFilter::Debug);
+        let runtime = Runtime::new().unwrap();
+
+        let addr = "pulsar://127.0.0.1:6650";
+        let pulsar = Pulsar::<TokioExecutor>::new(addr, None, None, None)
+            .await
+            .expect("Unable to connect to Pulsar");
+
+        let mut producer = pulsar.create_multi_topic_producer(None);
+
+        println!("Connected");
+
+        let topic_fqn = "test-topic".to_string();
+        producer
+            .send(
+                &topic_fqn,
+                TestData {
+                    data: "hey".to_string(),
+                },
+            )
+            .await
+            .unwrap()
+            .await;
+
+        let mut consumer: Consumer<TestData> = pulsar
+            .consumer()
+            .with_topic(&topic_fqn)
+            .with_consumer_name("test_consumer")
+            .with_subscription_type(SubType::Shared)
+            .with_subscription("test_subscription")
+            .build()
+            .await
+            .unwrap();
+
+        // TODO: add assertions
+        while let Some(res) = consumer.next().await {
+            let message = res.unwrap();
+            let data = message.deserialize().unwrap();
+
+            println!("{:?}", data);
+            consumer.nack(&message).await.unwrap();
+        }
+    }
+
     #[test]
     #[ignore]
     #[cfg(feature = "tokio-runtime")]

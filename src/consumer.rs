@@ -588,6 +588,7 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe> {
                 }
             }
             None => {
+                println!("message: {:?}", message);
                 self.tx
                     .send(Ok((message.message_id.clone(), payload)))
                     .await
