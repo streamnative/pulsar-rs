@@ -150,7 +150,7 @@ impl<T: DeserializeMessage, Exe: Executor + ?Sized> Consumer<T, Exe> {
     pub fn dead_letter_policy(&self) -> Option<&DeadLetterPolicy> {
         match &self.inner {
             InnerConsumer::Single(c) => c.dead_letter_policy.as_ref(),
-            InnerConsumer::Mulit(c) => c.consumer_config.dead_letter_policy.as_ref(),
+            InnerConsumer::Mulit(c) => c.config.dead_letter_policy.as_ref(),
         }
     }
 
@@ -239,7 +239,6 @@ pub(crate) struct TopicConsumer<T: DeserializeMessage> {
     ack_tx: mpsc::UnboundedSender<AckMessage>,
     #[allow(unused)]
     data_type: PhantomData<fn(Payload) -> T::Output>,
-    options: ConsumerOptions,
     dead_letter_policy: Option<DeadLetterPolicy>,
     last_message_received: Option<DateTime<Utc>>,
     messages_received: u64,
@@ -359,7 +358,6 @@ impl<T: DeserializeMessage> TopicConsumer<T> {
             messages: Box::pin(rx),
             ack_tx,
             data_type: PhantomData,
-            options,
             dead_letter_policy,
             last_message_received: None,
             messages_received: 0,
@@ -776,9 +774,8 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe> {
                     if redelivery_count as usize >= dead_letter_policy.max_redeliver_count {
                         self.client
                             .send(
-                                dead_letter_policy.dead_letter_topic.clone(),
+                                &dead_letter_policy.dead_letter_topic,
                                 payload.data,
-                                producer::ProducerOptions::default(),
                             )
                             .await?
                             .await
@@ -1147,6 +1144,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
             consumer_id,
             unacked_message_redelivery_delay: unacked_message_resend_delay,
             options: consumer_options.unwrap_or_default(),
+            dead_letter_policy
         };
 
         let consumers =
@@ -1665,11 +1663,6 @@ mod tests {
 
         let client: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await.unwrap();
 
-        let mut producer = client
-            .create_producer(topic.clone(), None, producer::ProducerOptions::default())
-            .await
-            .unwrap();
-
         println!("creating consumer");
         let mut consumer: Consumer<TestData, _> = client
             .consumer()
@@ -1696,7 +1689,7 @@ mod tests {
 
         println!("created second consumer");
 
-        producer.send(message.clone()).await.unwrap().await.unwrap();
+        client.send(&topic, &message).await.unwrap().await.unwrap();
         println!("producer sends done");
 
         let msg = consumer.next().await.unwrap().unwrap();
