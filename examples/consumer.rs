@@ -2,7 +2,7 @@
 extern crate serde;
 use futures::TryStreamExt;
 use pulsar::{
-    message::proto::command_subscribe::SubType, message::Payload, Consumer, DeserializeMessage,
+    message::proto::command_subscribe::SubType, message::Payload, TopicConsumer, DeserializeMessage,
     Pulsar, TokioExecutor,
 };
 
@@ -26,7 +26,7 @@ async fn main() -> Result<(), pulsar::Error> {
     let addr = "pulsar://127.0.0.1:6650";
     let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await?;
 
-    let mut consumer: Consumer<TestData> = pulsar
+    let mut consumer: TopicConsumer<TestData> = pulsar
         .consumer()
         .with_topic("non-persistent://public/default/test")
         .with_consumer_name("test_consumer")

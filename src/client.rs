@@ -1,22 +1,19 @@
 use std::marker::PhantomData;
 use std::string::FromUtf8Error;
 use std::sync::Arc;
-use std::time::Duration;
 
-use futures::channel::oneshot;
-use futures::future;
+use futures::channel::{oneshot, mpsc};
 
 use crate::connection::Authentication;
 use crate::connection_manager::{BackOffOptions, BrokerAddress, ConnectionManager, TlsOptions};
-use crate::consumer::{
-    Consumer, ConsumerBuilder, ConsumerOptions, DeadLetterPolicy, MultiTopicConsumer, Unset,
-};
+use crate::consumer::ConsumerBuilder;
 use crate::error::Error;
 use crate::executor::Executor;
-use crate::message::proto::{self, command_subscribe::SubType, CommandSendReceipt};
+use crate::message::proto::{self, CommandSendReceipt};
 use crate::message::Payload;
-use crate::producer::{self, MultiTopicProducer, Producer, ProducerBuilder, ProducerOptions};
+use crate::producer::{self, MultiTopicProducer, ProducerBuilder, ProducerOptions, SendFuture};
 use crate::service_discovery::ServiceDiscovery;
+use futures::StreamExt;
 
 /// Helper trait for consumer deserialization
 pub trait DeserializeMessage {
@@ -111,6 +108,7 @@ impl<'a> SerializeMessage for &'a str {
 pub struct Pulsar<E: Executor + ?Sized> {
     pub(crate) manager: Arc<ConnectionManager<E>>,
     service_discovery: Arc<ServiceDiscovery<E>>,
+    producer: mpsc::UnboundedSender<SendMessage>,
 }
 
 impl<Exe: Executor> Pulsar<Exe> {
@@ -125,10 +123,14 @@ impl<Exe: Executor> Pulsar<Exe> {
         let manager = ConnectionManager::new(url, auth, backoff_parameters, tls_options).await?;
         let manager = Arc::new(manager);
         let service_discovery = Arc::new(ServiceDiscovery::with_manager(manager.clone()));
-        Ok(Pulsar {
+        let (producer, producer_rx) = mpsc::unbounded();
+        let client = Pulsar {
             manager,
             service_discovery,
-        })
+            producer
+        };
+        let _ = Exe::spawn(Box::pin(run_producer(client.clone(), producer_rx)));
+        Ok(client)
     }
 
     /// creates a new client builder
@@ -157,7 +159,7 @@ impl<Exe: Executor> Pulsar<Exe> {
     /// .build()
     /// .await?;
     /// ```
-    pub fn consumer(&self) -> ConsumerBuilder<Unset, Unset, Unset, Exe> {
+    pub fn consumer(&self) -> ConsumerBuilder<Exe> {
         ConsumerBuilder::new(self)
     }
 
@@ -174,7 +176,7 @@ impl<Exe: Executor> Pulsar<Exe> {
     ///     .build()
     ///     .await?;
     /// ```
-    pub fn producer(&self) -> ProducerBuilder<Unset, Exe> {
+    pub fn producer(&self) -> ProducerBuilder<Exe> {
         ProducerBuilder::new(self)
     }
 
@@ -222,189 +224,31 @@ impl<Exe: Executor> Pulsar<Exe> {
         Ok(topics.topics)
     }
 
-    pub fn create_multi_topic_consumer<T, S1, S2>(
-        &self,
-        topic_regex: regex::Regex,
-        subscription: S1,
-        namespace: S2,
-        sub_type: SubType,
-        topic_refresh: Duration,
-        unacked_message_resend_delay: Option<Duration>,
-        dead_letter_policy: Option<DeadLetterPolicy>,
-        options: ConsumerOptions,
-    ) -> MultiTopicConsumer<T, Exe>
-    where
-        T: DeserializeMessage,
-        S1: Into<String>,
-        S2: Into<String>,
-    {
-        MultiTopicConsumer::new(
-            self.clone(),
-            namespace.into(),
-            Some(topic_regex),
-            None,
-            subscription.into(),
-            sub_type,
-            topic_refresh,
-            unacked_message_resend_delay,
-            dead_letter_policy,
-            options,
-        )
-    }
 
-    /// creates a consumer
-    pub async fn create_consumer<T, S1, S2>(
-        &self,
-        topic: S1,
-        subscription: S2,
-        sub_type: SubType,
-        batch_size: Option<u32>,
-        consumer_name: Option<String>,
-        consumer_id: Option<u64>,
-        unacked_message_redelivery_delay: Option<Duration>,
-        dead_letter_policy: Option<DeadLetterPolicy>,
-        options: ConsumerOptions,
-    ) -> Result<Consumer<T>, Error>
-    where
-        T: DeserializeMessage,
-        S1: Into<String>,
-        S2: Into<String>,
-    {
-        let manager = self.manager.clone();
-        let topic = topic.into();
-
-        let broker_address = self.service_discovery.lookup_topic(topic.clone()).await?;
-        let conn = manager.get_connection(&broker_address).await?;
-        Consumer::from_connection(
-            self.clone(),
-            conn,
-            topic,
-            subscription.into(),
-            sub_type,
-            consumer_id,
-            consumer_name,
-            batch_size,
-            unacked_message_redelivery_delay,
-            dead_letter_policy,
-            options,
-        )
-        .await
-    }
-
-    pub async fn create_partitioned_consumers<
-        T: DeserializeMessage + Sized,
-        S1: Into<String> + Clone,
-        S2: Into<String> + Clone,
-    >(
-        &self,
-        topic: S1,
-        subscription: S2,
-        sub_type: SubType,
-        options: ConsumerOptions,
-    ) -> Result<Vec<Consumer<T>>, Error> {
-        let manager = self.manager.clone();
-
-        let v = self
-            .service_discovery
-            .lookup_partitioned_topic(topic)
-            .await?;
-
-        let mut res = Vec::new();
-        for (topic, broker_address) in v.iter() {
-            let subscription = subscription.clone();
-            let options = options.clone();
-
-            let conn = manager.get_connection(&broker_address).await?;
-            res.push(Consumer::from_connection(
-                self.clone(),
-                conn,
-                topic.to_string(),
-                subscription.into(),
-                sub_type,
-                None,
-                None,
-                None,
-                None, //TODO make configurable
-                None,
-                options,
-            ))
-        }
-
-        future::try_join_all(res).await
-    }
-
-    pub async fn create_producer<S: Into<String>>(
-        &self,
-        topic: S,
-        name: Option<String>,
-        options: ProducerOptions,
-    ) -> Result<Producer<Exe>, Error> {
-        let manager = self.manager.clone();
-        let topic = topic.into();
-        let broker_address = self.service_discovery.lookup_topic(topic.clone()).await?;
-        let conn = manager.get_connection(&broker_address).await?;
-
-        Producer::from_connection::<_>(self.clone(), conn, topic, name, options).await
-    }
-
-    pub async fn create_partitioned_producers<S: Into<String>>(
-        &self,
-        topic: S,
-        options: ProducerOptions,
-    ) -> Result<Vec<Producer<Exe>>, Error> {
-        let manager = self.manager.clone();
-
-        let v = self
-            .service_discovery
-            .lookup_partitioned_topic(topic)
-            .await?;
-
-        let mut res = Vec::new();
-        for (topic, broker_address) in v.iter() {
-            let conn = manager.get_connection(&broker_address).await?;
-            res.push(Producer::from_connection::<_>(
-                self.clone(),
-                conn,
-                topic,
-                None,
-                options.clone(),
-            ));
-        }
-
-        future::try_join_all(res).await
-    }
-
-    /// sends one mssage on a topic (not recommended for multiple messages)
+    /// sends one message on a topic (not recommended for multiple messages)
     ///
     /// this function will create a producer, send the message then drop the producer
     pub async fn send<S: Into<String>, M: SerializeMessage + Sized>(
         &self,
         topic: S,
         message: M,
-        options: ProducerOptions,
-    ) -> Result<oneshot::Receiver<CommandSendReceipt>, Error> {
-        match M::serialize_message(message) {
-            Ok(message) => self.send_raw::<S>(message, topic, options).await,
-            Err(e) => Err(e),
-        }
+    ) -> Result<SendFuture, Error> {
+        let message = M::serialize_message(message)?;
+        self.send_raw(message, topic).await
     }
 
     async fn send_raw<S: Into<String>>(
         &self,
         message: producer::Message,
         topic: S,
-        options: ProducerOptions,
-    ) -> Result<oneshot::Receiver<CommandSendReceipt>, Error> {
-        let mut producer = self.create_producer(topic, None, options).await?;
-        let rx = producer.send_raw(message.into()).await?;
-        Ok(rx)
-    }
-
-    pub fn create_multi_topic_producer(
-        &self,
-        options: Option<ProducerOptions>,
-    ) -> MultiTopicProducer<Exe> {
-        MultiTopicProducer::new(self.clone(), options.unwrap_or_default())
+    ) -> Result<SendFuture, Error> {
+        let (resolver, future) = oneshot::channel();
+        self.producer.unbounded_send(SendMessage {
+            topic: topic.into(),
+            message,
+            resolver
+        }).map_err(|_| Error::Custom("producer unexpectedly disconnected".into()))?;
+        Ok(SendFuture(future))
     }
 }
 
@@ -477,5 +321,28 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
             executor: _,
         } = self;
         Pulsar::new(url, auth, back_off_options, tls_options).await
+    }
+}
+
+struct SendMessage {
+    topic: String,
+    message: producer::Message,
+    resolver: oneshot::Sender<Result<CommandSendReceipt, Error>>,
+}
+
+async fn run_producer<Exe: Executor + ?Sized>(client: Pulsar<Exe>, mut messages: mpsc::UnboundedReceiver<SendMessage>) {
+    let mut producer = MultiTopicProducer::new(client, ProducerOptions::default());
+    while let Some(SendMessage { topic, message: payload, resolver }) = messages.next().await {
+        match producer.send(topic, payload).await {
+            Ok(future) => {
+                let _ = Exe::spawn(Box::pin(async move {
+                    let _ = resolver.send(future.await);
+                }));
+            }
+            Err(e) => {
+                let _ = resolver.send(Err(e));
+            }
+        }
+
     }
 }

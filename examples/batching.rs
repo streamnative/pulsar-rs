@@ -3,7 +3,7 @@ extern crate serde;
 use futures::{future::join_all, TryStreamExt};
 use pulsar::{
     message::proto, message::proto::command_subscribe::SubType, message::Payload, producer,
-    Consumer, DeserializeMessage, Error as PulsarError, Pulsar, SerializeMessage, TokioExecutor,
+    TopicConsumer, DeserializeMessage, Error as PulsarError, Pulsar, SerializeMessage, TokioExecutor,
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -79,7 +79,7 @@ async fn main() -> Result<(), pulsar::Error> {
         println!("receipts: {:?}", join_all(v).await);
     });
 
-    let mut consumer: Consumer<TestData> = pulsar
+    let mut consumer: TopicConsumer<TestData> = pulsar
         .consumer()
         .with_topic("test-batch-compression-snappy")
         .with_consumer_name("test_consumer")

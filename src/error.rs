@@ -183,11 +183,13 @@ impl std::error::Error for ConsumerError {
     }
 }
 
-#[derive(Debug)]
 pub enum ProducerError {
     Connection(ConnectionError),
     Custom(String),
     Io(io::Error),
+    PartialSend(Vec<Result<SendFuture, Error>>),
+    /// Indiciates the error was part of sending a batch, and thus shared across the batch
+    Batch(Arc<Error>)
 }
 
 impl From<ConnectionError> for ProducerError {
@@ -208,6 +210,49 @@ impl fmt::Display for ProducerError {
             ProducerError::Connection(e) => write!(f, "Connection error: {}", e),
             ProducerError::Io(e) => write!(f, "Compression error: {}", e),
             ProducerError::Custom(s) => write!(f, "Custom error: {}", s),
+            ProducerError::Batch(e) => write!(f, "Batch error: {}", e),
+            ProducerError::PartialSend(e) => {
+                let (successes, failures) = e.iter().fold((0, 0), |(s, f), r| match r {
+                    Ok(_) => (s + 1, f),
+                    Err(_) => (s, f + 1)
+                });
+                write!(f, "Partial send error - {} successful, {} failed", successes, failures)?;
+
+                if failures > 0 {
+                    let first_error = e.iter()
+                        .find(|r| r.is_err())
+                        .unwrap()
+                        .as_ref()
+                        .map(drop)
+                        .unwrap_err();
+                    write!(f, "first error: {}", first_error)?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl fmt::Debug for ProducerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ProducerError::Connection(e) => write!(f, "Connection({:?})", e),
+            ProducerError::Custom(msg) => write!(f, "Custom({:?})", msg),
+            ProducerError::Io(e) => write!(f, "Connection({:?})", e),
+            ProducerError::Batch(e) => write!(f, "Connection({:?})", e),
+            ProducerError::PartialSend(parts) => {
+                write!(f, "PartialSend(")?;
+                for (i, part) in parts.iter().enumerate() {
+                    match part {
+                        Ok(_) => write!(f, "Ok(SendFuture)")?,
+                        Err(e) => write!(f, "Err({:?})", e)?,
+                    }
+                    if i < (parts.len() - 1) {
+                        write!(f, ", ")?;
+                    }
+                }
+                write!(f, ")")
+            }
         }
     }
 }
@@ -217,7 +262,15 @@ impl std::error::Error for ProducerError {
         match self {
             ProducerError::Connection(e) => Some(e),
             ProducerError::Io(e) => Some(e),
+            ProducerError::Batch(e) => Some(e.as_ref()),
+            ProducerError::PartialSend(parts) => {
+                parts.iter()
+                    .find(|r| r.is_err())
+                    .map(|r| r.as_ref().map(drop).unwrap_err() as _)
+            },
             ProducerError::Custom(_) => None,
+
+
         }
     }
 }
@@ -297,6 +350,8 @@ impl SharedError {
 }
 
 use crate::message::proto::ServerError;
+use crate::producer::SendFuture;
+
 pub(crate) fn server_error(i: i32) -> Option<ServerError> {
     match i {
         0 => Some(ServerError::UnknownError),
