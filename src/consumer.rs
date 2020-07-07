@@ -24,6 +24,7 @@ use crate::message::{
     proto::{self, command_subscribe::SubType, MessageIdData, MessageMetadata, Schema},
     BatchedMessage, Message as RawMessage, Metadata, Payload,
 };
+use crate::producer;
 use crate::{DeserializeMessage, Pulsar};
 
 /// Configuration options for consumers
@@ -582,68 +583,72 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe> {
                 let it = BatchedMessageIterator::new(message.message_id, payload)?;
                 let now = Instant::now();
                 for (id, payload) in it {
-                    self.tx.send(Ok((id.clone(), payload))).await.map_err(|e| {
-                        error!("tx returned {:?}", e);
-                        Error::Custom("tx closed".to_string())
-                    })?;
-                    if let Some(duration) = self.unacked_message_redelivery_delay {
-                        self.unacked_messages.insert(id, now + duration);
-                    }
+                    // TODO: Dead letter policy for batched messages
+                    self.send_to_consumer(id, payload, now).await?;
                 }
             }
-            None => {
-                match (message.redelivery_count, self.dead_letter_policy.as_ref()) {
-                    (Some(redelivery_count), Some(dead_letter_policy)) => {
-                        if redelivery_count as usize >= dead_letter_policy.max_redeliver_count {
-                            let options = crate::producer::ProducerOptions::default();
-                            self.client
-                                .send(
-                                    dead_letter_policy.dead_letter_topic.clone(),
-                                    &payload.data,
-                                    options,
-                                )
-                                .await?;
-
-                            let message_data = MessageData {
-                                id: message.message_id,
-                                batch_size: None,
-                            };
-
-                            self.ack_tx.send(AckMessage::Ack(message_data, false)).await;
-                        } else {
-                            // TODO DRY this
-                            self.tx
-                                .send(Ok((message.message_id.clone(), payload)))
-                                .await
-                                .map_err(|e| {
-                                    error!("tx returned {:?}", e);
-                                    Error::Custom("tx closed".to_string())
-                                })?;
-                            if let Some(duration) = self.unacked_message_redelivery_delay {
-                                self.unacked_messages
-                                    .insert(message.message_id, Instant::now() + duration);
-                            }
-                        }
-                    }
-                    _ => {
-                        self.tx
-                            .send(Ok((message.message_id.clone(), payload)))
+            None => match (message.redelivery_count, self.dead_letter_policy.as_ref()) {
+                (Some(redelivery_count), Some(dead_letter_policy)) => {
+                    // Send message to Dead Letter Topic and ack message in original topic
+                    if redelivery_count as usize >= dead_letter_policy.max_redeliver_count {
+                        self.client
+                            .send(
+                                dead_letter_policy.dead_letter_topic.clone(),
+                                payload.data,
+                                producer::ProducerOptions::default(),
+                            )
+                            .await?
                             .await
                             .map_err(|e| {
-                                error!("tx returned {:?}", e);
+                                error!("One shot cancelled {:?}", e);
+                                Error::Custom("DLQ send error".to_string())
+                            })?;
+
+                        self.ack_tx
+                            .send(AckMessage::Ack(
+                                MessageData {
+                                    id: message.message_id,
+                                    batch_size: None,
+                                },
+                                false,
+                            ))
+                            .await
+                            .map_err(|e| {
+                                error!("ack tx returned {:?}", e);
                                 Error::Custom("tx closed".to_string())
                             })?;
-                        if let Some(duration) = self.unacked_message_redelivery_delay {
-                            //info!("inserting id {:?} to trigger unack at {:?}",
-                            //      message.message_id, Instant::now()+duration);
-                            self.unacked_messages
-                                .insert(message.message_id, Instant::now() + duration);
-                        }
+                    } else {
+                        self.send_to_consumer(message.message_id, payload, Instant::now())
+                            .await?
                     }
                 }
-            }
+                _ => {
+                    self.send_to_consumer(message.message_id, payload, Instant::now())
+                        .await?
+                }
+            },
         }
 
+        Ok(())
+    }
+
+    async fn send_to_consumer(
+        &mut self,
+        message_id: MessageIdData,
+        payload: Payload,
+        request_time: Instant,
+    ) -> Result<(), Error> {
+        self.tx
+            .send(Ok((message_id.clone(), payload)))
+            .await
+            .map_err(|e| {
+                error!("tx returned {:?}", e);
+                Error::Custom("tx closed".to_string())
+            })?;
+        if let Some(duration) = self.unacked_message_redelivery_delay {
+            self.unacked_messages
+                .insert(message_id, request_time + duration);
+        }
         Ok(())
     }
 
@@ -1620,6 +1625,97 @@ mod tests {
                 }
 
                 assert!(is_err, "waiting for a message should have timed out, since we already acknowledged the only message in the queue");
+            }
+        };
+
+        rt.block_on(f);
+    }
+
+    #[test]
+    #[cfg(feature = "tokio-runtime")]
+    fn dead_letter_queue() {
+        use rand::{distributions::Alphanumeric, Rng};
+        let _ = log::set_logger(&TEST_LOGGER);
+        let _ = log::set_max_level(LevelFilter::Debug);
+        let addr = "pulsar://127.0.0.1:6650";
+        let mut rt = Runtime::new().unwrap();
+
+        let topic = "dead_letter_queue_test";
+
+        let f = async move {
+            let client: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await.unwrap();
+
+            let message = TestData {
+                topic: std::iter::repeat(())
+                    .map(|()| rand::thread_rng().sample(Alphanumeric))
+                    .take(8)
+                    .collect(),
+                msg: 1,
+            };
+
+            {
+                let mut producer = client
+                    .create_producer(topic, None, producer::ProducerOptions::default())
+                    .await
+                    .unwrap();
+
+                producer.send(message.clone()).await.unwrap().await.unwrap();
+                println!("producer sends done");
+            }
+
+            let dead_letter_topic = "dead_letter_queue_test-dlq".to_string();
+
+            let dead_letter_policy = crate::consumer::DeadLetterPolicy {
+                max_redeliver_count: 1,
+                dead_letter_topic: dead_letter_topic.clone(),
+            };
+
+            {
+                println!("creating consumer");
+                let mut consumer: Consumer<TestData> = client
+                    .consumer()
+                    .with_topic(topic)
+                    .with_subscription("nack")
+                    .with_subscription_type(SubType::Shared)
+                    .with_dead_letter_policy(Some(dead_letter_policy.clone()))
+                    .build()
+                    .await
+                    .unwrap();
+
+                println!("created consumer");
+
+                let msg = consumer.next().await.unwrap().unwrap();
+                println!("got message: {:?}", msg.payload);
+                assert_eq!(
+                    message,
+                    msg.deserialize().unwrap(),
+                    "we probably received a message from a previous run of the test"
+                );
+                // Nacking message to send it to DLQ
+                consumer.nack(&msg).await.unwrap();
+            }
+
+            {
+                println!("creating second consumer that consumes from the DLQ");
+                let mut consumer: Consumer<TestData> = client
+                    .consumer()
+                    .with_topic(dead_letter_topic)
+                    .with_subscription("dead_letter_topic")
+                    .with_subscription_type(SubType::Shared)
+                    .build()
+                    .await
+                    .unwrap();
+
+                println!("created second consumer");
+
+                let msg = consumer.next().await.unwrap().unwrap();
+                println!("got message: {:?}", msg.payload);
+                assert_eq!(
+                    message,
+                    msg.deserialize().unwrap(),
+                    "we probably received a message from a previous run of the test"
+                );
+                consumer.ack(&msg).await.unwrap();
             }
         };
 
