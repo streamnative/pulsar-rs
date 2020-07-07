@@ -159,6 +159,7 @@ pub use executor::Executor;
 pub use executor::TokioExecutor;
 pub use message::proto::command_subscribe::SubType;
 pub use producer::{MultiTopicProducer, Producer, ProducerOptions};
+pub use message::proto::{self, CommandSendReceipt};
 
 mod client;
 mod connection;
@@ -166,7 +167,7 @@ mod connection_manager;
 pub mod consumer;
 pub mod error;
 mod executor;
-pub mod message;
+mod message;
 pub mod producer;
 mod service_discovery;
 
