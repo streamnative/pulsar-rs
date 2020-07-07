@@ -8,7 +8,9 @@ use futures::future;
 
 use crate::connection::Authentication;
 use crate::connection_manager::{BackOffOptions, BrokerAddress, ConnectionManager, TlsOptions};
-use crate::consumer::{Consumer, ConsumerBuilder, ConsumerOptions, MultiTopicConsumer, Unset};
+use crate::consumer::{
+    Consumer, ConsumerBuilder, ConsumerOptions, DeadLetterPolicy, MultiTopicConsumer, Unset,
+};
 use crate::error::Error;
 use crate::executor::Executor;
 use crate::message::proto::{self, command_subscribe::SubType, CommandSendReceipt};
@@ -228,6 +230,7 @@ impl<Exe: Executor> Pulsar<Exe> {
         sub_type: SubType,
         topic_refresh: Duration,
         unacked_message_resend_delay: Option<Duration>,
+        dead_letter_policy: Option<DeadLetterPolicy>,
         options: ConsumerOptions,
     ) -> MultiTopicConsumer<T, Exe>
     where
@@ -243,6 +246,7 @@ impl<Exe: Executor> Pulsar<Exe> {
             sub_type,
             topic_refresh,
             unacked_message_resend_delay,
+            dead_letter_policy,
             options,
         )
     }
@@ -257,6 +261,7 @@ impl<Exe: Executor> Pulsar<Exe> {
         consumer_name: Option<String>,
         consumer_id: Option<u64>,
         unacked_message_redelivery_delay: Option<Duration>,
+        dead_letter_policy: Option<DeadLetterPolicy>,
         options: ConsumerOptions,
     ) -> Result<Consumer<T>, Error>
     where
@@ -279,6 +284,7 @@ impl<Exe: Executor> Pulsar<Exe> {
             consumer_name,
             batch_size,
             unacked_message_redelivery_delay,
+            dead_letter_policy,
             options,
         )
         .await
@@ -318,6 +324,7 @@ impl<Exe: Executor> Pulsar<Exe> {
                 None,
                 None,
                 None, //TODO make configurable
+                None,
                 options,
             ))
         }

@@ -24,6 +24,7 @@ use crate::message::{
     proto::{self, command_subscribe::SubType, MessageIdData, MessageMetadata, Schema},
     BatchedMessage, Message as RawMessage, Metadata, Payload,
 };
+use crate::producer;
 use crate::{DeserializeMessage, Pulsar};
 
 /// Configuration options for consumers
@@ -86,6 +87,7 @@ impl<T: DeserializeMessage> Consumer<T> {
         consumer_name: Option<String>,
         batch_size: Option<u32>,
         unacked_message_redelivery_delay: Option<Duration>,
+        dead_letter_policy: Option<DeadLetterPolicy>,
         options: ConsumerOptions,
     ) -> Result<Consumer<T>, Error> {
         let consumer_id = consumer_id.unwrap_or_else(rand::random);
@@ -157,9 +159,11 @@ impl<T: DeserializeMessage> Consumer<T> {
             name,
             tx,
             messages,
+            ack_tx.clone(),
             ack_rx,
             batch_size,
             unacked_message_redelivery_delay,
+            dead_letter_policy,
             options.clone(),
             _drop_signal,
         );
@@ -258,11 +262,13 @@ struct ConsumerEngine<Exe: Executor + ?Sized> {
     name: Option<String>,
     tx: mpsc::Sender<Result<(proto::MessageIdData, Payload), Error>>,
     messages_rx: Option<mpsc::UnboundedReceiver<RawMessage>>,
+    ack_tx: mpsc::UnboundedSender<AckMessage>,
     ack_rx: Option<mpsc::UnboundedReceiver<AckMessage>>,
     batch_size: u32,
     remaining_messages: u32,
     unacked_message_redelivery_delay: Option<Duration>,
     unacked_messages: HashMap<MessageIdData, Instant>,
+    dead_letter_policy: Option<DeadLetterPolicy>,
     options: ConsumerOptions,
     _drop_signal: oneshot::Sender<()>,
 }
@@ -284,9 +290,11 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe> {
         name: Option<String>,
         tx: mpsc::Sender<Result<(proto::MessageIdData, Payload), Error>>,
         messages_rx: mpsc::UnboundedReceiver<RawMessage>,
+        ack_tx: mpsc::UnboundedSender<AckMessage>,
         ack_rx: mpsc::UnboundedReceiver<AckMessage>,
         batch_size: u32,
         unacked_message_redelivery_delay: Option<Duration>,
+        dead_letter_policy: Option<DeadLetterPolicy>,
         options: ConsumerOptions,
         _drop_signal: oneshot::Sender<()>,
     ) -> ConsumerEngine<Exe> {
@@ -300,11 +308,13 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe> {
             name,
             tx,
             messages_rx: Some(messages_rx),
+            ack_tx,
             ack_rx: Some(ack_rx),
             batch_size,
             remaining_messages: batch_size,
             unacked_message_redelivery_delay,
             unacked_messages: HashMap::new(),
+            dead_letter_policy,
             options,
             _drop_signal,
         }
@@ -571,34 +581,68 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe> {
         match payload.metadata.num_messages_in_batch {
             Some(_) => {
                 let it = BatchedMessageIterator::new(message.message_id, payload)?;
-                let now = Instant::now();
                 for (id, payload) in it {
-                    self.tx.send(Ok((id.clone(), payload))).await.map_err(|e| {
-                        error!("tx returned {:?}", e);
-                        Error::Custom("tx closed".to_string())
-                    })?;
-                    if let Some(duration) = self.unacked_message_redelivery_delay {
-                        self.unacked_messages.insert(id, now + duration);
+                    // TODO: Dead letter policy for batched messages
+                    self.send_to_consumer(id, payload).await?;
+                }
+            }
+            None => match (message.redelivery_count, self.dead_letter_policy.as_ref()) {
+                (Some(redelivery_count), Some(dead_letter_policy)) => {
+                    // Send message to Dead Letter Topic and ack message in original topic
+                    if redelivery_count as usize >= dead_letter_policy.max_redeliver_count {
+                        self.client
+                            .send(
+                                dead_letter_policy.dead_letter_topic.clone(),
+                                payload.data,
+                                producer::ProducerOptions::default(),
+                            )
+                            .await?
+                            .await
+                            .map_err(|e| {
+                                error!("One shot cancelled {:?}", e);
+                                Error::Custom("DLQ send error".to_string())
+                            })?;
+
+                        self.ack_tx
+                            .send(AckMessage::Ack(
+                                MessageData {
+                                    id: message.message_id,
+                                    batch_size: None,
+                                },
+                                false,
+                            ))
+                            .await
+                            .map_err(|e| {
+                                error!("ack tx returned {:?}", e);
+                                Error::Custom("tx closed".to_string())
+                            })?;
+                    } else {
+                        self.send_to_consumer(message.message_id, payload).await?
                     }
                 }
-            }
-            None => {
-                self.tx
-                    .send(Ok((message.message_id.clone(), payload)))
-                    .await
-                    .map_err(|e| {
-                        error!("tx returned {:?}", e);
-                        Error::Custom("tx closed".to_string())
-                    })?;
-                if let Some(duration) = self.unacked_message_redelivery_delay {
-                    //info!("inserting id {:?} to trigger unack at {:?}",
-                    //      message.message_id, Instant::now()+duration);
-                    self.unacked_messages
-                        .insert(message.message_id, Instant::now() + duration);
-                }
-            }
+                _ => self.send_to_consumer(message.message_id, payload).await?,
+            },
         }
 
+        Ok(())
+    }
+
+    async fn send_to_consumer(
+        &mut self,
+        message_id: MessageIdData,
+        payload: Payload,
+    ) -> Result<(), Error> {
+        let now = Instant::now();
+        self.tx
+            .send(Ok((message_id.clone(), payload)))
+            .await
+            .map_err(|e| {
+                error!("tx returned {:?}", e);
+                Error::Custom("tx closed".to_string())
+            })?;
+        if let Some(duration) = self.unacked_message_redelivery_delay {
+            self.unacked_messages.insert(message_id, now + duration);
+        }
         Ok(())
     }
 
@@ -740,6 +784,7 @@ pub struct ConsumerBuilder<'a, Topic, Subscription, SubscriptionType, Exe: Execu
     consumer_name: Option<String>,
     batch_size: Option<u32>,
     unacked_message_resend_delay: Option<Duration>,
+    dead_letter_policy: Option<DeadLetterPolicy>,
     consumer_options: Option<ConsumerOptions>,
 
     // Currently only used for multi-topic
@@ -759,6 +804,7 @@ impl<'a, Exe: Executor> ConsumerBuilder<'a, Set<String>, Set<String>, Set<SubTyp
             consumer_options,
             batch_size,
             unacked_message_resend_delay,
+            dead_letter_policy,
             ..
         } = self;
 
@@ -771,6 +817,7 @@ impl<'a, Exe: Executor> ConsumerBuilder<'a, Set<String>, Set<String>, Set<SubTyp
                 consumer_name,
                 consumer_id,
                 unacked_message_resend_delay,
+                dead_letter_policy,
                 consumer_options.unwrap_or_else(ConsumerOptions::default),
             )
             .await
@@ -791,6 +838,7 @@ impl<'a, Exe: Executor> ConsumerBuilder<'a, Set<Regex>, Set<String>, Set<SubType
             topic_refresh,
             namespace,
             unacked_message_resend_delay,
+            dead_letter_policy,
             ..
         } = self;
         if consumer_id.is_some() {
@@ -812,6 +860,7 @@ impl<'a, Exe: Executor> ConsumerBuilder<'a, Set<Regex>, Set<String>, Set<SubType
             sub_type,
             topic_refresh,
             unacked_message_resend_delay,
+            dead_letter_policy,
             consumer_options.unwrap_or_else(ConsumerOptions::default),
         )
     }
@@ -829,6 +878,7 @@ impl<'a, Exe: Executor + ?Sized> ConsumerBuilder<'a, Unset, Unset, Unset, Exe> {
             batch_size: None,
             //TODO what should this default to? None seems incorrect..
             unacked_message_resend_delay: None,
+            dead_letter_policy: None,
             consumer_options: None,
             namespace: None,
             topic_refresh: None,
@@ -855,6 +905,7 @@ impl<'a, Subscription, SubscriptionType, Exe: Executor + ?Sized>
             namespace: self.namespace,
             topic_refresh: self.topic_refresh,
             unacked_message_resend_delay: self.unacked_message_resend_delay,
+            dead_letter_policy: self.dead_letter_policy,
         }
     }
 
@@ -874,6 +925,7 @@ impl<'a, Subscription, SubscriptionType, Exe: Executor + ?Sized>
             namespace: self.namespace,
             topic_refresh: self.topic_refresh,
             unacked_message_resend_delay: self.unacked_message_resend_delay,
+            dead_letter_policy: self.dead_letter_policy,
         }
     }
 }
@@ -897,6 +949,7 @@ impl<'a, Topic, SubscriptionType, Exe: Executor + ?Sized>
             namespace: self.namespace,
             topic_refresh: self.topic_refresh,
             unacked_message_resend_delay: self.unacked_message_resend_delay,
+            dead_letter_policy: self.dead_letter_policy,
         }
     }
 }
@@ -920,6 +973,7 @@ impl<'a, Topic, Subscription, Exe: Executor + ?Sized>
             namespace: self.namespace,
             topic_refresh: self.topic_refresh,
             unacked_message_resend_delay: self.unacked_message_resend_delay,
+            dead_letter_policy: self.dead_letter_policy,
         }
     }
 }
@@ -943,6 +997,7 @@ impl<'a, Subscription, SubscriptionType, Exe: Executor + ?Sized>
             namespace: Some(namespace.into()),
             topic_refresh: self.topic_refresh,
             unacked_message_resend_delay: self.unacked_message_resend_delay,
+            dead_letter_policy: self.dead_letter_policy,
         }
     }
 
@@ -962,8 +1017,17 @@ impl<'a, Subscription, SubscriptionType, Exe: Executor + ?Sized>
             namespace: self.namespace,
             topic_refresh: Some(refresh_interval),
             unacked_message_resend_delay: self.unacked_message_resend_delay,
+            dead_letter_policy: self.dead_letter_policy,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct DeadLetterPolicy {
+    //Maximum number of times that a message will be redelivered before being sent to the dead letter queue.
+    pub max_redeliver_count: usize,
+    //Name of the dead topic where the failing messages will be sent.
+    pub dead_letter_topic: String,
 }
 
 impl<'a, Topic, Subscription, SubscriptionType, Exe: Executor + ?Sized>
@@ -1008,6 +1072,11 @@ impl<'a, Topic, Subscription, SubscriptionType, Exe: Executor + ?Sized>
         self.unacked_message_resend_delay = delay;
         self
     }
+
+    pub fn with_dead_letter_policy(mut self, dead_letter_policy: Option<DeadLetterPolicy>) -> Self {
+        self.dead_letter_policy = dead_letter_policy;
+        self
+    }
 }
 
 /// Details about the current state of the Consumer
@@ -1024,6 +1093,7 @@ pub struct MultiTopicConsumer<T: DeserializeMessage, Exe: Executor> {
     topic_regex: Regex,
     pulsar: Pulsar<Exe>,
     unacked_message_resend_delay: Option<Duration>,
+    dead_letter_policy: Option<DeadLetterPolicy>,
     consumers: BTreeMap<String, Pin<Box<Consumer<T>>>>,
     topics: VecDeque<String>,
     new_consumers: Option<Pin<Box<dyn Future<Output = Result<Vec<Consumer<T>>, Error>> + Send>>>,
@@ -1045,6 +1115,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
         sub_type: SubType,
         topic_refresh: Duration,
         unacked_message_resend_delay: Option<Duration>,
+        dead_letter_policy: Option<DeadLetterPolicy>,
         options: ConsumerOptions,
     ) -> Self
     where
@@ -1056,6 +1127,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
             topic_regex,
             pulsar,
             unacked_message_resend_delay,
+            dead_letter_policy,
             consumers: BTreeMap::new(),
             topics: VecDeque::new(),
             new_consumers: None,
@@ -1204,6 +1276,7 @@ impl<T: 'static + DeserializeMessage, Exe: Executor> Stream for MultiTopicConsum
             let existing_topics: BTreeSet<String> = self.consumers.keys().cloned().collect();
             let options = self.options.clone();
             let unacked_message_resend_delay = self.unacked_message_resend_delay;
+            let dead_letter_policy = self.dead_letter_policy.clone();
 
             let new_consumers = Box::pin(async move {
                 let topics: Vec<String> = pulsar
@@ -1226,6 +1299,7 @@ impl<T: 'static + DeserializeMessage, Exe: Executor> Stream for MultiTopicConsum
                         None,
                         None,
                         unacked_message_resend_delay,
+                        dead_letter_policy.clone(),
                         options.clone(),
                     ));
                 }
@@ -1549,5 +1623,84 @@ mod tests {
         };
 
         rt.block_on(f);
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "tokio-runtime")]
+    async fn dead_letter_queue() {
+        let _ = log::set_logger(&TEST_LOGGER);
+        let _ = log::set_max_level(LevelFilter::Debug);
+        let addr = "pulsar://127.0.0.1:6650";
+
+        let test_id: u16 = rand::random();
+        let topic = format!("dead_letter_queue_test_{}", test_id);
+        let test_msg: u32 = rand::random();
+
+        let message = TestData {
+            topic: topic.clone(),
+            msg: test_msg,
+        };
+
+        let dead_letter_topic = format!("{}_dlq", topic);
+
+        let dead_letter_policy = crate::consumer::DeadLetterPolicy {
+            max_redeliver_count: 1,
+            dead_letter_topic: dead_letter_topic.clone(),
+        };
+
+        let client: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await.unwrap();
+
+        let mut producer = client
+            .create_producer(topic.clone(), None, producer::ProducerOptions::default())
+            .await
+            .unwrap();
+
+        println!("creating consumer");
+        let mut consumer: Consumer<TestData> = client
+            .consumer()
+            .with_topic(topic.clone())
+            .with_subscription("nack")
+            .with_subscription_type(SubType::Shared)
+            .with_dead_letter_policy(Some(dead_letter_policy.clone()))
+            .build()
+            .await
+            .unwrap();
+
+        println!("created consumer");
+
+        println!("creating second consumer that consumes from the DLQ");
+        let mut dlq_consumer: Consumer<TestData> = client
+            .clone()
+            .consumer()
+            .with_topic(dead_letter_topic)
+            .with_subscription("dead_letter_topic")
+            .with_subscription_type(SubType::Shared)
+            .build()
+            .await
+            .unwrap();
+
+        println!("created second consumer");
+
+        producer.send(message.clone()).await.unwrap().await.unwrap();
+        println!("producer sends done");
+
+        let msg = consumer.next().await.unwrap().unwrap();
+        println!("got message: {:?}", msg.payload);
+        assert_eq!(
+            message,
+            msg.deserialize().unwrap(),
+            "we probably received a message from a previous run of the test"
+        );
+        // Nacking message to send it to DLQ
+        consumer.nack(&msg).await.unwrap();
+
+        let dlq_msg = dlq_consumer.next().await.unwrap().unwrap();
+        println!("got message: {:?}", msg.payload);
+        assert_eq!(
+            message,
+            dlq_msg.deserialize().unwrap(),
+            "we probably received a message from a previous run of the test"
+        );
+        dlq_consumer.ack(&dlq_msg).await.unwrap();
     }
 }
