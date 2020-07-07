@@ -176,15 +176,17 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
         }
     }
 
-    /// get the list of topic names and addresses for a partitioned topic
+    /// Lookup a topic, returning a list of the partitions (if partitioned) and addresses
+    /// associated with that topic.
     pub async fn lookup_partitioned_topic<S: Into<String>>(
         &self,
         topic: S,
     ) -> Result<Vec<(String, BrokerAddress)>, ServiceDiscoveryError> {
         let topic = topic.into();
         let partitions = self.lookup_partitioned_topic_number(&topic).await?;
+        trace!("Partitions for topic {}: {}", &topic, &partitions);
         let topics = match partitions {
-            1 => vec![topic],
+            0 => vec![topic],
             _ => (0..partitions).map(|n| format!("{}-partition-{}", &topic, n)).collect(),
         };
         try_join_all(topics.into_iter().map(|topic| {

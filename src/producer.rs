@@ -109,27 +109,46 @@ pub struct ProducerOptions {
 }
 
 /// Wrapper structure that manges multiple producers at once, creating them as needed
+/// ```rust,no_run
+/// use pulsar::{Pulsar, TokioExecutor};
+///
+/// # async fn test() -> Result<(), pulsar::Error> {
+/// # let addr = "pulsar://127.0.0.1:6650";
+/// # let topic = "topic";
+/// # let message = "data".to_owned();
+/// let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await?;
+/// let mut producer = pulsar.producer()
+///     .with_name("name")
+///     .build_multi_topic();
+/// let send_1 = producer.send(topic, &message).await?;
+/// let send_2 = producer.send(topic, &message).await?;
+/// send_1.await?;
+/// send_2.await?;
+/// # Ok(())
+/// # }
+/// ```
 pub struct MultiTopicProducer<Exe: Executor + ?Sized> {
     client: Pulsar<Exe>,
     producers: BTreeMap<String, Producer<Exe>>,
     options: ProducerOptions,
+    name: Option<String>,
 }
 
 impl<Exe: Executor + ?Sized> MultiTopicProducer<Exe> {
-    pub fn new(client: Pulsar<Exe>, options: ProducerOptions) -> MultiTopicProducer<Exe> {
-        MultiTopicProducer {
-            client,
-            producers: BTreeMap::new(),
-            options,
-        }
-    }
-
     pub fn options(&self) -> &ProducerOptions {
         &self.options
     }
 
     pub fn topics(&self) -> Vec<String> {
         self.producers.keys().cloned().collect()
+    }
+
+    pub async fn close_producer<S: Into<String>>(&mut self, topic: S) -> Result<(), Error> {
+        let partitions = self.client.lookup_partitioned_topic(topic).await?;
+        for (topic, _) in partitions {
+            self.producers.remove(&topic);
+        }
+        Ok(())
     }
 
     pub async fn send<T: SerializeMessage + Sized, S: Into<String>>(
@@ -140,11 +159,15 @@ impl<Exe: Executor + ?Sized> MultiTopicProducer<Exe> {
         let message = T::serialize_message(message)?;
         let topic = topic.into();
         if !self.producers.contains_key(&topic) {
-            let producer = self
+            let mut builder = self
                 .client
                 .producer()
                 .with_topic(&topic)
-                .with_options(self.options.clone())
+                .with_options(self.options.clone());
+            if let Some(name) = &self.name {
+                builder = builder.with_name(name.clone());
+            }
+            let producer = builder
                 .build()
                 .await?;
             self.producers.insert(topic.clone(), producer);
@@ -196,11 +219,15 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
         }
     }
 
-    pub fn partitions(&self) -> Vec<String> {
+    pub fn partitions(&self) -> Option<Vec<String>> {
         match &self.inner {
-            ProducerInner::Single(p) => vec![p.topic().to_owned()],
+            ProducerInner::Single(_) => None,
             ProducerInner::Partitioned(p) => {
-                p.producers.iter().map(|p| p.topic().to_owned()).collect()
+                Some(
+                    p.producers.iter()
+                        .map(|p| p.topic().to_owned())
+                        .collect()
+                )
             }
         }
     }
@@ -227,7 +254,7 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
         }
     }
 
-    /// sends a message
+    /// Sends a message
     ///
     /// this function returns a `SendFuture` because the receipt can come long after
     /// this function was called, for various reasons:
@@ -237,11 +264,14 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
     ///
     /// Usage:
     ///
-    /// ```rust,ignore
+    /// ```rust,no_run
+    /// # async fn run(mut producer: pulsar::Producer<pulsar::TokioExecutor>) -> Result<(), pulsar::Error> {
     /// let f1 = producer.send("hello").await?;
     /// let f2 = producer.send("world").await?;
-    /// let receipt1 = f.await?;
-    /// let receipt2 = f.await?;
+    /// let receipt1 = f1.await?;
+    /// let receipt2 = f2.await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn send<T: SerializeMessage + Sized>(
         &mut self,
@@ -313,7 +343,7 @@ impl<Exe: Executor + ?Sized> PartitionedProducer<Exe> {
 }
 
 /// a producer is used to publish messages on a topic
-pub struct TopicProducer<Exe: Executor + ?Sized> {
+struct TopicProducer<Exe: Executor + ?Sized> {
     client: Pulsar<Exe>,
     connection: Arc<Connection>,
     id: ProducerId,
@@ -680,6 +710,7 @@ impl<Exe: Executor + ?Sized> TopicProducer<Exe> {
 /// Helper structure to prepare a producer
 ///
 /// generated from [Pulsar::producer]
+#[derive(Clone)]
 pub struct ProducerBuilder<Exe: Executor + ?Sized> {
     pulsar: Pulsar<Exe>,
     topic: Option<String>,
@@ -688,6 +719,30 @@ pub struct ProducerBuilder<Exe: Executor + ?Sized> {
 }
 
 impl<'a, Exe: Executor + ?Sized> ProducerBuilder<Exe> {
+    pub fn new(pulsar: &Pulsar<Exe>) -> Self {
+        ProducerBuilder {
+            pulsar: pulsar.clone(),
+            topic: None,
+            name: None,
+            producer_options: None,
+        }
+    }
+
+    pub fn with_topic<S: Into<String>>(mut self, topic: S) -> Self {
+        self.topic = Some(topic.into());
+        self
+    }
+
+    pub fn with_name<S: Into<String>>(mut self, name: S) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    pub fn with_options(mut self, options: ProducerOptions) -> Self {
+        self.producer_options = Some(options);
+        self
+    }
+
     pub async fn build(self) -> Result<Producer<Exe>, Error> {
         let ProducerBuilder {
             pulsar,
@@ -716,7 +771,7 @@ impl<'a, Exe: Executor + ?Sized> ProducerBuilder<Exe> {
                     }
                 }),
         )
-        .await?;
+            .await?;
 
         let producer = if producers.len() == 1 {
             ProducerInner::Single(producers.into_iter().next().unwrap())
@@ -738,28 +793,13 @@ impl<'a, Exe: Executor + ?Sized> ProducerBuilder<Exe> {
         Ok(Producer { inner: producer })
     }
 
-    pub fn new(pulsar: &Pulsar<Exe>) -> Self {
-        ProducerBuilder {
-            pulsar: pulsar.clone(),
-            topic: None,
-            name: None,
-            producer_options: None,
+    pub fn build_multi_topic(self) -> MultiTopicProducer<Exe> {
+        MultiTopicProducer {
+            client: self.pulsar,
+            producers: Default::default(),
+            options: self.producer_options.unwrap_or_default(),
+            name: self.name,
         }
-    }
-
-    pub fn with_topic<S: Into<String>>(mut self, topic: S) -> Self {
-        self.topic = Some(topic.into());
-        self
-    }
-
-    pub fn with_name<S: Into<String>>(mut self, name: S) -> Self {
-        self.name = Some(name.into());
-        self
-    }
-
-    pub fn with_options(mut self, options: ProducerOptions) -> Self {
-        self.producer_options = Some(options);
-        self
     }
 }
 

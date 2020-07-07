@@ -318,7 +318,7 @@ impl std::error::Error for ServiceDiscoveryError {
 }
 
 #[derive(Clone)]
-pub struct SharedError {
+pub(crate) struct SharedError {
     error_set: Arc<AtomicBool>,
     error: Arc<Mutex<Option<ConnectionError>>>,
 }

@@ -9,7 +9,7 @@ C++ Pulsar library. It provides an async/await based API, compatible with
 
 Features:
 - URL based (`pulsar://` and `pulsar+ssl://`) connections with DNS lookup
-- multi topic consumers (based on a regex)
+- multi topic consumers (based on a regex or list)
 - TLS connection
 - configurable executor (Tokio or async-std)
 - automatic reconnection with exponential back off
@@ -20,13 +20,12 @@ Features:
 Cargo.toml
 ```toml
 futures = "0.3"
-pulsar = "0.3.0"
+pulsar = "1.0"
 tokio = "0.2"
 ```
 #### Producing
 ```rust
-#[macro_use]
-extern crate serde;
+use serde::{Serialize, Deserialize};
 use pulsar::{
     message::proto, producer, Error as PulsarError, Pulsar, SerializeMessage, TokioExecutor,
 };
@@ -36,8 +35,8 @@ struct TestData {
     data: String,
 }
 
-impl SerializeMessage for TestData {
-    fn serialize_message(input: &Self) -> Result<producer::Message, PulsarError> {
+impl<'a> SerializeMessage for &'a TestData {
+    fn serialize_message(input: Self) -> Result<producer::Message, PulsarError> {
         let payload = serde_json::to_vec(input).map_err(|e| PulsarError::Custom(e.to_string()))?;
         Ok(producer::Message {
             payload,
@@ -111,7 +110,7 @@ async fn main() -> Result<(), pulsar::Error> {
     let addr = "pulsar://127.0.0.1:6650";
     let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await?;
 
-    let mut consumer: Consumer<TestData> = pulsar
+    let mut consumer: Consumer<TestData, _> = pulsar
         .consumer()
         .with_topic("test")
         .with_consumer_name("test_consumer")

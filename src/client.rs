@@ -11,7 +11,7 @@ use crate::error::Error;
 use crate::executor::Executor;
 use crate::message::proto::{self, CommandSendReceipt};
 use crate::message::Payload;
-use crate::producer::{self, MultiTopicProducer, ProducerBuilder, ProducerOptions, SendFuture};
+use crate::producer::{self, ProducerBuilder, SendFuture};
 use crate::service_discovery::ServiceDiscovery;
 use futures::StreamExt;
 
@@ -76,6 +76,16 @@ impl SerializeMessage for String {
     }
 }
 
+impl<'a> SerializeMessage for &String {
+    fn serialize_message(input: Self) -> Result<producer::Message, Error> {
+        let payload = input.as_bytes().to_vec();
+        Ok(producer::Message {
+            payload,
+            ..Default::default()
+        })
+    }
+}
+
 impl<'a> SerializeMessage for &'a str {
     fn serialize_message(input: Self) -> Result<producer::Message, Error> {
         let payload = input.as_bytes().to_vec();
@@ -93,16 +103,26 @@ impl<'a> SerializeMessage for &'a str {
 /// While methods are provided to create the client, producers and consumers directly,
 /// the builders should be used for more clarity:
 ///
-/// ```rust,ignore
+/// ```rust,no_run
+/// use pulsar::{Pulsar, TokioExecutor};
+///
+/// # async fn run(auth: pulsar::Authentication, backoff: pulsar::BackOffOptions) -> Result<(), pulsar::Error> {
 /// let addr = "pulsar://127.0.0.1:6650";
 /// // you can indicate which executor you use as the return type of client creation
-/// let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await?;
+/// let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(addr)
+///     .with_auth(auth)
+///     .with_back_off_options(backoff)
+///     .build()
+///     .await?;
+///
 /// let mut producer = pulsar
 ///     .producer()
 ///     .with_topic("non-persistent://public/default/test")
 ///     .with_name("my producer")
 ///     .build()
 ///     .await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Clone)]
 pub struct Pulsar<E: Executor + ?Sized> {
@@ -113,7 +133,7 @@ pub struct Pulsar<E: Executor + ?Sized> {
 
 impl<Exe: Executor> Pulsar<Exe> {
     /// creates a new client
-    pub async fn new<S: Into<String>>(
+    pub(crate) async fn new<S: Into<String>>(
         url: S,
         auth: Option<Authentication>,
         backoff_parameters: Option<BackOffOptions>,
@@ -146,18 +166,21 @@ impl<Exe: Executor> Pulsar<Exe> {
 
     /// creates a consumer builder
     ///
-    /// ```rust,ignore
-    /// let addr = "pulsar://127.0.0.1:6650";
-    /// let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await?;
+    /// ```rust,no_run
+    /// use pulsar::{SubType, Consumer};
     ///
-    /// let mut consumer: Consumer<TestData> = pulsar
-    /// .consumer()
-    /// .with_topic("non-persistent://public/default/test")
-    /// .with_consumer_name("test_consumer")
-    /// .with_subscription_type(SubType::Exclusive)
-    /// .with_subscription("test_subscription")
-    /// .build()
-    /// .await?;
+    /// # async fn run(pulsar: pulsar::Pulsar<pulsar::TokioExecutor>) -> Result<(), pulsar::Error> {
+    /// # type TestData = String;
+    /// let mut consumer: Consumer<TestData, _> = pulsar
+    ///     .consumer()
+    ///     .with_topic("non-persistent://public/default/test")
+    ///     .with_consumer_name("test_consumer")
+    ///     .with_subscription_type(SubType::Exclusive)
+    ///     .with_subscription("test_subscription")
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn consumer(&self) -> ConsumerBuilder<Exe> {
         ConsumerBuilder::new(self)
@@ -165,16 +188,16 @@ impl<Exe: Executor> Pulsar<Exe> {
 
     /// creates a producer builder
     ///
-    /// ```rust,ignore
-    /// let addr = "pulsar://127.0.0.1:6650";
-    /// let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await?;
-    ///
+    /// ```rust,no_run
+    /// # async fn run(pulsar: pulsar::Pulsar<pulsar::TokioExecutor>) -> Result<(), pulsar::Error> {
     /// let mut producer = pulsar
     ///     .producer()
     ///     .with_topic("non-persistent://public/default/test")
     ///     .with_name("my producer")
     ///     .build()
     ///     .await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn producer(&self) -> ProducerBuilder<Exe> {
         ProducerBuilder::new(self)
@@ -199,7 +222,9 @@ impl<Exe: Executor> Pulsar<Exe> {
             .map_err(|e| e.into())
     }
 
-    /// gets the address of brokers handling the topic's partitions
+    /// gets the address of brokers handling the topic's partitions. If the topic is not
+    /// a partitioned topic, result will be a single element containing the topic and address
+    /// of the non-partitioned topic provided.
     pub async fn lookup_partitioned_topic<S: Into<String>>(
         &self,
         topic: S,
@@ -224,10 +249,10 @@ impl<Exe: Executor> Pulsar<Exe> {
         Ok(topics.topics)
     }
 
-
-    /// sends one message on a topic (not recommended for multiple messages)
+    /// Sends a message on a topic.
     ///
-    /// this function will create a producer, send the message then drop the producer
+    /// This function will lazily initialize and re-use producers as needed. For better
+    /// control over producers, creating and using a `Producer` is recommended.
     pub async fn send<S: Into<String>, M: SerializeMessage + Sized>(
         &self,
         topic: S,
@@ -331,7 +356,7 @@ struct SendMessage {
 }
 
 async fn run_producer<Exe: Executor + ?Sized>(client: Pulsar<Exe>, mut messages: mpsc::UnboundedReceiver<SendMessage>) {
-    let mut producer = MultiTopicProducer::new(client, ProducerOptions::default());
+    let mut producer = client.producer().build_multi_topic();
     while let Some(SendMessage { topic, message: payload, resolver }) = messages.next().await {
         match producer.send(topic, payload).await {
             Ok(future) => {
