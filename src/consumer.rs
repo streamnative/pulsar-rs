@@ -581,10 +581,9 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe> {
         match payload.metadata.num_messages_in_batch {
             Some(_) => {
                 let it = BatchedMessageIterator::new(message.message_id, payload)?;
-                let now = Instant::now();
                 for (id, payload) in it {
                     // TODO: Dead letter policy for batched messages
-                    self.send_to_consumer(id, payload, now).await?;
+                    self.send_to_consumer(id, payload).await?;
                 }
             }
             None => match (message.redelivery_count, self.dead_letter_policy.as_ref()) {
@@ -618,14 +617,10 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe> {
                                 Error::Custom("tx closed".to_string())
                             })?;
                     } else {
-                        self.send_to_consumer(message.message_id, payload, Instant::now())
-                            .await?
+                        self.send_to_consumer(message.message_id, payload).await?
                     }
                 }
-                _ => {
-                    self.send_to_consumer(message.message_id, payload, Instant::now())
-                        .await?
-                }
+                _ => self.send_to_consumer(message.message_id, payload).await?,
             },
         }
 
@@ -636,8 +631,8 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe> {
         &mut self,
         message_id: MessageIdData,
         payload: Payload,
-        request_time: Instant,
     ) -> Result<(), Error> {
+        let now = Instant::now();
         self.tx
             .send(Ok((message_id.clone(), payload)))
             .await
@@ -646,8 +641,7 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe> {
                 Error::Custom("tx closed".to_string())
             })?;
         if let Some(duration) = self.unacked_message_redelivery_delay {
-            self.unacked_messages
-                .insert(message_id, request_time + duration);
+            self.unacked_messages.insert(message_id, now + duration);
         }
         Ok(())
     }
@@ -1631,94 +1625,82 @@ mod tests {
         rt.block_on(f);
     }
 
-    #[test]
+    #[tokio::test]
     #[cfg(feature = "tokio-runtime")]
-    fn dead_letter_queue() {
-        use rand::{distributions::Alphanumeric, Rng};
+    async fn dead_letter_queue() {
         let _ = log::set_logger(&TEST_LOGGER);
         let _ = log::set_max_level(LevelFilter::Debug);
         let addr = "pulsar://127.0.0.1:6650";
-        let mut rt = Runtime::new().unwrap();
 
-        let topic = "dead_letter_queue_test";
+        let test_id: u16 = rand::random();
+        let topic = format!("dead_letter_queue_test_{}", test_id);
+        let test_msg: u32 = rand::random();
 
-        let f = async move {
-            let client: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await.unwrap();
-
-            let message = TestData {
-                topic: std::iter::repeat(())
-                    .map(|()| rand::thread_rng().sample(Alphanumeric))
-                    .take(8)
-                    .collect(),
-                msg: 1,
-            };
-
-            {
-                let mut producer = client
-                    .create_producer(topic, None, producer::ProducerOptions::default())
-                    .await
-                    .unwrap();
-
-                producer.send(message.clone()).await.unwrap().await.unwrap();
-                println!("producer sends done");
-            }
-
-            let dead_letter_topic = "dead_letter_queue_test-dlq".to_string();
-
-            let dead_letter_policy = crate::consumer::DeadLetterPolicy {
-                max_redeliver_count: 1,
-                dead_letter_topic: dead_letter_topic.clone(),
-            };
-
-            {
-                println!("creating consumer");
-                let mut consumer: Consumer<TestData> = client
-                    .consumer()
-                    .with_topic(topic)
-                    .with_subscription("nack")
-                    .with_subscription_type(SubType::Shared)
-                    .with_dead_letter_policy(Some(dead_letter_policy.clone()))
-                    .build()
-                    .await
-                    .unwrap();
-
-                println!("created consumer");
-
-                let msg = consumer.next().await.unwrap().unwrap();
-                println!("got message: {:?}", msg.payload);
-                assert_eq!(
-                    message,
-                    msg.deserialize().unwrap(),
-                    "we probably received a message from a previous run of the test"
-                );
-                // Nacking message to send it to DLQ
-                consumer.nack(&msg).await.unwrap();
-            }
-
-            {
-                println!("creating second consumer that consumes from the DLQ");
-                let mut consumer: Consumer<TestData> = client
-                    .consumer()
-                    .with_topic(dead_letter_topic)
-                    .with_subscription("dead_letter_topic")
-                    .with_subscription_type(SubType::Shared)
-                    .build()
-                    .await
-                    .unwrap();
-
-                println!("created second consumer");
-
-                let msg = consumer.next().await.unwrap().unwrap();
-                println!("got message: {:?}", msg.payload);
-                assert_eq!(
-                    message,
-                    msg.deserialize().unwrap(),
-                    "we probably received a message from a previous run of the test"
-                );
-                consumer.ack(&msg).await.unwrap();
-            }
+        let message = TestData {
+            topic: topic.clone(),
+            msg: test_msg,
         };
 
-        rt.block_on(f);
+        let dead_letter_topic = format!("{}_dlq", topic);
+
+        let dead_letter_policy = crate::consumer::DeadLetterPolicy {
+            max_redeliver_count: 1,
+            dead_letter_topic: dead_letter_topic.clone(),
+        };
+
+        let client: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await.unwrap();
+
+        let mut producer = client
+            .create_producer(topic.clone(), None, producer::ProducerOptions::default())
+            .await
+            .unwrap();
+
+        println!("creating consumer");
+        let mut consumer: Consumer<TestData> = client
+            .consumer()
+            .with_topic(topic.clone())
+            .with_subscription("nack")
+            .with_subscription_type(SubType::Shared)
+            .with_dead_letter_policy(Some(dead_letter_policy.clone()))
+            .build()
+            .await
+            .unwrap();
+
+        println!("created consumer");
+
+        println!("creating second consumer that consumes from the DLQ");
+        let mut dlq_consumer: Consumer<TestData> = client
+            .clone()
+            .consumer()
+            .with_topic(dead_letter_topic)
+            .with_subscription("dead_letter_topic")
+            .with_subscription_type(SubType::Shared)
+            .build()
+            .await
+            .unwrap();
+
+        println!("created second consumer");
+
+        producer.send(message.clone()).await.unwrap().await.unwrap();
+        println!("producer sends done");
+
+        let msg = consumer.next().await.unwrap().unwrap();
+        println!("got message: {:?}", msg.payload);
+        assert_eq!(
+            message,
+            msg.deserialize().unwrap(),
+            "we probably received a message from a previous run of the test"
+        );
+        // Nacking message to send it to DLQ
+        consumer.nack(&msg).await.unwrap();
+
+        let dlq_msg = dlq_consumer.next().await.unwrap().unwrap();
+        println!("got message: {:?}", msg.payload);
+        assert_eq!(
+            message,
+            dlq_msg.deserialize().unwrap(),
+            "we probably received a message from a previous run of the test"
+        );
+        dlq_consumer.ack(&dlq_msg).await.unwrap();
     }
 }
