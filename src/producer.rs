@@ -116,7 +116,7 @@ pub struct ProducerOptions {
 /// # let addr = "pulsar://127.0.0.1:6650";
 /// # let topic = "topic";
 /// # let message = "data".to_owned();
-/// let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await?;
+/// let pulsar: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await?;
 /// let mut producer = pulsar.producer()
 ///     .with_name("name")
 ///     .build_multi_topic();
@@ -127,14 +127,14 @@ pub struct ProducerOptions {
 /// # Ok(())
 /// # }
 /// ```
-pub struct MultiTopicProducer<Exe: Executor + ?Sized> {
+pub struct MultiTopicProducer<Exe: Executor> {
     client: Pulsar<Exe>,
     producers: BTreeMap<String, Producer<Exe>>,
     options: ProducerOptions,
     name: Option<String>,
 }
 
-impl<Exe: Executor + ?Sized> MultiTopicProducer<Exe> {
+impl<Exe: Executor> MultiTopicProducer<Exe> {
     pub fn options(&self) -> &ProducerOptions {
         &self.options
     }
@@ -203,11 +203,11 @@ impl<Exe: Executor + ?Sized> MultiTopicProducer<Exe> {
     }
 }
 
-pub struct Producer<Exe: Executor + ?Sized> {
+pub struct Producer<Exe: Executor> {
     inner: ProducerInner<Exe>,
 }
 
-impl<Exe: Executor + ?Sized> Producer<Exe> {
+impl<Exe: Executor> Producer<Exe> {
     pub fn builder(pulsar: &Pulsar<Exe>) -> ProducerBuilder<Exe> {
         ProducerBuilder::new(&pulsar)
     }
@@ -323,19 +323,19 @@ impl<Exe: Executor + ?Sized> Producer<Exe> {
     }
 }
 
-enum ProducerInner<Exe: Executor + ?Sized> {
+enum ProducerInner<Exe: Executor> {
     Single(TopicProducer<Exe>),
     Partitioned(PartitionedProducer<Exe>),
 }
 
-struct PartitionedProducer<Exe: Executor + ?Sized> {
+struct PartitionedProducer<Exe: Executor> {
     // Guaranteed to be non-empty
     producers: VecDeque<TopicProducer<Exe>>,
     topic: String,
     options: ProducerOptions,
 }
 
-impl<Exe: Executor + ?Sized> PartitionedProducer<Exe> {
+impl<Exe: Executor> PartitionedProducer<Exe> {
     pub fn next(&mut self) -> &mut TopicProducer<Exe> {
         self.producers.rotate_left(1);
         self.producers.front_mut().unwrap()
@@ -343,7 +343,7 @@ impl<Exe: Executor + ?Sized> PartitionedProducer<Exe> {
 }
 
 /// a producer is used to publish messages on a topic
-struct TopicProducer<Exe: Executor + ?Sized> {
+struct TopicProducer<Exe: Executor> {
     client: Pulsar<Exe>,
     connection: Arc<Connection>,
     id: ProducerId,
@@ -358,7 +358,7 @@ struct TopicProducer<Exe: Executor + ?Sized> {
     options: ProducerOptions,
 }
 
-impl<Exe: Executor + ?Sized> TopicProducer<Exe> {
+impl<Exe: Executor> TopicProducer<Exe> {
     pub(crate) async fn from_connection<S: Into<String>>(
         client: Pulsar<Exe>,
         connection: Arc<Connection>,
@@ -408,7 +408,7 @@ impl<Exe: Executor + ?Sized> TopicProducer<Exe> {
         // drop_receiver will return, and we can close the producer
         let (_drop_signal, drop_receiver) = oneshot::channel::<()>();
         let conn = connection.clone();
-        let _ = Exe::spawn(Box::pin(async move {
+        let _ = client.executor.spawn(Box::pin(async move {
             let _res = drop_receiver.await;
             let _ = conn.sender().close_producer(producer_id).await;
         }));
@@ -695,7 +695,7 @@ impl<Exe: Executor + ?Sized> TopicProducer<Exe> {
         let batch = batch_size.map(Batch::new).map(Mutex::new);
         let conn = self.connection.clone();
         let producer_id = self.id;
-        let _ = Exe::spawn(Box::pin(async move {
+        let _ = self.client.executor.spawn(Box::pin(async move {
             let _res = drop_receiver.await;
             let _ = conn.sender().close_producer(producer_id).await;
         }));
@@ -711,14 +711,14 @@ impl<Exe: Executor + ?Sized> TopicProducer<Exe> {
 ///
 /// generated from [Pulsar::producer]
 #[derive(Clone)]
-pub struct ProducerBuilder<Exe: Executor + ?Sized> {
+pub struct ProducerBuilder<Exe: Executor> {
     pulsar: Pulsar<Exe>,
     topic: Option<String>,
     name: Option<String>,
     producer_options: Option<ProducerOptions>,
 }
 
-impl<'a, Exe: Executor + ?Sized> ProducerBuilder<Exe> {
+impl<Exe: Executor> ProducerBuilder<Exe> {
     pub fn new(pulsar: &Pulsar<Exe>) -> Self {
         ProducerBuilder {
             pulsar: pulsar.clone(),
@@ -867,14 +867,14 @@ impl Batch {
 /// Helper structure to prepare a message
 ///
 /// generated with [Producer::create_message]
-pub struct MessageBuilder<'a, T, Exe: Executor + ?Sized> {
+pub struct MessageBuilder<'a, T, Exe: Executor> {
     producer: &'a mut Producer<Exe>,
     properties: HashMap<String, String>,
     partition_key: Option<String>,
     content: T,
 }
 
-impl<'a, Exe: Executor + ?Sized> MessageBuilder<'a, (), Exe> {
+impl<'a, Exe: Executor> MessageBuilder<'a, (), Exe> {
     pub fn new(producer: &'a mut Producer<Exe>) -> Self {
         MessageBuilder {
             producer,
@@ -885,7 +885,7 @@ impl<'a, Exe: Executor + ?Sized> MessageBuilder<'a, (), Exe> {
     }
 }
 
-impl<'a, T, Exe: Executor + ?Sized> MessageBuilder<'a, T, Exe> {
+impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
     pub fn with_content<C>(self, content: C) -> MessageBuilder<'a, C, Exe> {
         MessageBuilder {
             producer: self.producer,
@@ -906,7 +906,7 @@ impl<'a, T, Exe: Executor + ?Sized> MessageBuilder<'a, T, Exe> {
     }
 }
 
-impl<'a, T: SerializeMessage + Sized, Exe: Executor + ?Sized> MessageBuilder<'a, T, Exe> {
+impl<'a, T: SerializeMessage + Sized, Exe: Executor> MessageBuilder<'a, T, Exe> {
     pub async fn send(self) -> Result<SendFuture, Error> {
         let MessageBuilder {
             producer,

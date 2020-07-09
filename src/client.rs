@@ -1,4 +1,3 @@
-use std::marker::PhantomData;
 use std::string::FromUtf8Error;
 use std::sync::Arc;
 
@@ -109,7 +108,7 @@ impl<'a> SerializeMessage for &'a str {
 /// # async fn run(auth: pulsar::Authentication, backoff: pulsar::BackOffOptions) -> Result<(), pulsar::Error> {
 /// let addr = "pulsar://127.0.0.1:6650";
 /// // you can indicate which executor you use as the return type of client creation
-/// let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(addr)
+/// let pulsar: Pulsar<_> = Pulsar::builder(addr, TokioExecutor)
 ///     .with_auth(auth)
 ///     .with_back_off_options(backoff)
 ///     .build()
@@ -125,10 +124,11 @@ impl<'a> SerializeMessage for &'a str {
 /// # }
 /// ```
 #[derive(Clone)]
-pub struct Pulsar<E: Executor + ?Sized> {
-    pub(crate) manager: Arc<ConnectionManager<E>>,
-    service_discovery: Arc<ServiceDiscovery<E>>,
+pub struct Pulsar<Exe: Executor> {
+    pub(crate) manager: Arc<ConnectionManager<Exe>>,
+    service_discovery: Arc<ServiceDiscovery<Exe>>,
     producer: mpsc::UnboundedSender<SendMessage>,
+    pub(crate) executor: Arc<Exe>,
 }
 
 impl<Exe: Executor> Pulsar<Exe> {
@@ -138,29 +138,32 @@ impl<Exe: Executor> Pulsar<Exe> {
         auth: Option<Authentication>,
         backoff_parameters: Option<BackOffOptions>,
         tls_options: Option<TlsOptions>,
+        executor: Exe,
     ) -> Result<Self, Error> {
         let url: String = url.into();
-        let manager = ConnectionManager::new(url, auth, backoff_parameters, tls_options).await?;
+        let executor = Arc::new(executor);
+        let manager = ConnectionManager::new(url, auth, backoff_parameters, tls_options, executor.clone()).await?;
         let manager = Arc::new(manager);
         let service_discovery = Arc::new(ServiceDiscovery::with_manager(manager.clone()));
         let (producer, producer_rx) = mpsc::unbounded();
         let client = Pulsar {
             manager,
             service_discovery,
-            producer
+            producer,
+            executor,
         };
-        let _ = Exe::spawn(Box::pin(run_producer(client.clone(), producer_rx)));
+        let _ = client.executor.spawn(Box::pin(run_producer(client.clone(), producer_rx)));
         Ok(client)
     }
 
     /// creates a new client builder
-    pub fn builder<S: Into<String>>(url: S) -> PulsarBuilder<Exe> {
+    pub fn builder<S: Into<String>>(url: S, executor: Exe) -> PulsarBuilder<Exe> {
         PulsarBuilder {
             url: url.into(),
             auth: None,
             back_off_options: None,
             tls_options: None,
-            executor: PhantomData,
+            executor: executor,
         }
     }
 
@@ -278,12 +281,12 @@ impl<Exe: Executor> Pulsar<Exe> {
 }
 
 /// Helper structure to generate a [Pulsar] client
-pub struct PulsarBuilder<Exe> {
+pub struct PulsarBuilder<Exe: Executor> {
     url: String,
     auth: Option<Authentication>,
     back_off_options: Option<BackOffOptions>,
     tls_options: Option<TlsOptions>,
-    executor: PhantomData<Exe>,
+    executor: Exe,
 }
 
 impl<Exe: Executor> PulsarBuilder<Exe> {
@@ -343,9 +346,9 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
             auth,
             back_off_options,
             tls_options,
-            executor: _,
+            executor,
         } = self;
-        Pulsar::new(url, auth, back_off_options, tls_options).await
+        Pulsar::new(url, auth, back_off_options, tls_options, executor).await
     }
 }
 
@@ -355,12 +358,12 @@ struct SendMessage {
     resolver: oneshot::Sender<Result<CommandSendReceipt, Error>>,
 }
 
-async fn run_producer<Exe: Executor + ?Sized>(client: Pulsar<Exe>, mut messages: mpsc::UnboundedReceiver<SendMessage>) {
+async fn run_producer<Exe: Executor>(client: Pulsar<Exe>, mut messages: mpsc::UnboundedReceiver<SendMessage>) {
     let mut producer = client.producer().build_multi_topic();
     while let Some(SendMessage { topic, message: payload, resolver }) = messages.next().await {
         match producer.send(topic, payload).await {
             Ok(future) => {
-                let _ = Exe::spawn(Box::pin(async move {
+                let _ = client.executor.spawn(Box::pin(async move {
                     let _ = resolver.send(future.await);
                 }));
             }

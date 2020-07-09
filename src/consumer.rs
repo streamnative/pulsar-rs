@@ -84,10 +84,10 @@ pub struct DeadLetterPolicy {
 /// # Ok(())
 /// # }
 /// ```
-pub struct Consumer<T: DeserializeMessage, Exe: Executor + ?Sized> {
+pub struct Consumer<T: DeserializeMessage, Exe: Executor> {
     inner: InnerConsumer<T, Exe>,
 }
-impl<T: DeserializeMessage, Exe: Executor + ?Sized> Consumer<T, Exe> {
+impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
     pub fn builder(pulsar: &Pulsar<Exe>) -> ConsumerBuilder<Exe> {
         ConsumerBuilder::new(pulsar)
     }
@@ -214,7 +214,7 @@ impl<T: DeserializeMessage, Exe: Executor + ?Sized> Consumer<T, Exe> {
 }
 
 //TODO: why does T need to be 'static?
-impl<T: DeserializeMessage + 'static, Exe: Executor + ?Sized> Stream for Consumer<T, Exe> {
+impl<T: DeserializeMessage + 'static, Exe: Executor> Stream for Consumer<T, Exe> {
     type Item = Result<Message<T>, Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -225,7 +225,7 @@ impl<T: DeserializeMessage + 'static, Exe: Executor + ?Sized> Stream for Consume
     }
 }
 
-enum InnerConsumer<T: DeserializeMessage, Exe: Executor + ?Sized> {
+enum InnerConsumer<T: DeserializeMessage, Exe: Executor> {
     Single(TopicConsumer<T>),
     Mulit(MultiTopicConsumer<T, Exe>),
 }
@@ -245,7 +245,7 @@ pub(crate) struct TopicConsumer<T: DeserializeMessage> {
 }
 
 impl<T: DeserializeMessage> TopicConsumer<T> {
-    async fn new<Exe: Executor + ?Sized>(
+    async fn new<Exe: Executor>(
         client: Pulsar<Exe>,
         topic: String,
         addr: BrokerAddress,
@@ -292,7 +292,7 @@ impl<T: DeserializeMessage> TopicConsumer<T> {
         let conn = connection.clone();
         //let ack_sender = nack_handler.clone();
         let name = consumer_name.clone();
-        let _ = Exe::spawn(Box::pin(async move {
+        let _ = client.executor.spawn(Box::pin(async move {
             let _res = drop_receiver.await;
             // if we receive a message, it indicates we want to stop this task
             if _res.is_err() {
@@ -307,8 +307,8 @@ impl<T: DeserializeMessage> TopicConsumer<T> {
 
         if unacked_message_redelivery_delay.is_some() {
             let mut redelivery_tx = ack_tx.clone();
-            let mut interval = Exe::interval(Duration::from_millis(500));
-            if Exe::spawn(Box::pin(async move {
+            let mut interval = client.executor.interval(Duration::from_millis(500));
+            if client.executor.spawn(Box::pin(async move {
                 while interval.next().await.is_some() {
                     if let Err(e) = redelivery_tx.send(AckMessage::UnackedRedelivery).await {
                         error!("could not send redelivery ticker: {:?}", e);
@@ -346,7 +346,7 @@ impl<T: DeserializeMessage> TopicConsumer<T> {
                 })
                 .await;
         };
-        if Exe::spawn(Box::pin(f)).is_err() {
+        if client.executor.spawn(Box::pin(f)).is_err() {
             return Err(Error::Executor);
         }
 
@@ -434,7 +434,7 @@ impl<T: DeserializeMessage> Stream for TopicConsumer<T> {
     }
 }
 
-struct ConsumerEngine<Exe: Executor + ?Sized> {
+struct ConsumerEngine<Exe: Executor> {
     client: Pulsar<Exe>,
     connection: Arc<Connection>,
     topic: String,
@@ -461,7 +461,7 @@ enum AckMessage {
     UnackedRedelivery,
 }
 
-impl<Exe: Executor + ?Sized> ConsumerEngine<Exe> {
+impl<Exe: Executor> ConsumerEngine<Exe> {
     fn new(
         client: Pulsar<Exe>,
         connection: Arc<Connection>,
@@ -864,7 +864,7 @@ impl<Exe: Executor + ?Sized> ConsumerEngine<Exe> {
         let conn = self.connection.clone();
         let name = self.name.clone();
         let id = self.id;
-        let _ = Exe::spawn(Box::pin(async move {
+        let _ = self.client.executor.spawn(Box::pin(async move {
             let _res = drop_receiver.await;
             // if we receive a message, it indicates we want to stop this task
             if _res.is_err() {
@@ -953,7 +953,7 @@ impl Iterator for BatchedMessageIterator {
 }
 
 #[derive(Clone)]
-pub struct ConsumerBuilder<Exe: Executor + ?Sized> {
+pub struct ConsumerBuilder<Exe: Executor> {
     pulsar: Pulsar<Exe>,
     topics: Option<Vec<String>>,
     topic_regex: Option<Regex>,
@@ -1163,6 +1163,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
                 .collect();
             let topics = consumers.keys().map(|c| c.clone()).collect();
             let topic_refresh = topic_refresh.unwrap_or(Duration::from_secs(30));
+            let refresh = Box::pin(pulsar.executor.interval(topic_refresh).map(drop));
             let mut consumer = MultiTopicConsumer {
                 namespace: namespace.unwrap_or_else(|| "public/default".to_string()),
                 topic_regex,
@@ -1170,7 +1171,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
                 consumers,
                 topics,
                 new_consumers: None,
-                refresh: Box::pin(Exe::interval(topic_refresh).map(drop)),
+                refresh,
                 config,
                 disc_last_message_received: None,
                 disc_messages_received: 0,
@@ -1499,7 +1500,7 @@ mod tests {
             msg: 4,
         };
 
-        let client: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await.unwrap();
+        let client: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await.unwrap();
 
         try_join_all(vec![
             client.send(&topic1, &data1).await.unwrap(),
@@ -1562,7 +1563,7 @@ mod tests {
 
         let topic = format!("consumer_dropped_with_lingering_acks_{}", rand::random::<u16>());
 
-        let client: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await.unwrap();
+        let client: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await.unwrap();
 
         let message = TestData {
             topic: std::iter::repeat(())
@@ -1661,7 +1662,7 @@ mod tests {
             dead_letter_topic: dead_letter_topic.clone(),
         };
 
-        let client: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await.unwrap();
+        let client: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await.unwrap();
 
         println!("creating consumer");
         let mut consumer: Consumer<TestData, _> = client

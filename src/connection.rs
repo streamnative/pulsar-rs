@@ -439,11 +439,12 @@ pub struct Connection {
 }
 
 impl Connection {
-    pub async fn new<Exe: Executor + ?Sized>(
+    pub async fn new<Exe: Executor>(
         url: Url,
         auth_data: Option<Authentication>,
         proxy_to_broker_url: Option<String>,
         certificate_chain: &[Certificate],
+        executor: Arc<Exe>,
     ) -> Result<Connection, ConnectionError> {
         if url.scheme() != "pulsar" && url.scheme() != "pulsar+ssl" {
             error!("invalid scheme: {}", url.scheme());
@@ -461,7 +462,7 @@ impl Connection {
         };
 
         let u = url.clone();
-        let address: SocketAddr = match Exe::spawn_blocking(move || {
+        let address: SocketAddr = match executor.spawn_blocking(move || {
             u.socket_addrs(|| match u.scheme() {
                 "pulsar" => Some(6650),
                 "pulsar+ssl" => Some(6651),
@@ -491,13 +492,14 @@ impl Connection {
         let hostname = hostname.unwrap_or_else(|| address.ip().to_string());
 
         debug!("Connecting to {}: {}", url, address);
-        let sender = Connection::prepare_stream::<Exe>(
+        let sender = Connection::prepare_stream(
             address,
             hostname,
             tls,
             auth_data,
             proxy_to_broker_url,
             certificate_chain,
+            executor,
         )
         .await?;
 
@@ -505,15 +507,16 @@ impl Connection {
         Ok(Connection { id, url, sender })
     }
 
-    async fn prepare_stream<Exe: Executor + ?Sized>(
+    async fn prepare_stream<Exe: Executor>(
         address: SocketAddr,
         hostname: String,
         tls: bool,
         auth_data: Option<Authentication>,
         proxy_to_broker_url: Option<String>,
         certificate_chain: &[Certificate],
+        executor: Arc<Exe>,
     ) -> Result<ConnectionSender, ConnectionError> {
-        match Exe::kind() {
+        match executor.kind() {
             #[cfg(feature = "tokio-runtime")]
             ExecutorKind::Tokio => {
                 if tls {
@@ -530,13 +533,13 @@ impl Connection {
                         .await
                         .map(|stream| tokio_util::codec::Framed::new(stream, Codec))?;
 
-                    Connection::connect::<Exe, _>(stream, auth_data, proxy_to_broker_url).await
+                    Connection::connect(stream, auth_data, proxy_to_broker_url, executor).await
                 } else {
                     let stream = tokio::net::TcpStream::connect(&address)
                         .await
                         .map(|stream| tokio_util::codec::Framed::new(stream, Codec))?;
 
-                    Connection::connect::<Exe, _>(stream, auth_data, proxy_to_broker_url).await
+                    Connection::connect(stream, auth_data, proxy_to_broker_url, executor).await
                 }
             }
             #[cfg(not(feature = "tokio-runtime"))]
@@ -556,13 +559,13 @@ impl Connection {
                         .await
                         .map(|stream| futures_codec::Framed::new(stream, Codec))?;
 
-                    Connection::connect::<Exe, _>(stream, auth_data, proxy_to_broker_url).await
+                    Connection::connect(stream, auth_data, proxy_to_broker_url, executor).await
                 } else {
                     let stream = async_std::net::TcpStream::connect(&address)
                         .await
                         .map(|stream| futures_codec::Framed::new(stream, Codec))?;
 
-                    Connection::connect::<Exe, _>(stream, auth_data, proxy_to_broker_url).await
+                    Connection::connect(stream, auth_data, proxy_to_broker_url, executor).await
                 }
             }
             #[cfg(not(feature = "async-std-runtime"))]
@@ -572,10 +575,11 @@ impl Connection {
         }
     }
 
-    pub async fn connect<Exe: Executor + ?Sized, S>(
+    pub async fn connect<Exe: Executor, S>(
         mut stream: S,
         auth_data: Option<Authentication>,
         proxy_to_broker_url: Option<String>,
+        executor: Arc<Exe>,
     ) -> Result<ConnectionSender, ConnectionError>
     where
         S: Stream<Item = Result<Message, ConnectionError>>,
@@ -622,7 +626,7 @@ impl Connection {
         let error = SharedError::new();
         let (receiver_shutdown_tx, receiver_shutdown_rx) = oneshot::channel();
 
-        if Exe::spawn(Box::pin(
+        if executor.spawn(Box::pin(
             Receiver::new(
                 stream,
                 tx.clone(),
@@ -639,7 +643,7 @@ impl Connection {
         }
 
         let err = error.clone();
-        if Exe::spawn(Box::pin(async move {
+        if executor.spawn(Box::pin(async move {
             while let Some(msg) = rx.next().await {
                 if let Err(e) = sink.send(msg).await {
                     err.set(e);
