@@ -36,9 +36,10 @@ async fn main() -> Result<(), pulsar::Error> {
     let addr = "pulsar://127.0.0.1:6650";
     let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await?;
     let mut producer = pulsar
-        .create_producer(
-            "test-batch-compression-snappy",
-            Some("my-producer2".to_string()),
+        .producer()
+        .with_topic("test-batch-compression-snappy")
+        .with_name("my-producer2".to_string())
+        .with_options(
             producer::ProducerOptions {
                 batch_size: Some(4),
                 //compression: Some(proto::CompressionType::Lz4),
@@ -46,8 +47,9 @@ async fn main() -> Result<(), pulsar::Error> {
                 //compression: Some(proto::CompressionType::Zstd),
                 compression: Some(proto::CompressionType::Snappy),
                 ..Default::default()
-            },
+            }
         )
+        .build()
         .await?;
 
     producer
@@ -79,7 +81,7 @@ async fn main() -> Result<(), pulsar::Error> {
         println!("receipts: {:?}", join_all(v).await);
     });
 
-    let mut consumer: Consumer<TestData> = pulsar
+    let mut consumer: Consumer<TestData, _> = pulsar
         .consumer()
         .with_topic("test-batch-compression-snappy")
         .with_consumer_name("test_consumer")

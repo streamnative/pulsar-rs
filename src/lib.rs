@@ -103,7 +103,7 @@
 //!     let addr = "pulsar://127.0.0.1:6650";
 //!     let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await?;
 //!
-//!     let mut consumer: Consumer<TestData> = pulsar
+//!     let mut consumer: Consumer<TestData, _> = pulsar
 //!         .consumer()
 //!         .with_topic("test")
 //!         .with_consumer_name("test_consumer")
@@ -150,7 +150,7 @@ extern crate serde;
 pub use client::{DeserializeMessage, Pulsar, SerializeMessage};
 pub use connection::Authentication;
 pub use connection_manager::{BackOffOptions, BrokerAddress, TlsOptions};
-pub use consumer::{Consumer, ConsumerOptions, ConsumerState, MultiTopicConsumer};
+pub use consumer::{Consumer, ConsumerBuilder, ConsumerOptions};
 pub use error::Error;
 #[cfg(feature = "async-std-runtime")]
 pub use executor::AsyncStdExecutor;
@@ -159,6 +159,7 @@ pub use executor::Executor;
 pub use executor::TokioExecutor;
 pub use message::proto::command_subscribe::SubType;
 pub use producer::{MultiTopicProducer, Producer, ProducerOptions};
+pub use message::{Payload, proto::{self, CommandSendReceipt}};
 
 mod client;
 mod connection;
@@ -172,37 +173,36 @@ mod service_discovery;
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::time::{Duration, Instant};
+    use log::{LevelFilter, Metadata, Record};
+    use futures::{future::try_join_all, StreamExt};
 
-    use futures::{StreamExt, TryStreamExt};
     #[cfg(feature = "tokio-runtime")]
-    use tokio;
-    #[cfg(feature = "tokio-runtime")]
-    use tokio::runtime::Runtime;
+    use tokio::time::timeout;
 
-    use message::proto::command_subscribe::SubType;
-
-    use crate::client::SerializeMessage;
     #[cfg(feature = "tokio-runtime")]
     use crate::executor::TokioExecutor;
+
+    use crate::client::SerializeMessage;
     use crate::message::Payload;
     use crate::Error as PulsarError;
+    use crate::consumer::Message;
+    use crate::message::proto::command_subscribe::SubType;
 
     use super::*;
-    use nom::lib::std::collections::BTreeSet;
-    use rand::distributions::Alphanumeric;
-    use rand::Rng;
-    use std::collections::BTreeMap;
+
 
     #[derive(Debug, Serialize, Deserialize)]
     struct TestData {
+        pub id: u64,
         pub data: String,
     }
 
-    impl SerializeMessage for TestData {
+    impl<'a> SerializeMessage for &'a TestData {
         fn serialize_message(input: Self) -> Result<producer::Message, PulsarError> {
             let payload =
-                serde_json::to_vec(&input).map_err(|e| PulsarError::Custom(e.to_string()))?;
+                serde_json::to_vec(input).map_err(|e| PulsarError::Custom(e.to_string()))?;
             Ok(producer::Message {
                 payload,
                 ..Default::default()
@@ -261,7 +261,6 @@ mod tests {
         }
     }
 
-    use log::{LevelFilter, Metadata, Record};
     pub struct SimpleLogger {
         pub tag: &'static str,
     }
@@ -288,286 +287,199 @@ mod tests {
 
     pub static TEST_LOGGER: SimpleLogger = SimpleLogger { tag: "" };
 
-    #[test]
+    #[tokio::test]
     #[cfg(feature = "tokio-runtime")]
-    fn round_trip() {
-        let mut runtime = Runtime::new().unwrap();
+    async fn round_trip() {
         let _ = log::set_logger(&TEST_LOGGER);
         let _ = log::set_max_level(LevelFilter::Debug);
-
-        let f = async {
-            let addr = "pulsar://127.0.0.1:6650";
-            let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await.unwrap();
-
-            let mut consumer: Consumer<TestData> = pulsar
-                .consumer()
-                .with_topic("test")
-                .with_consumer_name("test_consumer")
-                .with_subscription_type(SubType::Exclusive)
-                .with_subscription("test_subscription")
-                .build()
-                .await
-                .unwrap();
-
-            info!("consumer created");
-
-            let mut producer = pulsar.producer().with_topic("test").build().await.unwrap();
-            info!("producer created");
-
-            info!("will send message");
-            for _ in 0u16..5000 {
-                producer
-                    .send(TestData {
-                        data: "data".to_string(),
-                    })
-                    .await
-                    .unwrap()
-                    .await
-                    .unwrap();
-            }
-
-            info!("sent");
-            //let mut stream = consumer.take(5000);
-            let mut count = 0usize;
-            while let Ok(Some(msg)) = consumer.try_next().await {
-                //let res =  consumer.next().await.unwrap();
-                //let msg = res.unwrap();
-                consumer.ack(&msg).await.unwrap();
-                let data = msg.deserialize().unwrap();
-                if data.data.as_str() != "data" {
-                    panic!("Unexpected payload: {}", &data.data);
-                }
-
-                count += 1;
-
-                if count % 500 == 0 {
-                    info!("messages received: {}", count);
-                }
-                if count == 5000 {
-                    break;
-                }
-            }
-            // FIXME .timeout(Duration::from_secs(5))
-        };
-
-        runtime.block_on(Box::pin(f));
-    }
-
-    #[test]
-    #[cfg(feature = "tokio-runtime")]
-    fn unsized_data() {
-        let _ = log::set_logger(&TEST_LOGGER);
-        let _ = log::set_max_level(LevelFilter::Debug);
-        let mut runtime = Runtime::new().unwrap();
-
-        let f = async {
-            let addr = "pulsar://127.0.0.1:6650";
-            let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await.unwrap();
-            let mut producer = pulsar.create_multi_topic_producer(None);
-
-            // test &str
-            {
-                let topic = "test_unsized_data_str";
-                let send_data = "some unsized data";
-
-                let mut consumer = pulsar
-                    .consumer()
-                    .with_topic(topic)
-                    .with_subscription_type(SubType::Exclusive)
-                    .with_subscription("test_subscription")
-                    .build::<String>()
-                    .await
-                    .unwrap();
-
-                producer
-                    .send(topic, send_data.to_string())
-                    .await
-                    .unwrap()
-                    .await
-                    .unwrap();
-
-                let msg = consumer.next().await.unwrap().unwrap();
-                consumer.ack(&msg).await.unwrap();
-
-                let data = msg.deserialize().unwrap();
-                if data.as_str() != send_data {
-                    panic!("Unexpected payload in &str test: {}", &data);
-                }
-                //FIXME .timeout(Duration::from_secs(1))
-            }
-
-            // test &[u8]
-            {
-                let topic = "test_unsized_data_bytes";
-                let send_data: &[u8] = &[0, 1, 2, 3];
-
-                let mut consumer = pulsar
-                    .consumer()
-                    .with_topic(topic)
-                    .with_subscription_type(SubType::Exclusive)
-                    .with_subscription("test_subscription")
-                    .build::<Vec<u8>>()
-                    .await
-                    .unwrap();
-
-                producer
-                    .send(topic, send_data.to_vec())
-                    .await
-                    .unwrap()
-                    .await
-                    .unwrap();
-
-                let msg = consumer.next().await.unwrap().unwrap();
-                consumer.ack(&msg).await.unwrap();
-                let data = msg.deserialize();
-                if data.as_slice() != send_data {
-                    panic!("Unexpected payload in &[u8] test: {:?}", &data);
-                }
-            }
-        };
-
-        runtime.block_on(Box::pin(f));
-    }
-
-    #[test]
-    #[ignore]
-    #[cfg(feature = "tokio-runtime")]
-    fn redelivery() {
-        let _ = log::set_logger(&TEST_LOGGER);
-        let _ = log::set_max_level(LevelFilter::Debug);
-        let runtime = Runtime::new().unwrap();
 
         let addr = "pulsar://127.0.0.1:6650";
-        let (tx, rx) = std::sync::mpsc::channel();
+        let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await.unwrap();
 
-        let mut seen = BTreeSet::new();
-        let start = Instant::now();
-        let resend_delay = Duration::from_secs(4);
+        // random topic to better allow multiple test runs while debugging
+        let topic = format!("test_{}", rand::random::<u16>());
 
-        let message_count = 10;
-        let f = async move {
-            let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await.unwrap();
+        let mut producer = pulsar.producer().with_topic(&topic).build().await.unwrap();
+        info!("producer created");
 
-            let topic: String = std::iter::repeat(())
-                .map(|()| rand::thread_rng().sample(Alphanumeric))
-                .take(7)
-                .collect();
-            let mut producer = pulsar
-                .create_producer(&topic, None, ProducerOptions::default())
+        let message_ids: BTreeSet<u64> = (0..100).collect();
+
+        info!("will send message");
+        let mut sends = Vec::new();
+        for &id in &message_ids {
+            let message = TestData {
+                data: "data".to_string(),
+                id,
+            };
+            sends.push(producer.send(&message).await.unwrap());
+        }
+        try_join_all(sends).await.unwrap();
+
+        info!("sent");
+
+        let mut consumer: Consumer<TestData, _> = pulsar
+            .consumer()
+            .with_topic(&topic)
+            .with_consumer_name("test_consumer")
+            .with_subscription_type(SubType::Exclusive)
+            .with_subscription("test_subscription")
+            .with_options(ConsumerOptions {
+                initial_position: Some(1),
+                ..Default::default()
+            })
+            .build()
+            .await
+            .unwrap();
+
+        info!("consumer created");
+
+        let topics = consumer.topics();
+        debug!("consumer connected to {:?}", topics);
+        assert_eq!(topics.len(), 1);
+        assert!(topics[0].ends_with(&topic));
+
+        let mut received = BTreeSet::new();
+        while let Ok(Some(msg)) = timeout(Duration::from_secs(10), consumer.next()).await {
+            let msg: Message<TestData> = msg.unwrap();
+            received.insert(msg.deserialize().unwrap().id);
+            consumer.ack(&msg).await.unwrap();
+            if received.len() == message_ids.len() {
+                break;
+            }
+        }
+        assert_eq!(received.len(), message_ids.len());
+        assert_eq!(received, message_ids);
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "tokio-runtime")]
+    async fn unsized_data() {
+        let _ = log::set_logger(&TEST_LOGGER);
+        let _ = log::set_max_level(LevelFilter::Debug);
+
+        let addr = "pulsar://127.0.0.1:6650";
+        let test_id: u16 = rand::random();
+        let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await.unwrap();
+
+        // test &str
+        {
+            let topic = format!("test_unsized_data_str_{}", test_id);
+            let send_data = "some unsized data";
+
+            pulsar
+                .send(&topic, send_data.to_string())
+                .await
+                .unwrap()
                 .await
                 .unwrap();
 
-            let mut consumer: Consumer<TestData> = pulsar
+            let mut consumer = pulsar
                 .consumer()
                 .with_topic(&topic)
-                .with_consumer_name("test_consumer")
                 .with_subscription_type(SubType::Exclusive)
                 .with_subscription("test_subscription")
-                .with_unacked_message_resend_delay(Some(resend_delay))
-                .build()
+                .with_options(ConsumerOptions {
+                    initial_position: Some(1),
+                    ..Default::default()
+                })
+                .build::<String>()
                 .await
                 .unwrap();
 
-            for i in 0u8..message_count {
-                producer
-                    .send(TestData {
-                        data: i.to_string(),
-                    })
-                    .await
-                    .unwrap()
-                    .await
-                    .unwrap();
-            }
+            let msg = timeout(Duration::from_secs(1), consumer.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            consumer.ack(&msg).await.unwrap();
 
-            let mut count = 0usize;
-            while let Some(res) = consumer.next().await {
-                let message = res.unwrap();
-                let data = message.deserialize().unwrap();
-                tx.send(data.data.clone()).unwrap();
-                if !seen.contains(&data.data) {
-                    seen.insert(data.data.clone());
-                } else {
-                    //ack the second time around
-                    consumer.ack(&message).await.unwrap();
-                }
-
-                count += 1;
-                if count == message_count as usize * 2 {
-                    break;
-                }
-            }
-            //FIXME .timeout(Duration::from_secs(15))
-        };
-
-        runtime.spawn(Box::pin(f));
-
-        let mut counts = BTreeMap::new();
-
-        let timeout = Instant::now() + Duration::from_secs(2);
-        let mut read_count = 0;
-
-        while read_count < message_count {
-            if let Ok(data) = rx.try_recv() {
-                read_count += 1;
-                *counts.entry(data).or_insert(0) += 1;
-            } else {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            if Instant::now() > timeout {
-                panic!("timed out waiting for messages to be read");
+            let data = msg.deserialize().unwrap();
+            if data.as_str() != send_data {
+                panic!("Unexpected payload in &str test: {}", &data);
             }
         }
 
-        //check all messages we received are correct
-        (0..message_count).for_each(|i| {
-            let count = counts.get(&i.to_string());
-            if counts.get(&i.to_string()) != Some(&1) {
-                println!(
-                    "Expected {} count to be 1, found {}",
-                    i,
-                    count.cloned().unwrap_or(0)
-                );
-                panic!("{:?}", counts);
-            }
-        });
-        let mut redelivery_start = None;
+        // test &[u8]
+        {
+            let topic = format!("test_unsized_data_bytes_{}", test_id);
+            let send_data: &[u8] = &[0, 1, 2, 3];
 
-        let timeout = Instant::now() + resend_delay + Duration::from_secs(4);
-        while read_count < 2 * message_count {
-            if let Ok(data) = rx.try_recv() {
-                if redelivery_start.is_none() {
-                    redelivery_start = Some(Instant::now());
-                }
-                read_count += 1;
-                *counts.entry(data).or_insert(0) += 1;
-            } else {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            if Instant::now() > timeout {
-                println!("{:?}", counts);
-                panic!("timed out waiting for messages to be read");
+            pulsar
+                .send(&topic, send_data.to_vec())
+                .await
+                .unwrap()
+                .await
+                .unwrap();
+
+            let mut consumer = pulsar
+                .consumer()
+                .with_topic(&topic)
+                .with_subscription_type(SubType::Exclusive)
+                .with_subscription("test_subscription")
+                .with_options(ConsumerOptions {
+                    initial_position: Some(1),
+                    ..Default::default()
+                })
+                .build::<Vec<u8>>()
+                .await
+                .unwrap();
+
+            let msg: Message<Vec<u8>> = timeout(Duration::from_secs(1), consumer.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            consumer.ack(&msg).await.unwrap();
+            let data = msg.deserialize();
+            if data.as_slice() != send_data {
+                panic!("Unexpected payload in &[u8] test: {:?}", &data);
             }
         }
-        let redelivery_start = redelivery_start.unwrap();
-        let expected_redelivery_start = start + resend_delay;
-        println!(
-            "start: 0ms, delay: {}ms, redelivery_start: {}ms, expected_redelivery: {}ms",
-            resend_delay.as_millis(),
-            (redelivery_start - start).as_millis(),
-            (expected_redelivery_start - start).as_millis()
-        );
-        assert!(redelivery_start > expected_redelivery_start - Duration::from_secs(1));
-        assert!(redelivery_start < expected_redelivery_start + Duration::from_secs(1));
-        (0u8..message_count).for_each(|i| {
-            let count = counts.get(&i.to_string());
-            if count != Some(&2) {
-                println!(
-                    "Expected {} count to be 2, found {}",
-                    i,
-                    count.cloned().unwrap_or(0)
-                );
-                panic!("{:?}", counts);
-            }
-        });
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "tokio-runtime")]
+    async fn redelivery() {
+        let _ = log::set_logger(&TEST_LOGGER);
+        let _ = log::set_max_level(LevelFilter::Debug);
+
+        let addr = "pulsar://127.0.0.1:6650";
+        let topic = format!("test_redelivery_{}", rand::random::<u16>());
+
+        let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await.unwrap();
+        pulsar
+            .send(&topic, String::from("data"))
+            .await
+            .unwrap()
+            .await
+            .unwrap();
+
+        let mut consumer: Consumer<String, _> = pulsar
+            .consumer()
+            .with_topic(topic)
+            .with_unacked_message_resend_delay(Some(Duration::from_millis(100)))
+            .with_options(ConsumerOptions {
+                initial_position: Some(1),
+                ..Default::default()
+            })
+            .build()
+            .await
+            .unwrap();
+
+        let _first_receipt = timeout(Duration::from_secs(2), consumer.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let first_received = Instant::now();
+        let second_receipt = timeout(Duration::from_secs(2), consumer.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let redelivery = first_received.elapsed();
+        consumer.ack(&second_receipt).await.unwrap();
+
+        assert!(redelivery < Duration::from_secs(1));
     }
 }

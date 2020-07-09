@@ -36,17 +36,17 @@ async fn main() -> Result<(), pulsar::Error> {
     let addr = "pulsar://127.0.0.1:6650";
     let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await?;
     let mut producer = pulsar
-        .create_producer(
-            "test",
-            Some("my-producer".to_string()),
-            producer::ProducerOptions {
-                schema: Some(proto::Schema {
-                    type_: proto::schema::Type::String as i32,
-                    ..Default::default()
-                }),
+        .producer()
+        .with_topic("test")
+        .with_name("my-producer")
+        .with_options(producer::ProducerOptions {
+            schema: Some(proto::Schema {
+                type_: proto::schema::Type::String as i32,
                 ..Default::default()
-            },
-        )
+            }),
+            ..Default::default()
+        })
+        .build()
         .await?;
 
     tokio::task::spawn(async move {
@@ -69,7 +69,7 @@ async fn main() -> Result<(), pulsar::Error> {
 
     let pulsar2: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await?;
 
-    let mut consumer: Consumer<TestData> = pulsar2
+    let mut consumer: Consumer<TestData, _> = pulsar2
         .consumer()
         .with_topic("test")
         .with_consumer_name("test_consumer")

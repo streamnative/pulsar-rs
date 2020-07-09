@@ -433,6 +433,7 @@ impl ConnectionSender {
 }
 
 pub struct Connection {
+    id: i64,
     url: Url,
     sender: ConnectionSender,
 }
@@ -500,7 +501,8 @@ impl Connection {
         )
         .await?;
 
-        Ok(Connection { url, sender })
+        let id = rand::random();
+        Ok(Connection { id, url, sender })
     }
 
     async fn prepare_stream<Exe: Executor + ?Sized>(
@@ -660,6 +662,10 @@ impl Connection {
         );
 
         Ok(sender)
+    }
+
+    pub fn id(&self) -> i64 {
+        self.id
     }
 
     pub fn error(&self) -> Option<ConnectionError> {
