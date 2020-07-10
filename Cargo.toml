@@ -1,6 +1,6 @@
 [package]
 name = "pulsar"
-version = "1.0.0-alpha-2"
+version = "1.0.0-alpha-3"
 edition = "2018"
 authors = [
     "Colin Stearns <cstearns@developers.wyyerd.com>",
