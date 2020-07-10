@@ -15,7 +15,7 @@ use url::Url;
 /// interacting with a cluster. It will automatically follow redirects
 /// or use a proxy, and aggregate broker connections
 #[derive(Clone)]
-pub struct ServiceDiscovery<Exe: Executor + ?Sized> {
+pub struct ServiceDiscovery<Exe: Executor> {
     manager: Arc<ConnectionManager<Exe>>,
 }
 
@@ -64,7 +64,7 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
                 {
                     error!("lookup({}) answered ServiceNotReady, retrying request after 500ms (max_retries = {})", topic, max_retries);
                     max_retries -= 1;
-                    Exe::delay(Duration::from_millis(500)).await;
+                    self.manager.executor.delay(Duration::from_millis(500)).await;
                     continue;
                 }
                 return Err(ServiceDiscoveryError::Query(
@@ -155,7 +155,7 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
                 {
                     error!("lookup_partitioned_topic_number({}) answered ServiceNotReady, retrying request after 500ms (max_retries = {})", topic, max_retries);
                     max_retries -= 1;
-                    Exe::delay(Duration::from_millis(500)).await;
+                    self.manager.executor.delay(Duration::from_millis(500)).await;
                     continue;
                 }
                 return Err(ServiceDiscoveryError::Query(

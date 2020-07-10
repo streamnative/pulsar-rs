@@ -43,7 +43,7 @@
 //!     env_logger::init();
 //!
 //!     let addr = "pulsar://127.0.0.1:6650";
-//!     let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await?;
+//!     let pulsar: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await?;
 //!     let mut producer = pulsar
 //!         .producer()
 //!         .with_topic("non-persistent://public/default/test")
@@ -101,7 +101,7 @@
 //!     env_logger::init();
 //!
 //!     let addr = "pulsar://127.0.0.1:6650";
-//!     let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await?;
+//!     let pulsar: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await?;
 //!
 //!     let mut consumer: Consumer<TestData, _> = pulsar
 //!         .consumer()
@@ -294,7 +294,7 @@ mod tests {
         let _ = log::set_max_level(LevelFilter::Debug);
 
         let addr = "pulsar://127.0.0.1:6650";
-        let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await.unwrap();
+        let pulsar: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await.unwrap();
 
         // random topic to better allow multiple test runs while debugging
         let topic = format!("test_{}", rand::random::<u16>());
@@ -359,7 +359,7 @@ mod tests {
 
         let addr = "pulsar://127.0.0.1:6650";
         let test_id: u16 = rand::random();
-        let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await.unwrap();
+        let pulsar: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await.unwrap();
 
         // test &str
         {
@@ -446,7 +446,7 @@ mod tests {
         let addr = "pulsar://127.0.0.1:6650";
         let topic = format!("test_redelivery_{}", rand::random::<u16>());
 
-        let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await.unwrap();
+        let pulsar: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await.unwrap();
         pulsar
             .send(&topic, String::from("data"))
             .await

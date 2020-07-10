@@ -2,7 +2,6 @@ use crate::connection::{Authentication, Connection};
 use crate::error::ConnectionError;
 use crate::executor::Executor;
 use std::collections::HashMap;
-use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -58,10 +57,10 @@ enum ConnectionStatus {
 /// interacting with a cluster. It will automatically follow redirects
 /// or use a proxy, and aggregate broker connections
 #[derive(Clone)]
-pub struct ConnectionManager<Exe: Executor + ?Sized> {
+pub struct ConnectionManager<Exe: Executor> {
     pub url: Url,
     auth: Option<Authentication>,
-    executor: PhantomData<Exe>,
+    pub(crate) executor: Arc<Exe>,
     connections: Arc<Mutex<HashMap<BrokerAddress, ConnectionStatus>>>,
     back_off_options: BackOffOptions,
     tls_options: TlsOptions,
@@ -74,6 +73,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
         auth: Option<Authentication>,
         backoff: Option<BackOffOptions>,
         tls: Option<TlsOptions>,
+        executor: Arc<Exe>,
     ) -> Result<Self, ConnectionError> {
         let back_off_options = backoff.unwrap_or_default();
         let tls_options = tls.unwrap_or_default();
@@ -107,7 +107,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
         let manager = ConnectionManager {
             url: url.clone(),
             auth,
-            executor: PhantomData,
+            executor,
             connections: Arc::new(Mutex::new(HashMap::new())),
             back_off_options,
             tls_options,
@@ -226,11 +226,12 @@ impl<Exe: Executor> ConnectionManager<Exe> {
 
         let start = std::time::Instant::now();
         let conn = loop {
-            match Connection::new::<Exe>(
+            match Connection::new(
                 broker.url.clone(),
                 self.auth.clone(),
                 proxy_url.clone(),
                 &self.certificate_chain,
+                self.executor.clone(),
             )
             .await
             {
@@ -262,7 +263,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                         broker.url,
                         current_backoff.as_millis()
                     );
-                    Exe::delay(current_backoff).await;
+                    self.executor.delay(current_backoff).await;
                 }
                 Err(e) => return Err(e),
             }

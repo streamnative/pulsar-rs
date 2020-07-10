@@ -1,5 +1,5 @@
 use futures::{Future, Stream};
-use std::pin::Pin;
+use std::{ops::Deref, pin::Pin, sync::Arc};
 
 pub enum ExecutorKind {
     Tokio,
@@ -8,34 +8,34 @@ pub enum ExecutorKind {
 
 /// Wrapper trait abstracting the Tokio and async-std executors
 pub trait Executor: Clone + Send + Sync + 'static {
-    fn spawn(f: Pin<Box<dyn Future<Output = ()> + Send>>) -> Result<(), ()>;
-    fn spawn_blocking<F, Res>(f: F) -> JoinHandle<Res>
+    fn spawn(&self, f: Pin<Box<dyn Future<Output = ()> + Send>>) -> Result<(), ()>;
+    fn spawn_blocking<F, Res>(&self, f: F) -> JoinHandle<Res>
     where
         F: FnOnce() -> Res + Send + 'static,
         Res: Send + 'static;
 
-    fn interval(duration: std::time::Duration) -> Interval;
-    fn delay(duration: std::time::Duration) -> Delay;
+    fn interval(&self, duration: std::time::Duration) -> Interval;
+    fn delay(&self, duration: std::time::Duration) -> Delay;
 
     // test at runtime and manually choose the implementation
     // because we cannot (yet) have async trait methods,
     // so we cannot move the TCP connection here
-    fn kind() -> ExecutorKind;
+    fn kind(&self) -> ExecutorKind;
 }
 
 /// Wrapper for the Tokio executor
 #[cfg(feature = "tokio-runtime")]
 #[derive(Clone, Debug)]
-pub struct TokioExecutor(pub tokio::runtime::Handle);
+pub struct TokioExecutor;
 
 #[cfg(feature = "tokio-runtime")]
 impl Executor for TokioExecutor {
-    fn spawn(f: Pin<Box<dyn Future<Output = ()> + Send>>) -> Result<(), ()> {
+    fn spawn(&self, f: Pin<Box<dyn Future<Output = ()> + Send>>) -> Result<(), ()> {
         tokio::task::spawn(f);
         Ok(())
     }
 
-    fn spawn_blocking<F, Res>(f: F) -> JoinHandle<Res>
+    fn spawn_blocking<F, Res>(&self, f: F) -> JoinHandle<Res>
     where
         F: FnOnce() -> Res + Send + 'static,
         Res: Send + 'static,
@@ -43,15 +43,15 @@ impl Executor for TokioExecutor {
         JoinHandle::Tokio(tokio::task::spawn_blocking(f))
     }
 
-    fn interval(duration: std::time::Duration) -> Interval {
+    fn interval(&self, duration: std::time::Duration) -> Interval {
         Interval::Tokio(tokio::time::interval(duration))
     }
 
-    fn delay(duration: std::time::Duration) -> Delay {
+    fn delay(&self, duration: std::time::Duration) -> Delay {
         Delay::Tokio(tokio::time::delay_for(duration))
     }
 
-    fn kind() -> ExecutorKind {
+    fn kind(&self) -> ExecutorKind {
         ExecutorKind::Tokio
     }
 }
@@ -63,12 +63,12 @@ pub struct AsyncStdExecutor;
 
 #[cfg(feature = "async-std-runtime")]
 impl Executor for AsyncStdExecutor {
-    fn spawn(f: Pin<Box<dyn Future<Output = ()> + Send>>) -> Result<(), ()> {
+    fn spawn(&self, f: Pin<Box<dyn Future<Output = ()> + Send>>) -> Result<(), ()> {
         async_std::task::spawn(f);
         Ok(())
     }
 
-    fn spawn_blocking<F, Res>(f: F) -> JoinHandle<Res>
+    fn spawn_blocking<F, Res>(&self, f: F) -> JoinHandle<Res>
     where
         F: FnOnce() -> Res + Send + 'static,
         Res: Send + 'static,
@@ -76,17 +76,43 @@ impl Executor for AsyncStdExecutor {
         JoinHandle::AsyncStd(async_std::task::spawn_blocking(f))
     }
 
-    fn interval(duration: std::time::Duration) -> Interval {
+    fn interval(&self, duration: std::time::Duration) -> Interval {
         Interval::AsyncStd(async_std::stream::interval(duration))
     }
 
-    fn delay(duration: std::time::Duration) -> Delay {
+    fn delay(&self, duration: std::time::Duration) -> Delay {
         use async_std::prelude::FutureExt;
         Delay::AsyncStd(Box::pin(async_std::future::ready(()).delay(duration)))
     }
 
-    fn kind() -> ExecutorKind {
+    fn kind(&self) -> ExecutorKind {
         ExecutorKind::AsyncStd
+    }
+}
+
+impl<Exe: Executor> Executor for Arc<Exe> {
+    fn spawn(&self, f: Pin<Box<dyn Future<Output = ()> + Send>>) -> Result<(), ()> {
+        self.deref().spawn(f)
+    }
+
+    fn spawn_blocking<F, Res>(&self, f: F) -> JoinHandle<Res>
+    where
+        F: FnOnce() -> Res + Send + 'static,
+        Res: Send + 'static,
+    {
+        self.deref().spawn_blocking(f)
+    }
+
+    fn interval(&self, duration: std::time::Duration) -> Interval {
+        self.deref().interval(duration)
+    }
+
+    fn delay(&self, duration: std::time::Duration) -> Delay {
+        self.deref().delay(duration)
+    }
+
+    fn kind(&self) -> ExecutorKind {
+        self.deref().kind()
     }
 }
 
