@@ -460,9 +460,9 @@ impl<Exe: Executor + ?Sized> TopicProducer<Exe> {
 
                 {
                     let batch = batch.lock().unwrap();
-                    message_count = batch.length;
-
-                    for (tx, message) in batch.get_messages() {
+                    let messages = batch.get_messages();
+                    message_count = messages.len();
+                    for (tx, message) in messages {
                         receipts.push(tx);
                         message.serialize(&mut payload);
                     }

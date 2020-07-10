@@ -482,4 +482,69 @@ mod tests {
 
         assert!(redelivery < Duration::from_secs(1));
     }
+
+    #[tokio::test]
+    #[cfg(feature = "tokio-runtime")]
+    async fn batching() {
+        let _ = log::set_logger(&TEST_LOGGER);
+        let _ = log::set_max_level(LevelFilter::Debug);
+
+        let addr = "pulsar://127.0.0.1:6650";
+        let topic = format!("test_batching_{}", rand::random::<u16>());
+
+        let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await.unwrap();
+        let mut producer = pulsar.producer()
+            .with_topic(&topic)
+            .with_options(ProducerOptions {
+                batch_size: Some(5),
+                ..Default::default()
+            })
+            .build()
+            .await
+            .unwrap();
+
+        let mut consumer: Consumer<String, _> = pulsar
+            .consumer()
+            .with_topic(topic)
+            .build()
+            .await
+            .unwrap();
+
+        let mut send_receipts = Vec::new();
+        for i in 0..4 {
+            send_receipts.push(producer.send(i.to_string()).await.unwrap());
+        }
+        assert!(timeout(Duration::from_millis(100), consumer.next()).await.is_err());
+
+        send_receipts.push(producer.send(5.to_string()).await.unwrap());
+
+        timeout(Duration::from_millis(100), try_join_all(send_receipts)).await.unwrap().unwrap();
+
+        let mut count = 0;
+        while let Some(message) = timeout(Duration::from_millis(100), consumer.next()).await.unwrap() {
+            let message = message.unwrap();
+            count += 1;
+            let _ = consumer.ack(&message).await;
+            if count >= 5 {
+                break;
+            }
+        }
+
+        assert_eq!(count, 5);
+        let mut send_receipts = Vec::new();
+        for i in 5..9 {
+            send_receipts.push(producer.send(i.to_string()).await.unwrap());
+        }
+        producer.send_batch().await.unwrap();
+        timeout(Duration::from_millis(100), try_join_all(send_receipts)).await.unwrap().unwrap();
+        while let Some(message) = timeout(Duration::from_millis(100), consumer.next()).await.unwrap() {
+            let message = message.unwrap();
+            count += 1;
+            let _ = consumer.ack(&message).await;
+            if count >= 9 {
+                break;
+            }
+        }
+        assert_eq!(count, 9);
+    }
 }

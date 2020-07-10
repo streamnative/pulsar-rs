@@ -77,10 +77,18 @@ impl<Exe: Executor> ConnectionManager<Exe> {
     ) -> Result<Self, ConnectionError> {
         let back_off_options = backoff.unwrap_or_default();
         let tls_options = tls.unwrap_or_default();
-        let url = Url::parse(&url).map_err(|e| {
-            error!("error parsing URL: {:?}", e);
-            ConnectionError::NotFound
-        })?;
+        let url = Url::parse(&url)
+            .map_err(|e| {
+                error!("error parsing URL: {:?}", e);
+                ConnectionError::NotFound
+            })
+            .and_then(|url| {
+                url.host_str().ok_or_else(|| {
+                    error!("missing host for URL: {:?}", url);
+                    ConnectionError::NotFound
+                })?;
+                Ok(url)
+            })?;
 
         let certificate_chain = match tls_options.certificate_chain.as_ref() {
             None => vec![],
