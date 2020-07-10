@@ -166,7 +166,7 @@ mod connection;
 mod connection_manager;
 pub mod consumer;
 pub mod error;
-mod executor;
+pub mod executor;
 pub mod message;
 pub mod producer;
 mod service_discovery;
