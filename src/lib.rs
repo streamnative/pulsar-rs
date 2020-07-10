@@ -492,7 +492,7 @@ mod tests {
         let addr = "pulsar://127.0.0.1:6650";
         let topic = format!("test_batching_{}", rand::random::<u16>());
 
-        let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await.unwrap();
+        let pulsar: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await.unwrap();
         let mut producer = pulsar.producer()
             .with_topic(&topic)
             .with_options(ProducerOptions {

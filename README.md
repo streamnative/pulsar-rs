@@ -50,7 +50,7 @@ async fn main() -> Result<(), pulsar::Error> {
     env_logger::init();
 
     let addr = "pulsar://127.0.0.1:6650";
-    let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await?;
+    let pulsar: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await?;
     let mut producer = pulsar
         .producer()
         .with_topic("non-persistent://public/default/test")
@@ -108,7 +108,7 @@ async fn main() -> Result<(), pulsar::Error> {
     env_logger::init();
 
     let addr = "pulsar://127.0.0.1:6650";
-    let pulsar: Pulsar<TokioExecutor> = Pulsar::builder(addr).build().await?;
+    let pulsar: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await?;
 
     let mut consumer: Consumer<TestData, _> = pulsar
         .consumer()
