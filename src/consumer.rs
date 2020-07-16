@@ -548,7 +548,10 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                             //return Err(Error::Consumer(ConsumerError::Connection(ConnectionError::Disconnected)).into());
                         }
                         Some(message) => {
-                            self.remaining_messages -= 1;
+                            self.remaining_messages -= message.payload.as_ref().and_then(|payload| {
+                                payload.metadata.num_messages_in_batch
+                            }).unwrap_or(1i32) as u32;
+
                             if let Err(e) = self.process_message(message).await {
                                 if let Err(e) = self.tx.send(Err(e)).await {
                                     error!("cannot send a message from the consumer engine to the consumer({}), stopping the engine", self.id);
