@@ -20,10 +20,7 @@ use url::Url;
 use crate::consumer::ConsumerOptions;
 use crate::error::{ConnectionError, SharedError};
 use crate::executor::{Executor, ExecutorKind};
-use crate::message::{
-    proto::{self, command_subscribe::SubType},
-    Codec, Message,
-};
+use crate::message::{proto::{self, command_subscribe::SubType}, Codec, Message, BaseCommand};
 use crate::producer::{self, ProducerOptions};
 
 pub(crate) enum Register {
@@ -44,6 +41,7 @@ pub(crate) enum Register {
 pub enum RequestKey {
     RequestId(u64),
     ProducerSend { producer_id: u64, sequence_id: u64 },
+    Consumer { consumer_id: u64 }
 }
 
 /// Authentication parameters
@@ -130,32 +128,34 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> 
 
         loop {
             match self.inbound.as_mut().poll_next(cx) {
-                Poll::Ready(Some(Ok(msg))) => {
-                    if msg.command.ping.is_some() {
+                Poll::Ready(Some(Ok(msg))) => match msg {
+                    Message { command: BaseCommand { ping: Some(_), .. }, .. } => {
                         let _ = self.outbound.unbounded_send(messages::pong());
-                    } else if msg.command.pong.is_some() {
+                    }
+                    Message { command: BaseCommand { pong: Some(_), .. }, .. } => {
                         if let Some(sender) = self.ping.take() {
                             let _ = sender.send(());
                         }
-                    } else if msg.command.message.is_some() {
-                        if let Some(consumer) = self
-                            .consumers
-                            .get_mut(&msg.command.message.as_ref().unwrap().consumer_id)
-                        {
-                            let _ = consumer.unbounded_send(msg);
+                    }
+                    msg => match msg.request_key() {
+                        Some(key @ RequestKey::RequestId(_)) |
+                        Some(key @ RequestKey::ProducerSend { .. }) => {
+                            if let Some(resolver) = self.pending_requests.remove(&key) {
+                                // We don't care if the receiver has dropped their future
+                                let _ = resolver.send(msg);
+                            } else {
+                                self.received_messages.insert(key, msg);
+                            }
                         }
-                    } else if let Some(request_key) = msg.request_key() {
-                        if let Some(resolver) = self.pending_requests.remove(&request_key) {
-                            // We don't care if the receiver has dropped their future
-                            let _ = resolver.send(msg);
-                        } else {
-                            self.received_messages.insert(request_key, msg);
+                        Some(RequestKey::Consumer { consumer_id }) => {
+                            let _ = self
+                                .consumers
+                                .get_mut(&consumer_id)
+                                .map(move |consumer| consumer.unbounded_send(msg));
                         }
-                    } else {
-                        error!(
-                            "Received message with no request_id; dropping. Message: {:?}",
-                            msg.command
-                        );
+                        None => {
+                            warn!("Received unexpected message; dropping. Message {:?}", msg.command)
+                        }
                     }
                 }
                 Poll::Ready(None) => {

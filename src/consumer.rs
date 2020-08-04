@@ -29,6 +29,9 @@ use core::iter;
 use rand::distributions::Alphanumeric;
 use rand::Rng;
 use url::Url;
+use crate::message::proto::CommandMessage;
+use crate::proto::BaseCommand;
+use std::convert::TryFrom;
 
 /// Configuration options for consumers
 #[derive(Clone, Default, Debug)]
@@ -552,10 +555,18 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                                 payload.metadata.num_messages_in_batch
                             }).unwrap_or(1i32) as u32;
 
-                            if let Err(e) = self.process_message(message).await {
-                                if let Err(e) = self.tx.send(Err(e)).await {
-                                    error!("cannot send a message from the consumer engine to the consumer({}), stopping the engine", self.id);
-                                    return Err(Error::Consumer(e.into()));
+                            match self.process_message(message).await {
+                                // Continue
+                                Ok(true) => {},
+                                // End of Topic
+                                Ok(false) => {
+                                    return Ok(());
+                                }
+                                Err(e) => {
+                                    if let Err(e) = self.tx.send(Err(e)).await {
+                                        error!("cannot send a message from the consumer engine to the consumer({}), stopping the engine", self.id);
+                                        return Err(Error::Consumer(e.into()));
+                                    }
                                 }
                             }
                         }
@@ -629,30 +640,33 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         }
     }
 
-    async fn process_message(&mut self, message: RawMessage) -> Result<(), Error> {
-        let RawMessage { command, payload } = message;
-        let (message, mut payload) = match (command.message.clone(), payload) {
-            (Some(message), Some(payload)) => (message, payload),
-            (Some(message), None) => {
-                return Err(Error::Consumer(ConsumerError::MissingPayload(format!(
-                    "expecting payload with {:?}",
-                    message
-                ))));
+    /// Process the message. Returns `true` if there are more messages to process
+    async fn process_message(&mut self, message: RawMessage) -> Result<bool, Error> {
+        match message {
+            RawMessage { command: BaseCommand { reached_end_of_topic: Some(_), .. }, .. } => {
+                return Ok(false);
             }
-            (None, Some(_)) => {
-                return Err(Error::Consumer(ConsumerError::MissingPayload(format!(
-                    "expecting 'message' command in {:?}",
-                    command
-                ))));
+            RawMessage { command: BaseCommand { active_consumer_change: Some(active_consumer_change), .. }, .. } => {
+                // TODO: Communicate this status to the Consumer and expose it
+                debug!("Active consumer change for {} - Active: {:?}", self.debug_format(), active_consumer_change.is_active);
             }
-            (None, None) => {
-                return Err(Error::Consumer(ConsumerError::MissingPayload(format!(
-                    "expecting 'message' command and payload in {:?}",
-                    command
-                ))));
+            RawMessage { command: BaseCommand { message: Some(message), .. }, payload: Some(payload) } => {
+                self.process_payload(message, payload).await?;
             }
-        };
+            RawMessage { command: BaseCommand { message: Some(_), .. }, payload: None } => {
+                error!("Consumer {} received message without payload", self.debug_format());
+            }
+            unexpected => {
+                let type_ = proto::base_command::Type::try_from(unexpected.command.type_)
+                    .map(|t| format!("{:?}", t))
+                    .unwrap_or_else(|_| unexpected.command.type_.to_string());
+                warn!("Unexpected message type sent to consumer: {}. This is probably a bug!", type_);
+            }
+        }
+        Ok(true)
+    }
 
+    async fn process_payload(&mut self, message: CommandMessage, mut payload: Payload) -> Result<(), Error> {
         let compression = payload.metadata.compression;
 
         let payload = match compression {
@@ -806,7 +820,6 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 _ => self.send_to_consumer(message.message_id, payload).await?,
             },
         }
-
         Ok(())
     }
 
@@ -884,6 +897,15 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         }
 
         Ok(())
+    }
+
+    fn debug_format(&self) -> String {
+        format!("[{id} - {subscription}{name}: {topic}]",
+            id = self.id,
+            subscription = &self.subscription,
+            name = self.name.as_ref().map(|s| format!("({})", s)).unwrap_or_default(),
+            topic = &self.topic
+        )
     }
 }
 
@@ -1446,6 +1468,7 @@ mod tests {
     use crate::{producer, tests::TEST_LOGGER, Pulsar, SerializeMessage};
 
     use super::*;
+    use futures::future::{select, Either};
 
     #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
     pub struct TestData {
@@ -1713,5 +1736,71 @@ mod tests {
             "we probably received a message from a previous run of the test"
         );
         dlq_consumer.ack(&dlq_msg).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "tokio-runtime")]
+    async fn failover() {
+        let _ = log::set_logger(&MULTI_LOGGER);
+        let _ = log::set_max_level(LevelFilter::Debug);
+        let addr = "pulsar://127.0.0.1:6650";
+        let topic = format!("failover_{}", rand::random::<u16>());
+        let client: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await.unwrap();
+
+        let msg_count = 100_u32;
+        try_join_all((0..msg_count).map(|i| {
+            client.send(&topic, i.to_string())
+        })).await.unwrap();
+
+        let builder = client.consumer()
+            .with_subscription("failover")
+            .with_topic(&topic)
+            .with_subscription_type(SubType::Failover)
+            // get earliest messages
+            .with_options(ConsumerOptions {
+                initial_position: Some(1),
+                ..Default::default()
+            });
+
+        let mut consumer_1: Consumer<String, _> = builder
+            .clone()
+            .build()
+            .await
+            .unwrap();
+
+        let mut consumer_2: Consumer<String, _> = builder
+            .build()
+            .await
+            .unwrap();
+
+        let mut consumed_1 = 0_u32;
+        let mut consumed_2 = 0_u32;
+        let mut pending_1 = Some(consumer_1.next());
+        let mut pending_2 = Some(consumer_2.next());
+        while consumed_1 + consumed_2 < msg_count {
+            let next = select(
+                pending_1.take().unwrap(),
+                pending_2.take().unwrap(),
+            );
+            match timeout(Duration::from_secs(2), next).await.unwrap() {
+                Either::Left((msg, pending)) => {
+                    consumed_1 += 1;
+                    let _ = consumer_1.ack(&msg.unwrap().unwrap());
+                    pending_1 = Some(consumer_1.next());
+                    pending_2 = Some(pending);
+                }
+                Either::Right((msg, pending)) => {
+                    consumed_2 += 1;
+                    let _ = consumer_2.ack(&msg.unwrap().unwrap());
+                    pending_1 = Some(pending);
+                    pending_2 = Some(consumer_2.next());
+                }
+            }
+        }
+        match (consumed_1, consumed_2) {
+            (consumed_1, 0) => assert_eq!(consumed_1, msg_count),
+            (0, consumed_2) => assert_eq!(consumed_2, msg_count),
+            _ => panic!("Expected one consumer to consume all messages. Message count: {}, consumer_1: {} consumer_2: {}", msg_count, consumed_1, consumed_2),
+        }
     }
 }
