@@ -6,9 +6,12 @@ use crc::crc32;
 use nom::number::streaming::{be_u16, be_u32};
 use prost::{self, Message as ImplProtobuf};
 use std::io::Cursor;
+use std::convert::TryFrom;
 
 pub use self::proto::BaseCommand;
 pub use self::proto::MessageMetadata as Metadata;
+
+use self::proto::*;
 
 #[derive(Debug)]
 pub struct Message {
@@ -18,62 +21,66 @@ pub struct Message {
 
 impl Message {
     pub fn request_key(&self) -> Option<RequestKey> {
-        let command = &self.command;
-        command
-            .subscribe
-            .as_ref()
-            .map(|m| m.request_id)
-            .or(command.partition_metadata.as_ref().map(|m| m.request_id))
-            .or(command
-                .partition_metadata_response
-                .as_ref()
-                .map(|m| m.request_id))
-            .or(command.lookup_topic.as_ref().map(|m| m.request_id))
-            .or(command.lookup_topic_response.as_ref().map(|m| m.request_id))
-            .or(command.producer.as_ref().map(|m| m.request_id))
-            .or(command.producer_success.as_ref().map(|m| m.request_id))
-            .or(command.unsubscribe.as_ref().map(|m| m.request_id))
-            .or(command.seek.as_ref().map(|m| m.request_id))
-            .or(command.close_producer.as_ref().map(|m| m.request_id))
-            .or(command.close_consumer.as_ref().map(|m| m.request_id))
-            .or(command.success.as_ref().map(|m| m.request_id))
-            .or(command.producer_success.as_ref().map(|m| m.request_id))
-            .or(command.error.as_ref().map(|m| m.request_id))
-            .or(command.consumer_stats.as_ref().map(|m| m.request_id))
-            .or(command
-                .consumer_stats_response
-                .as_ref()
-                .map(|m| m.request_id))
-            .or(command.get_last_message_id.as_ref().map(|m| m.request_id))
-            .or(command
-                .get_last_message_id_response
-                .as_ref()
-                .map(|m| m.request_id))
-            .or(command
-                .get_topics_of_namespace
-                .as_ref()
-                .map(|m| m.request_id))
-            .or(command
-                .get_topics_of_namespace_response
-                .as_ref()
-                .map(|m| m.request_id))
-            .or(command.get_schema.as_ref().map(|m| m.request_id))
-            .or(command.get_schema_response.as_ref().map(|m| m.request_id))
-            .map(|request_id| RequestKey::RequestId(request_id))
-            .or(command
-                .send_receipt
-                .as_ref()
-                .map(|r| RequestKey::ProducerSend {
-                    producer_id: r.producer_id,
-                    sequence_id: r.sequence_id,
-                }))
-            .or(command
-                .send_error
-                .as_ref()
-                .map(|r| RequestKey::ProducerSend {
-                    producer_id: r.producer_id,
-                    sequence_id: r.sequence_id,
-                }))
+        match &self.command {
+            BaseCommand { subscribe: Some(CommandSubscribe { request_id, .. }), .. } |
+            BaseCommand { partition_metadata: Some(CommandPartitionedTopicMetadata { request_id, .. }), .. } |
+            BaseCommand { partition_metadata_response: Some(CommandPartitionedTopicMetadataResponse { request_id, .. }), .. } |
+            BaseCommand { lookup_topic: Some(CommandLookupTopic { request_id, .. }), .. } |
+            BaseCommand { lookup_topic_response: Some(CommandLookupTopicResponse { request_id, .. }), .. } |
+            BaseCommand { producer: Some(CommandProducer { request_id, .. }), .. } |
+            BaseCommand { producer_success: Some(CommandProducerSuccess { request_id, .. }), .. } |
+            BaseCommand { unsubscribe: Some(CommandUnsubscribe { request_id, .. }), .. } |
+            BaseCommand { seek: Some(CommandSeek { request_id, .. }), .. } |
+            BaseCommand { close_producer: Some(CommandCloseProducer { request_id, .. }), .. } |
+            BaseCommand { close_consumer: Some(CommandCloseConsumer { request_id, .. }), .. } |
+            BaseCommand { success: Some(CommandSuccess { request_id, .. }), .. } |
+            BaseCommand { error: Some(CommandError { request_id, .. }), .. } |
+            BaseCommand { consumer_stats: Some(CommandConsumerStats { request_id, .. }), .. } |
+            BaseCommand { consumer_stats_response: Some(CommandConsumerStatsResponse { request_id, .. }), .. } |
+            BaseCommand { get_last_message_id: Some(CommandGetLastMessageId { request_id, .. }), .. } |
+            BaseCommand { get_last_message_id_response: Some(CommandGetLastMessageIdResponse { request_id, .. }), .. } |
+            BaseCommand { get_topics_of_namespace: Some(CommandGetTopicsOfNamespace { request_id, .. }), .. } |
+            BaseCommand { get_topics_of_namespace_response: Some(CommandGetTopicsOfNamespaceResponse { request_id, .. }), .. } |
+            BaseCommand { get_schema: Some(CommandGetSchema { request_id, .. }), .. } |
+            BaseCommand { get_schema_response: Some(CommandGetSchemaResponse { request_id, .. }), .. } => {
+                Some(RequestKey::RequestId(*request_id))
+            }
+            BaseCommand { send: Some(CommandSend { producer_id, sequence_id, .. }), .. } |
+            BaseCommand { send_error: Some(CommandSendError { producer_id, sequence_id, .. }), .. } |
+            BaseCommand { send_receipt: Some(CommandSendReceipt { producer_id, sequence_id, .. }), .. } => {
+                Some(RequestKey::ProducerSend {
+                    producer_id: *producer_id,
+                    sequence_id: *sequence_id,
+                })
+            }
+            BaseCommand { active_consumer_change: Some(CommandActiveConsumerChange { consumer_id, .. }), .. } |
+            BaseCommand { message: Some(CommandMessage { consumer_id, .. }), .. } |
+            BaseCommand { flow: Some(CommandFlow { consumer_id, .. }), .. } |
+            BaseCommand { redeliver_unacknowledged_messages: Some(CommandRedeliverUnacknowledgedMessages { consumer_id, .. }), .. } |
+            BaseCommand { reached_end_of_topic: Some(CommandReachedEndOfTopic { consumer_id }), .. } |
+            BaseCommand { ack: Some(CommandAck { consumer_id, .. }), .. } => {
+                Some(RequestKey::Consumer {
+                    consumer_id: *consumer_id,
+                })
+            }
+            BaseCommand { connect: Some(_), .. } |
+            BaseCommand { connected: Some(_), .. } |
+            BaseCommand { ping: Some(_), .. } |
+            BaseCommand { pong: Some(_), .. } => {
+                None
+            },
+            _ => {
+                match base_command::Type::try_from(self.command.type_) {
+                    Ok(type_) => {
+                        warn!("Unexpected payload for command of type {:?}. This is likely a bug!", type_);
+                    }
+                    Err(()) => {
+                        warn!("Received BaseCommand of unexpected type: {}", self.command.type_);
+                    }
+                }
+                None
+            }
+        }
     }
 }
 
@@ -1192,6 +1199,50 @@ pub mod proto {
     }
 }
 
+impl TryFrom<i32> for proto::base_command::Type {
+    type Error = ();
+
+    fn try_from(value: i32) -> Result<Self, ()> {
+        match value {
+            2 => Ok(proto::base_command::Type::Connect),
+            3 => Ok(proto::base_command::Type::Connected),
+            4 => Ok(proto::base_command::Type::Subscribe),
+            5 => Ok(proto::base_command::Type::Producer),
+            6 => Ok(proto::base_command::Type::Send),
+            7 => Ok(proto::base_command::Type::SendReceipt),
+            8 => Ok(proto::base_command::Type::SendError),
+            9 => Ok(proto::base_command::Type::Message),
+            10 => Ok(proto::base_command::Type::Ack),
+            11 => Ok(proto::base_command::Type::Flow),
+            12 => Ok(proto::base_command::Type::Unsubscribe),
+            13 => Ok(proto::base_command::Type::Success),
+            14 => Ok(proto::base_command::Type::Error),
+            15 => Ok(proto::base_command::Type::CloseProducer),
+            16 => Ok(proto::base_command::Type::CloseConsumer),
+            17 => Ok(proto::base_command::Type::ProducerSuccess),
+            18 => Ok(proto::base_command::Type::Ping),
+            19 => Ok(proto::base_command::Type::Pong),
+            20 => Ok(proto::base_command::Type::RedeliverUnacknowledgedMessages),
+            21 => Ok(proto::base_command::Type::PartitionedMetadata),
+            22 => Ok(proto::base_command::Type::PartitionedMetadataResponse),
+            23 => Ok(proto::base_command::Type::Lookup),
+            24 => Ok(proto::base_command::Type::LookupResponse),
+            25 => Ok(proto::base_command::Type::ConsumerStats),
+            26 => Ok(proto::base_command::Type::ConsumerStatsResponse),
+            27 => Ok(proto::base_command::Type::ReachedEndOfTopic),
+            28 => Ok(proto::base_command::Type::Seek),
+            29 => Ok(proto::base_command::Type::GetLastMessageId),
+            30 => Ok(proto::base_command::Type::GetLastMessageIdResponse),
+            31 => Ok(proto::base_command::Type::ActiveConsumerChange),
+            32 => Ok(proto::base_command::Type::GetTopicsOfNamespace),
+            33 => Ok(proto::base_command::Type::GetTopicsOfNamespaceResponse),
+            34 => Ok(proto::base_command::Type::GetSchema),
+            35 => Ok(proto::base_command::Type::GetSchemaResponse),
+            _ => Err(())
+        }
+    }
+}
+
 impl From<prost::EncodeError> for ConnectionError {
     fn from(e: prost::EncodeError) -> Self {
         ConnectionError::Encoding(e.to_string())
@@ -1209,6 +1260,7 @@ mod tests {
     use crate::message::Codec;
     use bytes::BytesMut;
     use tokio_util::codec::{Decoder, Encoder};
+    use std::convert::TryFrom;
 
     #[test]
     fn parse_simple_command() {
@@ -1259,5 +1311,18 @@ mod tests {
         let mut output = BytesMut::with_capacity(65);
         Codec.encode(message, &mut output).unwrap();
         assert_eq!(&output, input);
+    }
+
+    #[test]
+    fn base_command_type_parsing() {
+        use super::proto::base_command::Type;
+        let mut successes = 0;
+        for i in 0..40 {
+            if let Ok(type_) = Type::try_from(i) {
+                successes += 1;
+                assert_eq!(type_ as i32, i);
+            }
+        }
+        assert_eq!(successes, 34);
     }
 }
