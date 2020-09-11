@@ -147,7 +147,7 @@ extern crate prost_derive;
 #[macro_use]
 extern crate serde;
 
-pub use client::{DeserializeMessage, Pulsar, SerializeMessage};
+pub use client::{Pulsar, PulsarBuilder, DeserializeMessage, SerializeMessage};
 pub use connection::Authentication;
 pub use connection_manager::{BackOffOptions, BrokerAddress, TlsOptions};
 pub use consumer::{Consumer, ConsumerBuilder, ConsumerOptions};
