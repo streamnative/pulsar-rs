@@ -123,6 +123,16 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         }
     }
 
+    pub async fn add_topics(&mut self, topics: &[String]) -> Result<(), Error>  {
+        match &mut self.inner {
+            InnerConsumer::Single(_) => { Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Single Consumer doesn't need more topics",
+            ))))}, 
+            InnerConsumer::Mulit(c) => {c.add_topics(topics).await}
+        }
+    }
+
     pub fn topics(&self) -> Vec<String> {
         match &self.inner {
             InnerConsumer::Single(c) => vec![c.topic.clone()],
@@ -214,6 +224,8 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
             InnerConsumer::Mulit(c) => c.messages_received(),
         }
     }
+    
+
 }
 
 //TODO: why does T need to be 'static?
@@ -1296,6 +1308,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
         }
     }
 
+
     fn update_topics(&mut self) {
         if let Some(regex) = self.topic_regex.clone() {
             let pulsar = self.pulsar.clone();
@@ -1333,6 +1346,18 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
                 Ok(consumers)
             }));
         }
+    }
+
+    pub async fn add_topics(&mut self, topics:&[String])-> Result<(), Error> {
+        for topic in topics{
+            let broker_address = self.pulsar.lookup_topic(topic).await?;
+            let new_consumer:TopicConsumer<T>  = TopicConsumer::new(self.pulsar.clone(), topic.clone(), broker_address,
+             self.config.clone()).await?;
+            self.consumers.insert(topic.clone(), Box::pin(new_consumer));
+            self.topics.push_back(topic.clone());
+        }
+
+        Ok(())
     }
 
     pub async fn ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
