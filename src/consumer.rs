@@ -335,7 +335,6 @@ impl<T: DeserializeMessage> TopicConsumer<T> {
             name,
             tx,
             messages,
-            ack_tx.clone(),
             ack_rx,
             batch_size,
             unacked_message_redelivery_delay,
@@ -446,7 +445,6 @@ struct ConsumerEngine<Exe: Executor> {
     name: Option<String>,
     tx: mpsc::Sender<Result<(proto::MessageIdData, Payload), Error>>,
     messages_rx: Option<mpsc::UnboundedReceiver<RawMessage>>,
-    ack_tx: mpsc::UnboundedSender<AckMessage>,
     ack_rx: Option<mpsc::UnboundedReceiver<AckMessage>>,
     batch_size: u32,
     remaining_messages: u32,
@@ -474,7 +472,6 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         name: Option<String>,
         tx: mpsc::Sender<Result<(proto::MessageIdData, Payload), Error>>,
         messages_rx: mpsc::UnboundedReceiver<RawMessage>,
-        ack_tx: mpsc::UnboundedSender<AckMessage>,
         ack_rx: mpsc::UnboundedReceiver<AckMessage>,
         batch_size: u32,
         unacked_message_redelivery_delay: Option<Duration>,
@@ -492,7 +489,6 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             name,
             tx,
             messages_rx: Some(messages_rx),
-            ack_tx,
             ack_rx: Some(ack_rx),
             batch_size,
             remaining_messages: batch_size,
@@ -582,16 +578,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                             return Ok(());
                         }
                         Some(AckMessage::Ack(message_id, cumulative)) => {
-                            //FIXME: this does not handle cumulative acks
-                            self.unacked_messages.remove(&message_id.id);
-                            let res = self.connection.sender().send_ack(
-                                self.id,
-                                vec![message_id.id.clone()],
-                                cumulative,
-                            );
-                            if res.is_err() {
-                                error!("ack error: {:?}", res);
-                            }
+                            self.ack(message_id, cumulative);
                         }
                         Some(AckMessage::Nack(message_id)) => {
                             if let Err(e) = self
@@ -637,6 +624,18 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                     }
                 }
             };
+        }
+    }
+
+    fn ack(&mut self, message_id: MessageData, cumulative: bool) {
+        //FIXME: this does not handle cumulative acks
+        self.unacked_messages.remove(&message_id.id);
+        let res =
+            self.connection
+                .sender()
+                .send_ack(self.id, vec![message_id.id.clone()], cumulative);
+        if res.is_err() {
+            error!("ack error: {:?}", res);
         }
     }
 
@@ -800,19 +799,14 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                                 Error::Custom("DLQ send error".to_string())
                             })?;
 
-                        self.ack_tx
-                            .send(AckMessage::Ack(
-                                MessageData {
-                                    id: message.message_id,
-                                    batch_size: None,
-                                },
-                                false,
-                            ))
-                            .await
-                            .map_err(|e| {
-                                error!("ack tx returned {:?}", e);
-                                Error::Custom("tx closed".to_string())
-                            })?;
+                        self.ack(
+                            MessageData {
+                                id: message.message_id,
+                                batch_size: None,
+                            },
+                            false,
+                        );
+
                     } else {
                         self.send_to_consumer(message.message_id, payload).await?
                     }
