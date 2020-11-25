@@ -678,8 +678,6 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         }
     }
 
-    async fn filter_message(&mut self, message: RawMessage) {}
-
     /// Process the message. Returns `true` if there are more messages to process
     async fn process_message(&mut self, message: RawMessage) -> Result<bool, Error> {
         match message {
