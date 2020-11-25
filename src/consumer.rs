@@ -19,19 +19,19 @@ use regex::Regex;
 use crate::connection::Connection;
 use crate::error::{ConnectionError, ConsumerError, Error};
 use crate::executor::Executor;
+use crate::message::proto::CommandMessage;
 use crate::message::{
     parse_batched_message,
     proto::{self, command_subscribe::SubType, MessageIdData, MessageMetadata, Schema},
     BatchedMessage, Message as RawMessage, Metadata, Payload,
 };
+use crate::proto::BaseCommand;
 use crate::{BrokerAddress, DeserializeMessage, Pulsar};
 use core::iter;
 use rand::distributions::Alphanumeric;
 use rand::Rng;
-use url::Url;
-use crate::message::proto::CommandMessage;
-use crate::proto::BaseCommand;
 use std::convert::TryFrom;
+use url::Url;
 
 /// Configuration options for consumers
 #[derive(Clone, Default, Debug)]
@@ -123,6 +123,18 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         }
     }
 
+    pub async fn seek(
+        &mut self,
+        consumer_ids: Option<Vec<String>>,
+        message_id: Option<MessageIdData>,
+        timestamp: Option<u64>,
+    ) -> Result<(), ConsumerError> {
+        match &mut self.inner {
+            InnerConsumer::Single(c) => c.seek(message_id, timestamp).await,
+            InnerConsumer::Mulit(c) => c.seek(consumer_ids, message_id, timestamp).await,
+        }
+    }
+
     pub fn topics(&self) -> Vec<String> {
         match &self.inner {
             InnerConsumer::Single(c) => vec![c.topic.clone()],
@@ -133,13 +145,13 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
     pub fn connections(&self) -> Vec<&Url> {
         match &self.inner {
             InnerConsumer::Single(c) => vec![c.connection.url()],
-            InnerConsumer::Mulit(c) => {
-                c.consumers.values()
-                    .map(|c| c.connection.url())
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .collect()
-            },
+            InnerConsumer::Mulit(c) => c
+                .consumers
+                .values()
+                .map(|c| c.connection.url())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
         }
     }
 
@@ -182,15 +194,15 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         match &self.inner {
             InnerConsumer::Single(c) => &c.config.consumer_name,
             InnerConsumer::Mulit(c) => &c.config.consumer_name,
-        }.as_ref().map(|s| s.as_str())
+        }
+        .as_ref()
+        .map(|s| s.as_str())
     }
 
     pub fn consumer_id(&self) -> Vec<u64> {
         match &self.inner {
             InnerConsumer::Single(c) => vec![c.consumer_id],
-            InnerConsumer::Mulit(c) => {
-                c.consumers.values().map(|c| c.consumer_id).collect()
-            },
+            InnerConsumer::Mulit(c) => c.consumers.values().map(|c| c.consumer_id).collect(),
         }
     }
 
@@ -262,7 +274,7 @@ impl<T: DeserializeMessage> TopicConsumer<T> {
             consumer_id,
             unacked_message_redelivery_delay,
             options,
-            dead_letter_policy
+            dead_letter_policy,
         } = config.clone();
         let connection = client.manager.get_connection(&addr).await?;
         let consumer_id = consumer_id.unwrap_or_else(rand::random);
@@ -311,15 +323,21 @@ impl<T: DeserializeMessage> TopicConsumer<T> {
         if unacked_message_redelivery_delay.is_some() {
             let mut redelivery_tx = ack_tx.clone();
             let mut interval = client.executor.interval(Duration::from_millis(500));
-            if client.executor.spawn(Box::pin(async move {
-                while interval.next().await.is_some() {
-                    if redelivery_tx.send(AckMessage::UnackedRedelivery).await.is_err() {
-                        // Consumer shut down - stop ticker
-                        break;
+            if client
+                .executor
+                .spawn(Box::pin(async move {
+                    while interval.next().await.is_some() {
+                        if redelivery_tx
+                            .send(AckMessage::UnackedRedelivery)
+                            .await
+                            .is_err()
+                        {
+                            // Consumer shut down - stop ticker
+                            break;
+                        }
                     }
-                }
-            }))
-            .is_err()
+                }))
+                .is_err()
             {
                 return Err(Error::Executor);
             }
@@ -394,6 +412,19 @@ impl<T: DeserializeMessage> TopicConsumer<T> {
     pub async fn nack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         self.ack_tx
             .send(AckMessage::Nack(msg.message_id.clone()))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn seek(
+        &mut self,
+        message_id: Option<MessageIdData>,
+        timestamp: Option<u64>,
+    ) -> Result<(), ConsumerError> {
+        let consumer_id = self.consumer_id;
+        self.connection
+            .sender()
+            .seek(consumer_id, message_id, timestamp)
             .await?;
         Ok(())
     }
@@ -551,13 +582,20 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                             //return Err(Error::Consumer(ConsumerError::Connection(ConnectionError::Disconnected)).into());
                         }
                         Some(message) => {
-                            self.remaining_messages -= message.payload.as_ref().and_then(|payload| {
-                                payload.metadata.num_messages_in_batch
-                            }).unwrap_or(1i32) as u32;
+                            //TODO 여기서 message type 별로 분리하는게 제일 좋을듯
+                            //여기서 메세지 타입별론 분리해서 seek 같은것들을 처리하고
+                            //진짜로 보내는 메세지들은 또 따로 처리해야할듯
+
+                            self.remaining_messages -= message
+                                .payload
+                                .as_ref()
+                                .and_then(|payload| payload.metadata.num_messages_in_batch)
+                                .unwrap_or(1i32)
+                                as u32;
 
                             match self.process_message(message).await {
                                 // Continue
-                                Ok(true) => {},
+                                Ok(true) => {}
                                 // End of Topic
                                 Ok(false) => {
                                     return Ok(());
@@ -640,33 +678,75 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         }
     }
 
+    async fn filter_message(&mut self, message: RawMessage) {}
+
     /// Process the message. Returns `true` if there are more messages to process
     async fn process_message(&mut self, message: RawMessage) -> Result<bool, Error> {
         match message {
-            RawMessage { command: BaseCommand { reached_end_of_topic: Some(_), .. }, .. } => {
+            RawMessage {
+                command:
+                    BaseCommand {
+                        reached_end_of_topic: Some(_),
+                        ..
+                    },
+                ..
+            } => {
                 return Ok(false);
             }
-            RawMessage { command: BaseCommand { active_consumer_change: Some(active_consumer_change), .. }, .. } => {
+            RawMessage {
+                command:
+                    BaseCommand {
+                        active_consumer_change: Some(active_consumer_change),
+                        ..
+                    },
+                ..
+            } => {
                 // TODO: Communicate this status to the Consumer and expose it
-                debug!("Active consumer change for {} - Active: {:?}", self.debug_format(), active_consumer_change.is_active);
+                debug!(
+                    "Active consumer change for {} - Active: {:?}",
+                    self.debug_format(),
+                    active_consumer_change.is_active
+                );
             }
-            RawMessage { command: BaseCommand { message: Some(message), .. }, payload: Some(payload) } => {
+            RawMessage {
+                command:
+                    BaseCommand {
+                        message: Some(message),
+                        ..
+                    },
+                payload: Some(payload),
+            } => {
                 self.process_payload(message, payload).await?;
             }
-            RawMessage { command: BaseCommand { message: Some(_), .. }, payload: None } => {
-                error!("Consumer {} received message without payload", self.debug_format());
+            RawMessage {
+                command: BaseCommand {
+                    message: Some(_), ..
+                },
+                payload: None,
+            } => {
+                error!(
+                    "Consumer {} received message without payload",
+                    self.debug_format()
+                );
             }
             unexpected => {
                 let type_ = proto::base_command::Type::try_from(unexpected.command.type_)
                     .map(|t| format!("{:?}", t))
                     .unwrap_or_else(|_| unexpected.command.type_.to_string());
-                warn!("Unexpected message type sent to consumer: {}. This is probably a bug!", type_);
+                warn!(
+                    "Unexpected message type sent to consumer: {}. This is probably a bug!",
+                    type_
+                );
             }
         }
         Ok(true)
     }
 
-    async fn process_payload(&mut self, message: CommandMessage, mut payload: Payload) -> Result<(), Error> {
+    async fn process_payload(
+        &mut self,
+        message: CommandMessage,
+        mut payload: Payload,
+    ) -> Result<(), Error> {
         let compression = payload.metadata.compression;
 
         let payload = match compression {
@@ -789,10 +869,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                     // Send message to Dead Letter Topic and ack message in original topic
                     if redelivery_count as usize >= dead_letter_policy.max_redeliver_count {
                         self.client
-                            .send(
-                                &dead_letter_policy.dead_letter_topic,
-                                payload.data,
-                            )
+                            .send(&dead_letter_policy.dead_letter_topic, payload.data)
                             .await?
                             .await
                             .map_err(|e| {
@@ -900,10 +977,15 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
     }
 
     fn debug_format(&self) -> String {
-        format!("[{id} - {subscription}{name}: {topic}]",
+        format!(
+            "[{id} - {subscription}{name}: {topic}]",
             id = self.id,
             subscription = &self.subscription,
-            name = self.name.as_ref().map(|s| format!("({})", s)).unwrap_or_default(),
+            name = self
+                .name
+                .as_ref()
+                .map(|s| format!("({})", s))
+                .unwrap_or_default(),
             topic = &self.topic
         )
     }
@@ -1116,7 +1198,9 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
         } = self;
 
         if topics.is_none() && topic_regex.is_none() {
-            return Err(Error::Custom("Cannot create consumer with no topics and no topic regex".into()));
+            return Err(Error::Custom(
+                "Cannot create consumer with no topics and no topic regex".into(),
+            ));
         }
 
         let topics: Vec<(String, BrokerAddress)> = try_join_all(
@@ -1168,7 +1252,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
             consumer_id,
             unacked_message_redelivery_delay: unacked_message_resend_delay,
             options: consumer_options.unwrap_or_default(),
-            dead_letter_policy
+            dead_letter_policy,
         };
 
         let consumers =
@@ -1202,10 +1286,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
             };
             if consumer.topic_regex.is_some() {
                 consumer.update_topics();
-                let initial_consumers = consumer.new_consumers
-                    .take()
-                    .unwrap()
-                    .await?;
+                let initial_consumers = consumer.new_consumers.take().unwrap().await?;
                 consumer.add_consumers(initial_consumers);
             }
             InnerConsumer::Mulit(consumer)
@@ -1304,7 +1385,9 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
             let consumer_config = self.config.clone();
 
             self.new_consumers = Some(Box::pin(async move {
-                let topics = pulsar.get_topics_of_namespace(namespace.clone(), proto::get_topics::Mode::All).await?;
+                let topics = pulsar
+                    .get_topics_of_namespace(namespace.clone(), proto::get_topics::Mode::All)
+                    .await?;
                 trace!("fetched topics {:?}", topics);
 
                 let topics: Vec<_> = try_join_all(
@@ -1357,6 +1440,35 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
             Ok(())
         } else {
             Err(ConnectionError::Unexpected(format!("no consumer for topic {}", msg.topic)).into())
+        }
+    }
+
+    /// Assume that this seek method will call seek for the topics given in the consumer_ids
+    pub async fn seek(
+        &mut self,
+        consumer_ids: Option<Vec<String>>,
+        message_id: Option<MessageIdData>,
+        timestamp: Option<u64>,
+    ) -> Result<(), ConsumerError> {
+        // 0. null or empty vector
+        match consumer_ids {
+            Some(consumer_ids) => {
+                // 1, select consumers
+                let mut actions = Vec::default();
+                for (consumer_id, consumer) in self.consumers.iter_mut() {
+                    if consumer_ids.contains(consumer_id) {
+                        actions.push(consumer.seek(message_id.clone(), timestamp));
+                    }
+                }
+                // 2 join all the futures
+                // TODO: should we unwrap this? 
+                let _f = futures::future::join_all(actions).await;
+                Ok(())
+            }
+            None => {
+                // TODO should this be error?
+                Ok(())
+            }
         }
     }
 }
@@ -1532,9 +1644,12 @@ mod tests {
             client.send(&topic1, &data2).await.unwrap(),
             client.send(&topic2, &data3).await.unwrap(),
             client.send(&topic2, &data4).await.unwrap(),
-        ]).await.unwrap();
+        ])
+        .await
+        .unwrap();
 
-        let builder = client.consumer()
+        let builder = client
+            .consumer()
             .with_subscription_type(SubType::Shared)
             // get earliest messages
             .with_options(ConsumerOptions {
@@ -1560,13 +1675,26 @@ mod tests {
         let expected: HashSet<_> = vec![data1, data2, data3, data4].into_iter().collect();
         for consumer in [consumer_1, consumer_2].iter_mut() {
             let connected_topics = consumer.topics();
-            debug!("connected topics for {}: {:?}", consumer.subscription(), &connected_topics);
+            debug!(
+                "connected topics for {}: {:?}",
+                consumer.subscription(),
+                &connected_topics
+            );
             assert_eq!(connected_topics.len(), 2);
-            assert!(connected_topics.iter().find(|t| t.ends_with(&topic1)).is_some());
-            assert!(connected_topics.iter().find(|t| t.ends_with(&topic2)).is_some());
+            assert!(connected_topics
+                .iter()
+                .find(|t| t.ends_with(&topic1))
+                .is_some());
+            assert!(connected_topics
+                .iter()
+                .find(|t| t.ends_with(&topic2))
+                .is_some());
 
             let mut received = HashSet::new();
-            while let Some(message) = timeout(Duration::from_secs(1), consumer.next()).await.unwrap() {
+            while let Some(message) = timeout(Duration::from_secs(1), consumer.next())
+                .await
+                .unwrap()
+            {
                 received.insert(message.unwrap().deserialize().unwrap());
                 if received.len() == 4 {
                     break;
@@ -1586,7 +1714,10 @@ mod tests {
         let _ = log::set_max_level(LevelFilter::Debug);
         let addr = "pulsar://127.0.0.1:6650";
 
-        let topic = format!("consumer_dropped_with_lingering_acks_{}", rand::random::<u16>());
+        let topic = format!(
+            "consumer_dropped_with_lingering_acks_{}",
+            rand::random::<u16>()
+        );
 
         let client: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await.unwrap();
 
@@ -1620,7 +1751,11 @@ mod tests {
             println!("created consumer");
 
             //consumer.next().await
-            let msg: Message<TestData> = timeout(Duration::from_secs(1), consumer.next()).await.unwrap().unwrap().unwrap();
+            let msg: Message<TestData> = timeout(Duration::from_secs(1), consumer.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
             println!("got message: {:?}", msg.payload);
             assert_eq!(
                 message,
@@ -1748,11 +1883,12 @@ mod tests {
         let client: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await.unwrap();
 
         let msg_count = 100_u32;
-        try_join_all((0..msg_count).map(|i| {
-            client.send(&topic, i.to_string())
-        })).await.unwrap();
+        try_join_all((0..msg_count).map(|i| client.send(&topic, i.to_string())))
+            .await
+            .unwrap();
 
-        let builder = client.consumer()
+        let builder = client
+            .consumer()
             .with_subscription("failover")
             .with_topic(&topic)
             .with_subscription_type(SubType::Failover)
@@ -1762,26 +1898,16 @@ mod tests {
                 ..Default::default()
             });
 
-        let mut consumer_1: Consumer<String, _> = builder
-            .clone()
-            .build()
-            .await
-            .unwrap();
+        let mut consumer_1: Consumer<String, _> = builder.clone().build().await.unwrap();
 
-        let mut consumer_2: Consumer<String, _> = builder
-            .build()
-            .await
-            .unwrap();
+        let mut consumer_2: Consumer<String, _> = builder.build().await.unwrap();
 
         let mut consumed_1 = 0_u32;
         let mut consumed_2 = 0_u32;
         let mut pending_1 = Some(consumer_1.next());
         let mut pending_2 = Some(consumer_2.next());
         while consumed_1 + consumed_2 < msg_count {
-            let next = select(
-                pending_1.take().unwrap(),
-                pending_2.take().unwrap(),
-            );
+            let next = select(pending_1.take().unwrap(), pending_2.take().unwrap());
             match timeout(Duration::from_secs(2), next).await.unwrap() {
                 Either::Left((msg, pending)) => {
                     consumed_1 += 1;
