@@ -13,7 +13,7 @@ pub use self::proto::MessageMetadata as Metadata;
 
 use self::proto::*;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Message {
     pub command: BaseCommand,
     pub payload: Option<Payload>,
@@ -404,7 +404,7 @@ impl futures_codec::Decoder for Codec {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Payload {
     pub metadata: Metadata,
     pub data: Vec<u8>,
@@ -921,6 +921,8 @@ pub mod proto {
         pub request_id: u64,
         #[prost(message, optional, tag="3")]
         pub message_id: ::std::option::Option<MessageIdData>,
+        #[prost(uint64, optional, tag="4")]
+        pub message_publish_time: ::std::option::Option<u64>,
     }
     /// Message sent by broker to client when a topic
     /// has been forcefully terminated and there are no more
