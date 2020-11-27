@@ -16,7 +16,6 @@ use futures::{
 };
 use regex::Regex;
 
-use crate::connection::Connection;
 use crate::error::{ConnectionError, ConsumerError, Error};
 use crate::executor::Executor;
 use crate::message::proto::CommandMessage;
@@ -26,6 +25,7 @@ use crate::message::{
     BatchedMessage, Message as RawMessage, Metadata, Payload,
 };
 use crate::proto::BaseCommand;
+use crate::{connection::Connection, TokioExecutor};
 use crate::{BrokerAddress, DeserializeMessage, Pulsar};
 use core::iter;
 use rand::distributions::Alphanumeric;
@@ -128,11 +128,40 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         consumer_ids: Option<Vec<String>>,
         message_id: Option<MessageIdData>,
         timestamp: Option<u64>,
+        client: Pulsar<TokioExecutor>,
     ) -> Result<(), ConsumerError> {
+        
+        let mut inner_consumer: Option<InnerConsumer<T, Exe>> = None;
         match &mut self.inner {
-            InnerConsumer::Single(c) => c.seek(message_id, timestamp).await,
-            InnerConsumer::Mulit(c) => c.seek(consumer_ids, message_id, timestamp).await,
-        }
+            InnerConsumer::Single(c) => {
+                println!("replacing single consumer");
+                c.seek(message_id, timestamp).await?;
+                let topic = c.topic();
+                println!("ran here0"); 
+                let addr = client.lookup_topic(topic).await.unwrap();
+                println!("ran here"); 
+                let consumer =
+                    TopicConsumer::new(client, topic.to_string(), addr, c.config().clone())
+                        .await
+                        .unwrap();
+
+                println!("dd");
+                inner_consumer = Some(InnerConsumer::Single(consumer));
+                drop(c);
+            }
+            InnerConsumer::Mulit(c) => {
+                println!("replacing single consumer");
+                c.seek(consumer_ids, message_id, timestamp).await;
+                //TODO we could drop c or call a method to replace what's inside
+
+                drop(c);
+            }
+        };
+
+        //TODO destroy self self(consumer) but create a new one that can replace the existing one
+
+        self.inner = inner_consumer.unwrap(); 
+        Ok(())
     }
 
     pub fn topics(&self) -> Vec<String> {
@@ -437,6 +466,10 @@ impl<T: DeserializeMessage> TopicConsumer<T> {
         self.messages_received
     }
 
+    pub fn config(&self) -> &ConsumerConfig {
+        &self.config
+    }
+
     fn create_message(&self, message_id: proto::MessageIdData, payload: Payload) -> Message<T> {
         Message {
             topic: self.topic.clone(),
@@ -582,10 +615,6 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                             //return Err(Error::Consumer(ConsumerError::Connection(ConnectionError::Disconnected)).into());
                         }
                         Some(message) => {
-                            //TODO 여기서 message type 별로 분리하는게 제일 좋을듯
-                            //여기서 메세지 타입별론 분리해서 seek 같은것들을 처리하고
-                            //진짜로 보내는 메세지들은 또 따로 처리해야할듯
-
                             self.remaining_messages -= message
                                 .payload
                                 .as_ref()
@@ -1294,7 +1323,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
 }
 
 #[derive(Debug, Clone, Default)]
-struct ConsumerConfig {
+pub struct ConsumerConfig {
     subscription: String,
     sub_type: SubType,
     batch_size: Option<u32>,
@@ -1459,7 +1488,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
                     }
                 }
                 // 2 join all the futures
-                // TODO: should we unwrap this? 
+                // TODO: should we unwrap this?
                 let _f = futures::future::join_all(actions).await;
                 Ok(())
             }
@@ -1567,7 +1596,9 @@ impl<T: 'static + DeserializeMessage, Exe: Executor> Stream for MultiTopicConsum
 
 #[cfg(test)]
 mod tests {
-    use futures::StreamExt;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use futures::{StreamExt, TryStreamExt};
     use log::LevelFilter;
     use regex::Regex;
     #[cfg(feature = "tokio-runtime")]
@@ -1926,5 +1957,117 @@ mod tests {
             (0, consumed_2) => assert_eq!(consumed_2, msg_count),
             _ => panic!("Expected one consumer to consume all messages. Message count: {}, consumer_1: {} consumer_2: {}", msg_count, consumed_1, consumed_2),
         }
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "tokio-runtime")]
+    async fn seek_single_consumer() {
+        let _ = log::set_logger(&MULTI_LOGGER);
+        let _ = log::set_max_level(LevelFilter::Debug);
+        log::info!("starting seek test");
+        let addr = "pulsar://127.0.0.1:6650";
+        let topic = format!("seek_{}", rand::random::<u16>());
+        let client: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await.unwrap();
+
+        // send 100 messages and record the starting time
+        let msg_count = 100_u32;
+
+        let start_time: u64 = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        std::thread::sleep(Duration::from_secs(2));
+
+        println!("this is the starting time: {}", start_time);
+
+        try_join_all((0..msg_count).map(|i| client.send(&topic, i.to_string())))
+            .await
+            .unwrap();
+        log::info!("sent all messages");
+
+        let mut consumer_1: Consumer<String, _> = client
+            .consumer()
+            .with_consumer_name("seek_single_test")
+            .with_subscription("seek_single_test")
+            .with_subscription_type(SubType::Shared)
+            .with_topic(&topic)
+            .build()
+            .await
+            .unwrap();
+
+        log::info!("built the consumer");
+
+        let mut consumed_1 = 0_u32;
+        while let Some(msg) = consumer_1.try_next().await.unwrap() {
+            consumer_1.ack(&msg).await.unwrap();
+            let publish_time = msg.metadata().publish_time;
+            let data = match msg.deserialize() {
+                Ok(data) => data,
+                Err(e) => {
+                    log::error!("could not deserialize message: {:?}", e);
+                    break;
+                }
+            };
+
+            consumed_1 += 1;
+            log::info!(
+                "first loop, got {} messages, content: {}, publish time: {}",
+                consumed_1,
+                data,
+                publish_time
+            );
+
+            //break after enough half of the messages were received
+            if consumed_1 >= msg_count / 2 {
+                log::info!("first loop, received {} messages, so break", consumed_1);
+                break;
+            }
+        }
+
+        // // call seek(timestamp), roll back the consumer to start_time
+        log::info!("calling seek method");
+        let _seek_result = consumer_1.seek(None, None, 
+            Some(start_time), client).await.unwrap();
+
+        // let mut consumer_2: Consumer<String, _> = client
+        // .consumer()
+        // .with_consumer_name("seek")
+        // .with_subscription("seek")
+        // .with_topic(&topic)
+        // .build()
+        // .await
+        // .unwrap();
+
+        // then read the messages again
+        let mut consumed_2 = 0_u32;
+        log::info!("reading messages again");
+        while let Some(msg) = consumer_1.try_next().await.unwrap() {
+            let publish_time = msg.metadata().publish_time;
+            consumer_1.ack(&msg).await.unwrap();
+            let data = match msg.deserialize() {
+                Ok(data) => data,
+                Err(e) => {
+                    log::error!("could not deserialize message: {:?}", e);
+                    break;
+                }
+            };
+            consumed_2 += 1;
+            log::info!(
+                "second loop, got {} messages, content: {},  publish time: {}",
+                consumed_2,
+                data,
+                publish_time,
+            );
+
+            if consumed_2 >= msg_count {
+                log::info!("received {} messagses, so break", consumed_2);
+                break; 
+            }
+        }
+
+        //then check if all messages were received
+        assert_eq!(50, consumed_1);
+        assert_eq!(100, consumed_2);
     }
 }

@@ -921,8 +921,8 @@ pub mod proto {
         pub request_id: u64,
         #[prost(message, optional, tag="3")]
         pub message_id: ::std::option::Option<MessageIdData>,
-        #[prost(message, optional, tag="4")]
-        pub timestamp: ::std::option::Option<u64>,
+        #[prost(uint64, optional, tag="4")]
+        pub message_publish_time: ::std::option::Option<u64>,
     }
     /// Message sent by broker to client when a topic
     /// has been forcefully terminated and there are no more

@@ -1044,7 +1044,7 @@ pub(crate) mod messages {
         }
     }
 
-    pub fn seek(consumer_id: u64, request_id: u64, message_id:Option<MessageIdData>, timestamp: Option<u64>) -> Message {
+    pub fn seek(consumer_id: u64, request_id: u64, message_id:Option<MessageIdData>, message_publish_time: Option<u64>) -> Message {
         Message {
             command: proto::BaseCommand{
                 type_: CommandType::Seek as i32, 
@@ -1052,7 +1052,7 @@ pub(crate) mod messages {
                     consumer_id, 
                     request_id, 
                     message_id, 
-                    timestamp
+                    message_publish_time
                 }), 
                 ..Default::default()
             },
