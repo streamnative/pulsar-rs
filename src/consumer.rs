@@ -16,6 +16,7 @@ use futures::{
 };
 use regex::Regex;
 
+use crate::connection::Connection;
 use crate::error::{ConnectionError, ConsumerError, Error};
 use crate::executor::Executor;
 use crate::message::proto::CommandMessage;
@@ -25,7 +26,6 @@ use crate::message::{
     BatchedMessage, Message as RawMessage, Metadata, Payload,
 };
 use crate::proto::BaseCommand;
-use crate::{connection::Connection, TokioExecutor};
 use crate::{BrokerAddress, DeserializeMessage, Pulsar};
 use core::iter;
 use rand::distributions::Alphanumeric;
@@ -123,6 +123,9 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         }
     }
 
+    /// seek currently destroys the existing consumer and creates a new one
+    /// this is how java and cpp pulsar client implement this feature mainly because
+    /// there are many minor problems with flushing existing messages and receiving new ones
     pub async fn seek(
         &mut self,
         consumer_ids: Option<Vec<String>>,
@@ -130,40 +133,41 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         timestamp: Option<u64>,
         client: Pulsar<Exe>,
     ) -> Result<(), ConsumerError> {
-        let mut inner_consumer: Option<InnerConsumer<T, Exe>> = None;
-        match &mut self.inner {
+        let inner_consumer: InnerConsumer<T, Exe> = match &mut self.inner {
             InnerConsumer::Single(c) => {
-                println!("replacing single consumer");
                 c.seek(message_id, timestamp).await?;
-                let topic = c.topic();
-                let addr = client.lookup_topic(topic).await.unwrap();
-                inner_consumer = Some(InnerConsumer::Single(
-                    TopicConsumer::new(client, topic.to_string(), addr, c.config().clone())
+                let topic = c.topic().clone().to_string();
+                let addr = client.lookup_topic(&topic).await.unwrap();
+                let config = c.config().clone();
+                // drop c to destroy it
+                drop(c);
+                InnerConsumer::Single(
+                    TopicConsumer::new(client, topic, addr, config)
                         .await
                         .unwrap(),
-                ));
-                drop(c);
+                )
             }
             InnerConsumer::Multi(c) => {
-                println!("replacing multiple consumers");
                 c.seek(consumer_ids, message_id, timestamp).await?;
                 let topics = c.topics();
 
                 //currently, pulsar only supports seek for non partitioned topics
-                let addrs  = try_join_all(
-                    topics
-                        .into_iter()
-                        .map(|topic| client.lookup_topic(topic)),
-                )
-                .await.unwrap();
-                let mut topic_addr_pair : Vec<(String, BrokerAddress)> = Vec::default(); 
+                let addrs =
+                    try_join_all(topics.into_iter().map(|topic| client.lookup_topic(topic)))
+                        .await
+                        .unwrap();
+                let mut topic_addr_pair: Vec<(String, BrokerAddress)> = Vec::default();
                 for i in 0..addrs.len() {
-                    topic_addr_pair.push((c.topics.get(i).unwrap().clone(), addrs.get(i).unwrap().clone())); 
-                }; 
+                    topic_addr_pair.push((
+                        c.topics.get(i).unwrap().clone(),
+                        addrs.get(i).unwrap().clone(),
+                    ));
+                }
                 let consumers = try_join_all(topic_addr_pair.into_iter().map(|(topic, addr)| {
                     TopicConsumer::new(client.clone(), topic, addr, c.config().clone())
                 }))
-                .await.unwrap();
+                .await
+                .unwrap();
 
                 let consumers: BTreeMap<_, _> = consumers
                     .into_iter()
@@ -172,24 +176,26 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
                 let topics = consumers.keys().map(|c| c.clone()).collect();
                 let topic_refresh = Duration::from_secs(30);
                 let refresh = Box::pin(client.executor.interval(topic_refresh).map(drop));
-                let consumer = InnerConsumer::Multi(MultiTopicConsumer {
-                    namespace: c.namespace.clone(),
-                    topic_regex: c.topic_regex.clone(),
+                let namespace = c.namespace.clone(); 
+                let config = c.config().clone(); 
+                let topic_regex = c.topic_regex.clone(); 
+                drop(c); 
+                InnerConsumer::Multi(MultiTopicConsumer {
+                    namespace, 
+                    topic_regex, 
                     pulsar: client,
                     consumers,
                     topics,
                     new_consumers: None,
                     refresh,
-                    config: c.config().clone(),
+                    config, 
                     disc_last_message_received: None,
                     disc_messages_received: 0,
-                });
-                inner_consumer = Some(consumer);
-                drop(c);
+                })
             }
         };
 
-        self.inner = inner_consumer.unwrap();
+        self.inner = inner_consumer;
         Ok(())
     }
 
