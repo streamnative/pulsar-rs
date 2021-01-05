@@ -1912,7 +1912,7 @@ mod tests {
             println!("created second consumer");
 
             // the message has already been acked, so we should not receive anything
-            let res: Result<_, tokio::time::Elapsed> =
+            let res: Result<_, tokio::time::error::Elapsed> =
                 tokio::time::timeout(Duration::from_secs(1), consumer.next()).await;
             let is_err = res.is_err();
             if let Ok(val) = res {
