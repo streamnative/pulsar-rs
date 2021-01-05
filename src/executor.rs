@@ -49,7 +49,7 @@ impl Executor for TokioExecutor {
     }
 
     fn delay(&self, duration: std::time::Duration) -> Delay {
-        Delay::Tokio(tokio::time::delay_for(duration))
+        Delay::Tokio(tokio::time::sleep(duration))
     }
 
     fn kind(&self) -> ExecutorKind {
@@ -170,9 +170,9 @@ impl Stream for Interval {
         unsafe {
             match Pin::get_unchecked_mut(self) {
                 #[cfg(feature = "tokio-runtime")]
-                Interval::Tokio(j) => match Pin::new_unchecked(j).poll_next(cx) {
+                Interval::Tokio(j) => match Pin::new_unchecked(j).poll_tick(cx) {
                     Poll::Pending => Poll::Pending,
-                    Poll::Ready(v) => Poll::Ready(v.map(|_| ())),
+                    Poll::Ready(_) => Poll::Ready(Some(())),
                 },
                 #[cfg(feature = "async-std-runtime")]
                 Interval::AsyncStd(j) => match Pin::new_unchecked(j).poll_next(cx) {
@@ -190,7 +190,7 @@ impl Stream for Interval {
 
 pub enum Delay {
     #[cfg(feature = "tokio-runtime")]
-    Tokio(tokio::time::Delay),
+    Tokio(tokio::time::Sleep),
     #[cfg(feature = "async-std-runtime")]
     AsyncStd(Pin<Box<dyn Future<Output = ()> + Send>>),
 }
