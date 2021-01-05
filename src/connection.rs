@@ -487,26 +487,23 @@ impl Connection {
         };
 
         let u = url.clone();
-        let address: SocketAddr = match executor
-            .spawn_blocking(move || {
-                u.socket_addrs(|| match u.scheme() {
-                    "pulsar" => Some(6650),
-                    "pulsar+ssl" => Some(6651),
-                    _ => None,
-                })
-                .map_err(|e| {
-                    error!("could not look up address: {:?}", e);
-                    e
-                })
-                .ok()
-                .and_then(|v| {
-                    let mut rng = thread_rng();
-                    let index: usize = rng.gen_range(0..v.len());
-                    v.get(index).copied()
-                })
+        let address: SocketAddr = match executor.spawn_blocking(move || {
+            u.socket_addrs(|| match u.scheme() {
+                "pulsar" => Some(6650),
+                "pulsar+ssl" => Some(6651),
+                _ => None,
             })
-            .await
-        {
+            .map_err(|e| {
+                error!("could not look up address: {:?}", e);
+                e
+            })
+            .ok()
+            .and_then(|v| {
+                let mut rng = thread_rng();
+                let index: usize = rng.gen_range(0..v.len());
+                v.get(index).copied()
+            })
+        }).await {
             Some(Some(address)) => address,
             _ =>
             //return Err(Error::Custom(format!("could not query address: {}", url))),

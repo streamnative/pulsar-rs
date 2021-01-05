@@ -1851,7 +1851,7 @@ mod tests {
 
         let message = TestData {
             topic: std::iter::repeat(())
-                .map(|()| rand::thread_rng().sample(Alphanumeric))
+                .map(|()| rand::thread_rng().sample(Alphanumeric) as char)
                 .take(8)
                 .map(|c| c as char)
                 .collect(),
