@@ -580,13 +580,13 @@ impl Connection {
                     let stream = connector
                         .connect(&hostname, stream)
                         .await
-                        .map(|stream| futures_codec::Framed::new(stream, Codec))?;
+                        .map(|stream| asynchronous_codec::Framed::new(stream, Codec))?;
 
                     Connection::connect(stream, auth_data, proxy_to_broker_url, executor).await
                 } else {
                     let stream = async_std::net::TcpStream::connect(&address)
                         .await
-                        .map(|stream| futures_codec::Framed::new(stream, Codec))?;
+                        .map(|stream| asynchronous_codec::Framed::new(stream, Codec))?;
 
                     Connection::connect(stream, auth_data, proxy_to_broker_url, executor).await
                 }
