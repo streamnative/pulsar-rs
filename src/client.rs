@@ -127,7 +127,16 @@ impl<'a> SerializeMessage for &'a str {
 pub struct Pulsar<Exe: Executor> {
     pub(crate) manager: Arc<ConnectionManager<Exe>>,
     service_discovery: Arc<ServiceDiscovery<Exe>>,
-    producer: mpsc::UnboundedSender<SendMessage>,
+    // this field is an Option to avoid a cyclic dependency between Pulsar
+    // and run_producer: the run_producer loop needs a client to create
+    // a multitopic producer, this producer stores internally a copy
+    // of the Pulsar struct. So even if we drop the main Pulsar instance,
+    // the run_producer loop still lives because it contains a copy of
+    // the sender it waits on.
+    // o,solve this, we create a client without this sender, use it in
+    // run_producer, then fill in the producer field afterwards in the
+    // main Pulsar instance
+    producer: Option<mpsc::UnboundedSender<SendMessage>>,
     pub(crate) executor: Arc<Exe>,
 }
 
@@ -146,13 +155,16 @@ impl<Exe: Executor> Pulsar<Exe> {
         let manager = Arc::new(manager);
         let service_discovery = Arc::new(ServiceDiscovery::with_manager(manager.clone()));
         let (producer, producer_rx) = mpsc::unbounded();
-        let client = Pulsar {
+
+        let mut client = Pulsar {
             manager,
             service_discovery,
-            producer,
+            producer: None,
             executor,
         };
+
         let _ = client.executor.spawn(Box::pin(run_producer(client.clone(), producer_rx)));
+        client.producer = Some(producer);
         Ok(client)
     }
 
@@ -271,7 +283,10 @@ impl<Exe: Executor> Pulsar<Exe> {
         topic: S,
     ) -> Result<SendFuture, Error> {
         let (resolver, future) = oneshot::channel();
-        self.producer.unbounded_send(SendMessage {
+        self.producer
+            .as_ref()
+            .expect("a client without the producer channel should only be used internally")
+            .unbounded_send(SendMessage {
             topic: topic.into(),
             message,
             resolver
