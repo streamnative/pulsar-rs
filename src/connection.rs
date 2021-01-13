@@ -1,4 +1,5 @@
 use native_tls::Certificate;
+use proto::MessageIdData;
 use rand::{thread_rng, Rng};
 use std::collections::BTreeMap;
 use std::fmt::Debug;
@@ -406,6 +407,20 @@ impl ConnectionSender {
         .await
     }
 
+    pub async fn seek(
+        &self,
+        consumer_id: u64,
+        message_id: Option<MessageIdData>,
+        timestamp: Option<u64>,
+    ) -> Result<proto::CommandSuccess, ConnectionError> {
+        let request_id = self.request_id.get();
+        let msg = messages::seek(consumer_id, request_id, message_id, timestamp);
+        self.send_message(msg, RequestKey::RequestId(request_id), |resp| {
+            resp.command.success
+        })
+        .await
+    }
+
     async fn send_message<R: Debug, F>(
         &self,
         msg: Message,
@@ -735,6 +750,7 @@ where
 
 pub(crate) mod messages {
     use chrono::Utc;
+    use proto::MessageIdData;
 
     use crate::connection::Authentication;
     use crate::consumer::ConsumerOptions;
@@ -1035,6 +1051,27 @@ pub(crate) mod messages {
                 close_consumer: Some(proto::CommandCloseConsumer {
                     consumer_id,
                     request_id,
+                }),
+                ..Default::default()
+            },
+            payload: None,
+        }
+    }
+
+    pub fn seek(
+        consumer_id: u64,
+        request_id: u64,
+        message_id: Option<MessageIdData>,
+        message_publish_time: Option<u64>,
+    ) -> Message {
+        Message {
+            command: proto::BaseCommand {
+                type_: CommandType::Seek as i32,
+                seek: Some(proto::CommandSeek {
+                    consumer_id,
+                    request_id,
+                    message_id,
+                    message_publish_time,
                 }),
                 ..Default::default()
             },

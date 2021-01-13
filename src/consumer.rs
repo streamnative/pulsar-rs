@@ -98,42 +98,110 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
     pub async fn check_connection(&self) -> Result<(), Error> {
         match &self.inner {
             InnerConsumer::Single(c) => c.check_connection().await,
-            InnerConsumer::Mulit(c) => c.check_connections().await,
+            InnerConsumer::Multi(c) => c.check_connections().await,
         }
     }
 
     pub async fn ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         match &mut self.inner {
             InnerConsumer::Single(c) => c.ack(msg).await,
-            InnerConsumer::Mulit(c) => c.ack(msg).await,
+            InnerConsumer::Multi(c) => c.ack(msg).await,
         }
     }
 
     pub async fn cumulative_ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         match &mut self.inner {
             InnerConsumer::Single(c) => c.cumulative_ack(msg).await,
-            InnerConsumer::Mulit(c) => c.cumulative_ack(msg).await,
+            InnerConsumer::Multi(c) => c.cumulative_ack(msg).await,
         }
     }
 
     pub async fn nack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         match &mut self.inner {
             InnerConsumer::Single(c) => c.nack(msg).await,
-            InnerConsumer::Mulit(c) => c.nack(msg).await,
+            InnerConsumer::Multi(c) => c.nack(msg).await,
         }
+    }
+
+    /// seek currently destroys the existing consumer and creates a new one
+    /// this is how java and cpp pulsar client implement this feature mainly because
+    /// there are many minor problems with flushing existing messages and receiving new ones
+    pub async fn seek(
+        &mut self,
+        consumer_ids: Option<Vec<String>>,
+        message_id: Option<MessageIdData>,
+        timestamp: Option<u64>,
+        client: Pulsar<Exe>,
+    ) -> Result<(), Error> {
+        let inner_consumer: InnerConsumer<T, Exe> = match &mut self.inner {
+            InnerConsumer::Single(c) => {
+                c.seek(message_id, timestamp).await?;
+                let topic = c.topic().to_string();
+                let addr = client.lookup_topic(&topic).await?;
+                let config = c.config().clone();
+                InnerConsumer::Single(TopicConsumer::new(client, topic, addr, config).await?)
+            }
+            InnerConsumer::Multi(c) => {
+                c.seek(consumer_ids, message_id, timestamp).await?;
+                let topics = c.topics();
+
+                //currently, pulsar only supports seek for non partitioned topics
+                let addrs =
+                    try_join_all(topics.into_iter().map(|topic| client.lookup_topic(topic)))
+                        .await?;
+
+                let topic_addr_pair: Vec<(String, BrokerAddress)> = c
+                    .topics
+                    .iter()
+                    .cloned()
+                    .zip(addrs.iter().cloned())
+                    .collect();
+
+                let consumers = try_join_all(topic_addr_pair.into_iter().map(|(topic, addr)| {
+                    TopicConsumer::new(client.clone(), topic, addr, c.config().clone())
+                }))
+                .await?;
+
+                let consumers: BTreeMap<_, _> = consumers
+                    .into_iter()
+                    .map(|c| (c.topic().to_owned(), Box::pin(c)))
+                    .collect();
+                let topics = consumers.keys().map(|c| c.clone()).collect();
+                let topic_refresh = Duration::from_secs(30);
+                let refresh = Box::pin(client.executor.interval(topic_refresh).map(drop));
+                let namespace = c.namespace.clone();
+                let config = c.config().clone();
+                let topic_regex = c.topic_regex.clone();
+                InnerConsumer::Multi(MultiTopicConsumer {
+                    namespace,
+                    topic_regex,
+                    pulsar: client,
+                    consumers,
+                    topics,
+                    new_consumers: None,
+                    refresh,
+                    config,
+                    disc_last_message_received: None,
+                    disc_messages_received: 0,
+                })
+            }
+        };
+
+        self.inner = inner_consumer;
+        Ok(())
     }
 
     pub fn topics(&self) -> Vec<String> {
         match &self.inner {
             InnerConsumer::Single(c) => vec![c.topic.clone()],
-            InnerConsumer::Mulit(c) => c.topics(),
+            InnerConsumer::Multi(c) => c.topics(),
         }
     }
 
     pub fn connections(&self) -> Vec<&Url> {
         match &self.inner {
             InnerConsumer::Single(c) => vec![c.connection.url()],
-            InnerConsumer::Mulit(c) => c
+            InnerConsumer::Multi(c) => c
                 .consumers
                 .values()
                 .map(|c| c.connection.url())
@@ -146,42 +214,42 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
     pub fn options(&self) -> &ConsumerOptions {
         match &self.inner {
             InnerConsumer::Single(c) => &c.config.options,
-            InnerConsumer::Mulit(c) => &c.config.options,
+            InnerConsumer::Multi(c) => &c.config.options,
         }
     }
 
     pub fn dead_letter_policy(&self) -> Option<&DeadLetterPolicy> {
         match &self.inner {
             InnerConsumer::Single(c) => c.dead_letter_policy.as_ref(),
-            InnerConsumer::Mulit(c) => c.config.dead_letter_policy.as_ref(),
+            InnerConsumer::Multi(c) => c.config.dead_letter_policy.as_ref(),
         }
     }
 
     pub fn subscription(&self) -> &str {
         match &self.inner {
             InnerConsumer::Single(c) => &c.config.subscription,
-            InnerConsumer::Mulit(c) => &c.config.subscription,
+            InnerConsumer::Multi(c) => &c.config.subscription,
         }
     }
 
     pub fn sub_type(&self) -> SubType {
         match &self.inner {
             InnerConsumer::Single(c) => c.config.sub_type,
-            InnerConsumer::Mulit(c) => c.config.sub_type,
+            InnerConsumer::Multi(c) => c.config.sub_type,
         }
     }
 
     pub fn batch_size(&self) -> Option<u32> {
         match &self.inner {
             InnerConsumer::Single(c) => c.config.batch_size,
-            InnerConsumer::Mulit(c) => c.config.batch_size,
+            InnerConsumer::Multi(c) => c.config.batch_size,
         }
     }
 
     pub fn consumer_name(&self) -> Option<&str> {
         match &self.inner {
             InnerConsumer::Single(c) => &c.config.consumer_name,
-            InnerConsumer::Mulit(c) => &c.config.consumer_name,
+            InnerConsumer::Multi(c) => &c.config.consumer_name,
         }
         .as_ref()
         .map(|s| s.as_str())
@@ -190,28 +258,28 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
     pub fn consumer_id(&self) -> Vec<u64> {
         match &self.inner {
             InnerConsumer::Single(c) => vec![c.consumer_id],
-            InnerConsumer::Mulit(c) => c.consumers.values().map(|c| c.consumer_id).collect(),
+            InnerConsumer::Multi(c) => c.consumers.values().map(|c| c.consumer_id).collect(),
         }
     }
 
     pub fn unacked_message_redelivery_delay(&self) -> Option<Duration> {
         match &self.inner {
             InnerConsumer::Single(c) => c.config.unacked_message_redelivery_delay,
-            InnerConsumer::Mulit(c) => c.config.unacked_message_redelivery_delay,
+            InnerConsumer::Multi(c) => c.config.unacked_message_redelivery_delay,
         }
     }
 
     pub fn last_message_received(&self) -> Option<DateTime<Utc>> {
         match &self.inner {
             InnerConsumer::Single(c) => c.last_message_received(),
-            InnerConsumer::Mulit(c) => c.last_message_received(),
+            InnerConsumer::Multi(c) => c.last_message_received(),
         }
     }
 
     pub fn messages_received(&self) -> u64 {
         match &self.inner {
             InnerConsumer::Single(c) => c.messages_received(),
-            InnerConsumer::Mulit(c) => c.messages_received(),
+            InnerConsumer::Multi(c) => c.messages_received(),
         }
     }
 }
@@ -223,14 +291,14 @@ impl<T: DeserializeMessage + 'static, Exe: Executor> Stream for Consumer<T, Exe>
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match &mut self.inner {
             InnerConsumer::Single(c) => Pin::new(c).poll_next(cx),
-            InnerConsumer::Mulit(c) => Pin::new(c).poll_next(cx),
+            InnerConsumer::Multi(c) => Pin::new(c).poll_next(cx),
         }
     }
 }
 
 enum InnerConsumer<T: DeserializeMessage, Exe: Executor> {
     Single(TopicConsumer<T>),
-    Mulit(MultiTopicConsumer<T, Exe>),
+    Multi(MultiTopicConsumer<T, Exe>),
 }
 
 pub(crate) struct TopicConsumer<T: DeserializeMessage> {
@@ -403,12 +471,29 @@ impl<T: DeserializeMessage> TopicConsumer<T> {
         Ok(())
     }
 
+    pub async fn seek(
+        &mut self,
+        message_id: Option<MessageIdData>,
+        timestamp: Option<u64>,
+    ) -> Result<(), ConsumerError> {
+        let consumer_id = self.consumer_id;
+        self.connection
+            .sender()
+            .seek(consumer_id, message_id, timestamp)
+            .await?;
+        Ok(())
+    }
+
     pub fn last_message_received(&self) -> Option<DateTime<Utc>> {
         self.last_message_received
     }
 
     pub fn messages_received(&self) -> u64 {
         self.messages_received
+    }
+
+    pub fn config(&self) -> &ConsumerConfig {
+        &self.config
     }
 
     fn create_message(&self, message_id: proto::MessageIdData, payload: Payload) -> Message<T> {
@@ -1251,14 +1336,14 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
                 let initial_consumers = consumer.new_consumers.take().unwrap().await?;
                 consumer.add_consumers(initial_consumers);
             }
-            InnerConsumer::Mulit(consumer)
+            InnerConsumer::Multi(consumer)
         };
         Ok(Consumer { inner: consumer })
     }
 }
 
 #[derive(Debug, Clone, Default)]
-struct ConsumerConfig {
+pub struct ConsumerConfig {
     subscription: String,
     sub_type: SubType,
     batch_size: Option<u32>,
@@ -1404,6 +1489,46 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
             Err(ConnectionError::Unexpected(format!("no consumer for topic {}", msg.topic)).into())
         }
     }
+
+    /// Assume that this seek method will call seek for the topics given in the consumer_ids
+    pub async fn seek(
+        &mut self,
+        consumer_ids: Option<Vec<String>>,
+        message_id: Option<MessageIdData>,
+        timestamp: Option<u64>,
+    ) -> Result<(), ConsumerError> {
+        // 0. null or empty vector
+        match consumer_ids {
+            Some(consumer_ids) => {
+                // 1, select consumers
+                let mut actions = Vec::default();
+                for (consumer_id, consumer) in self.consumers.iter_mut() {
+                    if consumer_ids.contains(consumer_id) {
+                        actions.push(consumer.seek(message_id.clone(), timestamp));
+                    }
+                }
+                // 2 join all the futures
+                let mut v = futures::future::join_all(actions).await;
+
+                for res in v.drain(..) {
+                    if res.is_err() {
+                        return res;
+                    }
+                }
+
+                Ok(())
+            }
+            None => Err(ConnectionError::Unexpected(format!(
+                "no consumer for consumer ids {:?}",
+                consumer_ids
+            ))
+            .into()),
+        }
+    }
+
+    pub fn config(&self) -> &ConsumerConfig {
+        &self.config
+    }
 }
 
 pub struct Message<T> {
@@ -1502,7 +1627,9 @@ impl<T: 'static + DeserializeMessage, Exe: Executor> Stream for MultiTopicConsum
 
 #[cfg(test)]
 mod tests {
-    use futures::StreamExt;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use futures::{StreamExt, TryStreamExt};
     use log::LevelFilter;
     use regex::Regex;
     #[cfg(feature = "tokio-runtime")]
@@ -1861,5 +1988,119 @@ mod tests {
             (0, consumed_2) => assert_eq!(consumed_2, msg_count),
             _ => panic!("Expected one consumer to consume all messages. Message count: {}, consumer_1: {} consumer_2: {}", msg_count, consumed_1, consumed_2),
         }
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "tokio-runtime")]
+    async fn seek_single_consumer() {
+        let _ = log::set_logger(&MULTI_LOGGER);
+        let _ = log::set_max_level(LevelFilter::Debug);
+        log::info!("starting seek test");
+        let addr = "pulsar://127.0.0.1:6650";
+        let topic = format!("seek_{}", rand::random::<u16>());
+        let client: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await.unwrap();
+
+        // send 100 messages and record the starting time
+        let msg_count = 100_u32;
+
+        let start_time: u64 = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+
+        std::thread::sleep(Duration::from_secs(2));
+
+        println!("this is the starting time: {}", start_time);
+
+        try_join_all((0..msg_count).map(|i| client.send(&topic, i.to_string())))
+            .await
+            .unwrap();
+        log::info!("sent all messages");
+
+        let mut consumer_1: Consumer<String, _> = client
+            .consumer()
+            .with_consumer_name("seek_single_test")
+            .with_subscription("seek_single_test")
+            .with_subscription_type(SubType::Shared)
+            .with_topic(&topic)
+            .build()
+            .await
+            .unwrap();
+
+        log::info!("built the consumer");
+
+        let mut consumed_1 = 0_u32;
+        while let Some(msg) = consumer_1.try_next().await.unwrap() {
+            consumer_1.ack(&msg).await.unwrap();
+            let publish_time = msg.metadata().publish_time;
+            let data = match msg.deserialize() {
+                Ok(data) => data,
+                Err(e) => {
+                    log::error!("could not deserialize message: {:?}", e);
+                    break;
+                }
+            };
+
+            consumed_1 += 1;
+            log::info!(
+                "first loop, got {} messages, content: {}, publish time: {}",
+                consumed_1,
+                data,
+                publish_time
+            );
+
+            //break after enough half of the messages were received
+            if consumed_1 >= msg_count / 2 {
+                log::info!("first loop, received {} messages, so break", consumed_1);
+                break;
+            }
+        }
+
+        // // call seek(timestamp), roll back the consumer to start_time
+        log::info!("calling seek method");
+        let _seek_result = consumer_1
+            .seek(None, None, Some(start_time), client)
+            .await
+            .unwrap();
+
+        // let mut consumer_2: Consumer<String, _> = client
+        // .consumer()
+        // .with_consumer_name("seek")
+        // .with_subscription("seek")
+        // .with_topic(&topic)
+        // .build()
+        // .await
+        // .unwrap();
+
+        // then read the messages again
+        let mut consumed_2 = 0_u32;
+        log::info!("reading messages again");
+        while let Some(msg) = consumer_1.try_next().await.unwrap() {
+            let publish_time = msg.metadata().publish_time;
+            consumer_1.ack(&msg).await.unwrap();
+            let data = match msg.deserialize() {
+                Ok(data) => data,
+                Err(e) => {
+                    log::error!("could not deserialize message: {:?}", e);
+                    break;
+                }
+            };
+            consumed_2 += 1;
+            log::info!(
+                "second loop, got {} messages, content: {},  publish time: {}",
+                consumed_2,
+                data,
+                publish_time,
+            );
+
+            if consumed_2 >= msg_count {
+                log::info!("received {} messagses, so break", consumed_2);
+                break;
+            }
+        }
+
+        //then check if all messages were received
+        assert_eq!(50, consumed_1);
+        assert_eq!(100, consumed_2);
     }
 }
