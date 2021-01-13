@@ -9,7 +9,9 @@ use crate::client::SerializeMessage;
 use crate::connection::{Connection, SerialId};
 use crate::error::{ConnectionError, ProducerError};
 use crate::executor::Executor;
-use crate::message::proto::{self, CommandSendReceipt, CompressionType, EncryptionKeys, Schema};
+use crate::message::proto::{
+    self, CommandSendReceipt, CompressionType, EncryptionKeys, Schema, ServerError,
+};
 use crate::message::BatchedMessage;
 use crate::{Error, Pulsar};
 use futures::task::{Context, Poll};
@@ -355,7 +357,7 @@ struct TopicProducer<Exe: Executor> {
 impl<Exe: Executor> TopicProducer<Exe> {
     pub(crate) async fn from_connection<S: Into<String>>(
         client: Pulsar<Exe>,
-        connection: Arc<Connection>,
+        mut connection: Arc<Connection>,
         topic: S,
         name: Option<String>,
         options: ProducerOptions,
@@ -363,11 +365,6 @@ impl<Exe: Executor> TopicProducer<Exe> {
         let topic = topic.into();
         let producer_id = rand::random();
         let sequence_ids = SerialId::new();
-
-        let _ = connection
-            .sender()
-            .lookup_topic(topic.clone(), false)
-            .await?;
 
         let topic = topic.clone();
         let batch_size = options.batch_size;
@@ -393,10 +390,64 @@ impl<Exe: Executor> TopicProducer<Exe> {
             } //Some() => unimplemented!(),
         };
 
-        let success = connection
-            .sender()
-            .create_producer(topic.clone(), producer_id, name, options.clone())
-            .await?;
+        let producer_name: ProducerName;
+        let mut max_retries = 20u8;
+        let mut retried = false;
+        let start = std::time::Instant::now();
+
+        loop {
+            match connection
+                .sender()
+                .create_producer(topic.clone(), producer_id, name.clone(), options.clone())
+                .await
+                .map_err(|e| {
+                    error!("TopicProducer::from_connection error[{}]: {:?}", line!(), e);
+                    e
+                }) {
+                Ok(success) => {
+                    producer_name = success.producer_name;
+
+                    if retried {
+                        let dur = (std::time::Instant::now() - start).as_secs();
+                        log::info!(
+                            "subscribe({}) success after {} retries over {} seconds",
+                            topic,
+                            20 - max_retries,
+                            dur
+                        );
+                    }
+                    break;
+                }
+                Err(ConnectionError::PulsarError(
+                    Some(proto::ServerError::ServiceNotReady),
+                    text,
+                )) => {
+                    if max_retries > 0 {
+                        error!("create_producer({}) answered ServiceNotReady, retrying request after 500ms (max_retries = {}): {}", topic, max_retries, text.unwrap_or_else(String::new));
+                        max_retries -= 1;
+                        retried = true;
+                        client
+                            .executor
+                            .delay(std::time::Duration::from_millis(500))
+                            .await;
+
+                        let addr = client.lookup_topic(&topic).await?;
+                        connection = client.manager.get_connection(&addr).await?;
+
+                        continue;
+                    } else {
+                        error!("create_producer({}) reached max retries", topic);
+
+                        return Err(ConnectionError::PulsarError(
+                            Some(proto::ServerError::ServiceNotReady),
+                            text,
+                        )
+                        .into());
+                    }
+                }
+                Err(e) => return Err(Error::Connection(e)),
+            }
+        }
 
         // drop_signal will be dropped when the TopicProducer is dropped, then
         // drop_receiver will return, and we can close the producer
@@ -411,7 +462,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
             client,
             connection,
             id: producer_id,
-            name: success.producer_name,
+            name: producer_name,
             topic,
             message_id: sequence_ids,
             batch: batch_size.map(Batch::new).map(Mutex::new),

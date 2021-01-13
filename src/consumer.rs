@@ -319,7 +319,7 @@ impl<T: DeserializeMessage> TopicConsumer<T> {
     async fn new<Exe: Executor>(
         client: Pulsar<Exe>,
         topic: String,
-        addr: BrokerAddress,
+        mut addr: BrokerAddress,
         config: ConsumerConfig,
     ) -> Result<TopicConsumer<T>, Error> {
         let ConsumerConfig {
@@ -332,28 +332,85 @@ impl<T: DeserializeMessage> TopicConsumer<T> {
             options,
             dead_letter_policy,
         } = config.clone();
-        let connection = client.manager.get_connection(&addr).await?;
         let consumer_id = consumer_id.unwrap_or_else(rand::random);
         let (resolver, messages) = mpsc::unbounded();
         let batch_size = batch_size.unwrap_or(1000);
 
-        connection
-            .sender()
-            .subscribe(
-                resolver,
-                topic.clone(),
-                subscription.clone(),
-                sub_type,
-                consumer_id,
-                consumer_name.clone(),
-                options.clone(),
-            )
-            .await
-            .map_err(Error::Connection)?;
+        let mut connection = client.manager.get_connection(&addr).await?;
+        let mut max_retries = 20u8;
+        let mut retried = false;
+        let start = std::time::Instant::now();
+        loop {
+            match connection
+                .sender()
+                .subscribe(
+                    resolver.clone(),
+                    topic.clone(),
+                    subscription.clone(),
+                    sub_type,
+                    consumer_id,
+                    consumer_name.clone(),
+                    options.clone(),
+                )
+                .await
+            {
+                Ok(_) => {
+                    if retried {
+                        let dur = (std::time::Instant::now() - start).as_secs();
+                        log::info!(
+                            "subscribe({}) success after {} retries over {} seconds",
+                            topic,
+                            20 - max_retries,
+                            dur
+                        );
+                    }
+                    break;
+                }
+                Err(ConnectionError::PulsarError(
+                    Some(proto::ServerError::ServiceNotReady),
+                    text,
+                )) => {
+                    if max_retries > 0 {
+                        error!("subscribe({}) answered ServiceNotReady, retrying request after 500ms (max_retries = {}): {}",
+                            topic, max_retries, text.unwrap_or_else(String::new));
+
+                        max_retries -= 1;
+                        retried = true;
+                        client.executor.delay(Duration::from_millis(500)).await;
+
+                        // we need to look up again the topic's address
+                        let prev = addr;
+                        addr = client.lookup_topic(&topic).await?;
+                        if prev != addr {
+                            info!(
+                                "topic {} moved: previous = {:?}, new = {:?}",
+                                topic, prev, addr
+                            );
+                        }
+
+                        connection = client.manager.get_connection(&addr).await?;
+                        continue;
+                    } else {
+                        error!("subscribe({}) reached max retries", topic);
+
+                        return Err(ConnectionError::PulsarError(
+                            Some(proto::ServerError::ServiceNotReady),
+                            text,
+                        )
+                        .into());
+                    }
+                }
+                Err(e) => return Err(Error::Connection(e)),
+            }
+        }
 
         connection
             .sender()
             .send_flow(consumer_id, batch_size)
+            .map_err(|e| {
+                error!("TopicConsumer::new error[{}]: {:?}", line!(), e);
+                e
+            })
             .map_err(|e| Error::Consumer(ConsumerError::Connection(e)))?;
 
         let (ack_tx, ack_rx) = unbounded();
@@ -781,12 +838,13 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                     "Consumer {} received message without payload",
                     self.debug_format()
                 );
-            },
+            }
             RawMessage {
-                command: BaseCommand {
-                    close_consumer: Some(CommandCloseConsumer { consumer_id, .. }),
-                    ..
-                },
+                command:
+                    BaseCommand {
+                        close_consumer: Some(CommandCloseConsumer { consumer_id, .. }),
+                        ..
+                    },
                 ..
             } => {
                 error!(

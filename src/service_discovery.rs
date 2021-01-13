@@ -37,6 +37,9 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
         let mut broker_address = self.manager.get_base_address();
 
         let mut max_retries = 20u8;
+        let mut retried = false;
+        let start = std::time::Instant::now();
+
         loop {
             let response = match conn
                 .sender()
@@ -64,11 +67,14 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
                 {
                     error!("lookup({}) answered ServiceNotReady, retrying request after 500ms (max_retries = {})", topic, max_retries);
                     max_retries -= 1;
+                    retried = true;
                     self.manager
                         .executor
                         .delay(Duration::from_millis(500))
                         .await;
                     continue;
+                } else if max_retries == 0 {
+                    error!("lookup({}) reached max retries", topic);
                 }
                 return Err(ServiceDiscoveryError::Query(
                     error,
@@ -76,6 +82,15 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
                 ));
             }
 
+            if retried {
+                let dur = (std::time::Instant::now() - start).as_secs();
+                log::info!(
+                    "lookup({}) success after {} retries over {} seconds",
+                    topic,
+                    20 - max_retries,
+                    dur
+                );
+            }
             let LookupResponse {
                 broker_url,
                 broker_url_tls,
@@ -137,6 +152,9 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
         let topic = topic.into();
 
         let mut max_retries = 20u8;
+        let mut retried = false;
+        let start = std::time::Instant::now();
+
         let response = loop {
             let response = match connection.sender().lookup_partitioned_topic(&topic).await {
                 Ok(res) => res,
@@ -158,11 +176,17 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
                 {
                     error!("lookup_partitioned_topic_number({}) answered ServiceNotReady, retrying request after 500ms (max_retries = {})", topic, max_retries);
                     max_retries -= 1;
+                    retried = true;
                     self.manager
                         .executor
                         .delay(Duration::from_millis(500))
                         .await;
                     continue;
+                } else if max_retries == 0 {
+                    error!(
+                        "lookup_partitioned_topic_number({}) reached max retries",
+                        topic
+                    );
                 }
                 return Err(ServiceDiscoveryError::Query(
                     error,
@@ -172,6 +196,16 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
 
             break response;
         };
+
+        if retried {
+            let dur = (std::time::Instant::now() - start).as_secs();
+            log::info!(
+                "lookup_partitioned_topic_number({}) success after {} retries over {} seconds",
+                topic,
+                20 - max_retries,
+                dur
+            );
+        }
 
         match response.partitions {
             Some(partitions) => Ok(partitions),
