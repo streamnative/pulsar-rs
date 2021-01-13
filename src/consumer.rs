@@ -25,7 +25,7 @@ use crate::message::{
     proto::{self, command_subscribe::SubType, MessageIdData, MessageMetadata, Schema},
     BatchedMessage, Message as RawMessage, Metadata, Payload,
 };
-use crate::proto::BaseCommand;
+use crate::proto::{BaseCommand, CommandCloseConsumer};
 use crate::{BrokerAddress, DeserializeMessage, Pulsar};
 use core::iter;
 use rand::distributions::Alphanumeric;
@@ -781,6 +781,21 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                     "Consumer {} received message without payload",
                     self.debug_format()
                 );
+            },
+            RawMessage {
+                command: BaseCommand {
+                    close_consumer: Some(CommandCloseConsumer { consumer_id, .. }),
+                    ..
+                },
+                ..
+            } => {
+                error!(
+                    "Broker notification of closed consumer {}: {}",
+                    consumer_id,
+                    self.debug_format()
+                );
+
+                self.reconnect().await?;
             }
             unexpected => {
                 let type_ = proto::base_command::Type::try_from(unexpected.command.type_)
