@@ -64,7 +64,10 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
                 {
                     error!("lookup({}) answered ServiceNotReady, retrying request after 500ms (max_retries = {})", topic, max_retries);
                     max_retries -= 1;
-                    self.manager.executor.delay(Duration::from_millis(500)).await;
+                    self.manager
+                        .executor
+                        .delay(Duration::from_millis(500))
+                        .await;
                     continue;
                 }
                 return Err(ServiceDiscoveryError::Query(
@@ -155,7 +158,10 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
                 {
                     error!("lookup_partitioned_topic_number({}) answered ServiceNotReady, retrying request after 500ms (max_retries = {})", topic, max_retries);
                     max_retries -= 1;
-                    self.manager.executor.delay(Duration::from_millis(500)).await;
+                    self.manager
+                        .executor
+                        .delay(Duration::from_millis(500))
+                        .await;
                     continue;
                 }
                 return Err(ServiceDiscoveryError::Query(
@@ -187,7 +193,9 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
         trace!("Partitions for topic {}: {}", &topic, &partitions);
         let topics = match partitions {
             0 => vec![topic],
-            _ => (0..partitions).map(|n| format!("{}-partition-{}", &topic, n)).collect(),
+            _ => (0..partitions)
+                .map(|n| format!("{}-partition-{}", &topic, n))
+                .collect(),
         };
         try_join_all(topics.into_iter().map(|topic| {
             self.lookup_topic(topic.clone())

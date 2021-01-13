@@ -1,7 +1,7 @@
 use std::string::FromUtf8Error;
 use std::sync::Arc;
 
-use futures::channel::{oneshot, mpsc};
+use futures::channel::{mpsc, oneshot};
 
 use crate::connection::Authentication;
 use crate::connection_manager::{BackOffOptions, BrokerAddress, ConnectionManager, TlsOptions};
@@ -151,7 +151,9 @@ impl<Exe: Executor> Pulsar<Exe> {
     ) -> Result<Self, Error> {
         let url: String = url.into();
         let executor = Arc::new(executor);
-        let manager = ConnectionManager::new(url, auth, backoff_parameters, tls_options, executor.clone()).await?;
+        let manager =
+            ConnectionManager::new(url, auth, backoff_parameters, tls_options, executor.clone())
+                .await?;
         let manager = Arc::new(manager);
         let service_discovery = Arc::new(ServiceDiscovery::with_manager(manager.clone()));
         let (producer, producer_rx) = mpsc::unbounded();
@@ -163,7 +165,9 @@ impl<Exe: Executor> Pulsar<Exe> {
             executor,
         };
 
-        let _ = client.executor.spawn(Box::pin(run_producer(client.clone(), producer_rx)));
+        let _ = client
+            .executor
+            .spawn(Box::pin(run_producer(client.clone(), producer_rx)));
         client.producer = Some(producer);
         Ok(client)
     }
@@ -287,10 +291,11 @@ impl<Exe: Executor> Pulsar<Exe> {
             .as_ref()
             .expect("a client without the producer channel should only be used internally")
             .unbounded_send(SendMessage {
-            topic: topic.into(),
-            message,
-            resolver
-        }).map_err(|_| Error::Custom("producer unexpectedly disconnected".into()))?;
+                topic: topic.into(),
+                message,
+                resolver,
+            })
+            .map_err(|_| Error::Custom("producer unexpectedly disconnected".into()))?;
         Ok(SendFuture(future))
     }
 }
@@ -373,9 +378,17 @@ struct SendMessage {
     resolver: oneshot::Sender<Result<CommandSendReceipt, Error>>,
 }
 
-async fn run_producer<Exe: Executor>(client: Pulsar<Exe>, mut messages: mpsc::UnboundedReceiver<SendMessage>) {
+async fn run_producer<Exe: Executor>(
+    client: Pulsar<Exe>,
+    mut messages: mpsc::UnboundedReceiver<SendMessage>,
+) {
     let mut producer = client.producer().build_multi_topic();
-    while let Some(SendMessage { topic, message: payload, resolver }) = messages.next().await {
+    while let Some(SendMessage {
+        topic,
+        message: payload,
+        resolver,
+    }) = messages.next().await
+    {
         match producer.send(topic, payload).await {
             Ok(future) => {
                 let _ = client.executor.spawn(Box::pin(async move {
@@ -386,6 +399,5 @@ async fn run_producer<Exe: Executor>(client: Pulsar<Exe>, mut messages: mpsc::Un
                 let _ = resolver.send(Err(e));
             }
         }
-
     }
 }

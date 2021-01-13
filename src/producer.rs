@@ -167,9 +167,7 @@ impl<Exe: Executor> MultiTopicProducer<Exe> {
             if let Some(name) = &self.name {
                 builder = builder.with_name(name.clone());
             }
-            let producer = builder
-                .build()
-                .await?;
+            let producer = builder.build().await?;
             self.producers.insert(topic.clone(), producer);
         }
 
@@ -223,11 +221,7 @@ impl<Exe: Executor> Producer<Exe> {
         match &self.inner {
             ProducerInner::Single(_) => None,
             ProducerInner::Partitioned(p) => {
-                Some(
-                    p.producers.iter()
-                        .map(|p| p.topic().to_owned())
-                        .collect()
-                )
+                Some(p.producers.iter().map(|p| p.topic().to_owned()).collect())
             }
         }
     }
@@ -771,7 +765,7 @@ impl<Exe: Executor> ProducerBuilder<Exe> {
                     }
                 }),
         )
-            .await?;
+        .await?;
 
         let producer = if producers.len() == 1 {
             ProducerInner::Single(producers.into_iter().next().unwrap())

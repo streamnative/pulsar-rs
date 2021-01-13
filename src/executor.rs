@@ -146,7 +146,6 @@ impl<T> Future for JoinHandle<T> {
                 #[cfg(all(not(feature = "tokio-runtime"), not(feature = "async-std-runtime")))]
                 JoinHandle::PlaceHolder(t) => {
                     unimplemented!("please activate one of the following cargo features: tokio-runtime, async-std-runtime")
-
                 }
             }
         }
@@ -184,7 +183,6 @@ impl Stream for Interval {
                 #[cfg(all(not(feature = "tokio-runtime"), not(feature = "async-std-runtime")))]
                 Interval::PlaceHolder => {
                     unimplemented!("please activate one of the following cargo features: tokio-runtime, async-std-runtime")
-
                 }
             }
         }

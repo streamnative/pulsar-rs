@@ -189,7 +189,7 @@ pub enum ProducerError {
     Io(io::Error),
     PartialSend(Vec<Result<SendFuture, Error>>),
     /// Indiciates the error was part of sending a batch, and thus shared across the batch
-    Batch(Arc<Error>)
+    Batch(Arc<Error>),
 }
 
 impl From<ConnectionError> for ProducerError {
@@ -214,12 +214,17 @@ impl fmt::Display for ProducerError {
             ProducerError::PartialSend(e) => {
                 let (successes, failures) = e.iter().fold((0, 0), |(s, f), r| match r {
                     Ok(_) => (s + 1, f),
-                    Err(_) => (s, f + 1)
+                    Err(_) => (s, f + 1),
                 });
-                write!(f, "Partial send error - {} successful, {} failed", successes, failures)?;
+                write!(
+                    f,
+                    "Partial send error - {} successful, {} failed",
+                    successes, failures
+                )?;
 
                 if failures > 0 {
-                    let first_error = e.iter()
+                    let first_error = e
+                        .iter()
                         .find(|r| r.is_err())
                         .unwrap()
                         .as_ref()
@@ -263,14 +268,11 @@ impl std::error::Error for ProducerError {
             ProducerError::Connection(e) => Some(e),
             ProducerError::Io(e) => Some(e),
             ProducerError::Batch(e) => Some(e.as_ref()),
-            ProducerError::PartialSend(parts) => {
-                parts.iter()
-                    .find(|r| r.is_err())
-                    .map(|r| r.as_ref().map(drop).unwrap_err() as _)
-            },
+            ProducerError::PartialSend(parts) => parts
+                .iter()
+                .find(|r| r.is_err())
+                .map(|r| r.as_ref().map(drop).unwrap_err() as _),
             ProducerError::Custom(_) => None,
-
-
         }
     }
 }

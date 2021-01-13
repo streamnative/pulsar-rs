@@ -5,8 +5,8 @@ use bytes::{Buf, BufMut, BytesMut};
 use crc::crc32;
 use nom::number::streaming::{be_u16, be_u32};
 use prost::{self, Message as ImplProtobuf};
-use std::io::Cursor;
 use std::convert::TryFrom;
+use std::io::Cursor;
 
 pub use self::proto::BaseCommand;
 pub use self::proto::MessageMetadata as Metadata;
@@ -22,60 +22,171 @@ pub struct Message {
 impl Message {
     pub fn request_key(&self) -> Option<RequestKey> {
         match &self.command {
-            BaseCommand { subscribe: Some(CommandSubscribe { request_id, .. }), .. } |
-            BaseCommand { partition_metadata: Some(CommandPartitionedTopicMetadata { request_id, .. }), .. } |
-            BaseCommand { partition_metadata_response: Some(CommandPartitionedTopicMetadataResponse { request_id, .. }), .. } |
-            BaseCommand { lookup_topic: Some(CommandLookupTopic { request_id, .. }), .. } |
-            BaseCommand { lookup_topic_response: Some(CommandLookupTopicResponse { request_id, .. }), .. } |
-            BaseCommand { producer: Some(CommandProducer { request_id, .. }), .. } |
-            BaseCommand { producer_success: Some(CommandProducerSuccess { request_id, .. }), .. } |
-            BaseCommand { unsubscribe: Some(CommandUnsubscribe { request_id, .. }), .. } |
-            BaseCommand { seek: Some(CommandSeek { request_id, .. }), .. } |
-            BaseCommand { close_producer: Some(CommandCloseProducer { request_id, .. }), .. } |
-            BaseCommand { close_consumer: Some(CommandCloseConsumer { request_id, .. }), .. } |
-            BaseCommand { success: Some(CommandSuccess { request_id, .. }), .. } |
-            BaseCommand { error: Some(CommandError { request_id, .. }), .. } |
-            BaseCommand { consumer_stats: Some(CommandConsumerStats { request_id, .. }), .. } |
-            BaseCommand { consumer_stats_response: Some(CommandConsumerStatsResponse { request_id, .. }), .. } |
-            BaseCommand { get_last_message_id: Some(CommandGetLastMessageId { request_id, .. }), .. } |
-            BaseCommand { get_last_message_id_response: Some(CommandGetLastMessageIdResponse { request_id, .. }), .. } |
-            BaseCommand { get_topics_of_namespace: Some(CommandGetTopicsOfNamespace { request_id, .. }), .. } |
-            BaseCommand { get_topics_of_namespace_response: Some(CommandGetTopicsOfNamespaceResponse { request_id, .. }), .. } |
-            BaseCommand { get_schema: Some(CommandGetSchema { request_id, .. }), .. } |
-            BaseCommand { get_schema_response: Some(CommandGetSchemaResponse { request_id, .. }), .. } => {
-                Some(RequestKey::RequestId(*request_id))
+            BaseCommand {
+                subscribe: Some(CommandSubscribe { request_id, .. }),
+                ..
             }
-            BaseCommand { send: Some(CommandSend { producer_id, sequence_id, .. }), .. } |
-            BaseCommand { send_error: Some(CommandSendError { producer_id, sequence_id, .. }), .. } |
-            BaseCommand { send_receipt: Some(CommandSendReceipt { producer_id, sequence_id, .. }), .. } => {
-                Some(RequestKey::ProducerSend {
-                    producer_id: *producer_id,
-                    sequence_id: *sequence_id,
-                })
+            | BaseCommand {
+                partition_metadata: Some(CommandPartitionedTopicMetadata { request_id, .. }),
+                ..
             }
-            BaseCommand { active_consumer_change: Some(CommandActiveConsumerChange { consumer_id, .. }), .. } |
-            BaseCommand { message: Some(CommandMessage { consumer_id, .. }), .. } |
-            BaseCommand { flow: Some(CommandFlow { consumer_id, .. }), .. } |
-            BaseCommand { redeliver_unacknowledged_messages: Some(CommandRedeliverUnacknowledgedMessages { consumer_id, .. }), .. } |
-            BaseCommand { reached_end_of_topic: Some(CommandReachedEndOfTopic { consumer_id }), .. } |
-            BaseCommand { ack: Some(CommandAck { consumer_id, .. }), .. } => {
-                Some(RequestKey::Consumer {
-                    consumer_id: *consumer_id,
-                })
+            | BaseCommand {
+                partition_metadata_response:
+                    Some(CommandPartitionedTopicMetadataResponse { request_id, .. }),
+                ..
             }
-            BaseCommand { connect: Some(_), .. } |
-            BaseCommand { connected: Some(_), .. } |
-            BaseCommand { ping: Some(_), .. } |
-            BaseCommand { pong: Some(_), .. } => {
-                None
-            },
+            | BaseCommand {
+                lookup_topic: Some(CommandLookupTopic { request_id, .. }),
+                ..
+            }
+            | BaseCommand {
+                lookup_topic_response: Some(CommandLookupTopicResponse { request_id, .. }),
+                ..
+            }
+            | BaseCommand {
+                producer: Some(CommandProducer { request_id, .. }),
+                ..
+            }
+            | BaseCommand {
+                producer_success: Some(CommandProducerSuccess { request_id, .. }),
+                ..
+            }
+            | BaseCommand {
+                unsubscribe: Some(CommandUnsubscribe { request_id, .. }),
+                ..
+            }
+            | BaseCommand {
+                seek: Some(CommandSeek { request_id, .. }),
+                ..
+            }
+            | BaseCommand {
+                close_producer: Some(CommandCloseProducer { request_id, .. }),
+                ..
+            }
+            | BaseCommand {
+                close_consumer: Some(CommandCloseConsumer { request_id, .. }),
+                ..
+            }
+            | BaseCommand {
+                success: Some(CommandSuccess { request_id, .. }),
+                ..
+            }
+            | BaseCommand {
+                error: Some(CommandError { request_id, .. }),
+                ..
+            }
+            | BaseCommand {
+                consumer_stats: Some(CommandConsumerStats { request_id, .. }),
+                ..
+            }
+            | BaseCommand {
+                consumer_stats_response: Some(CommandConsumerStatsResponse { request_id, .. }),
+                ..
+            }
+            | BaseCommand {
+                get_last_message_id: Some(CommandGetLastMessageId { request_id, .. }),
+                ..
+            }
+            | BaseCommand {
+                get_last_message_id_response:
+                    Some(CommandGetLastMessageIdResponse { request_id, .. }),
+                ..
+            }
+            | BaseCommand {
+                get_topics_of_namespace: Some(CommandGetTopicsOfNamespace { request_id, .. }),
+                ..
+            }
+            | BaseCommand {
+                get_topics_of_namespace_response:
+                    Some(CommandGetTopicsOfNamespaceResponse { request_id, .. }),
+                ..
+            }
+            | BaseCommand {
+                get_schema: Some(CommandGetSchema { request_id, .. }),
+                ..
+            }
+            | BaseCommand {
+                get_schema_response: Some(CommandGetSchemaResponse { request_id, .. }),
+                ..
+            } => Some(RequestKey::RequestId(*request_id)),
+            BaseCommand {
+                send:
+                    Some(CommandSend {
+                        producer_id,
+                        sequence_id,
+                        ..
+                    }),
+                ..
+            }
+            | BaseCommand {
+                send_error:
+                    Some(CommandSendError {
+                        producer_id,
+                        sequence_id,
+                        ..
+                    }),
+                ..
+            }
+            | BaseCommand {
+                send_receipt:
+                    Some(CommandSendReceipt {
+                        producer_id,
+                        sequence_id,
+                        ..
+                    }),
+                ..
+            } => Some(RequestKey::ProducerSend {
+                producer_id: *producer_id,
+                sequence_id: *sequence_id,
+            }),
+            BaseCommand {
+                active_consumer_change: Some(CommandActiveConsumerChange { consumer_id, .. }),
+                ..
+            }
+            | BaseCommand {
+                message: Some(CommandMessage { consumer_id, .. }),
+                ..
+            }
+            | BaseCommand {
+                flow: Some(CommandFlow { consumer_id, .. }),
+                ..
+            }
+            | BaseCommand {
+                redeliver_unacknowledged_messages:
+                    Some(CommandRedeliverUnacknowledgedMessages { consumer_id, .. }),
+                ..
+            }
+            | BaseCommand {
+                reached_end_of_topic: Some(CommandReachedEndOfTopic { consumer_id }),
+                ..
+            }
+            | BaseCommand {
+                ack: Some(CommandAck { consumer_id, .. }),
+                ..
+            } => Some(RequestKey::Consumer {
+                consumer_id: *consumer_id,
+            }),
+            BaseCommand {
+                connect: Some(_), ..
+            }
+            | BaseCommand {
+                connected: Some(_), ..
+            }
+            | BaseCommand { ping: Some(_), .. }
+            | BaseCommand { pong: Some(_), .. } => None,
             _ => {
                 match base_command::Type::try_from(self.command.type_) {
                     Ok(type_) => {
-                        warn!("Unexpected payload for command of type {:?}. This is likely a bug!", type_);
+                        warn!(
+                            "Unexpected payload for command of type {:?}. This is likely a bug!",
+                            type_
+                        );
                     }
                     Err(()) => {
-                        warn!("Received BaseCommand of unexpected type: {}", self.command.type_);
+                        warn!(
+                            "Received BaseCommand of unexpected type: {}",
+                            self.command.type_
+                        );
                     }
                 }
                 None
@@ -1238,7 +1349,7 @@ impl TryFrom<i32> for proto::base_command::Type {
             33 => Ok(proto::base_command::Type::GetTopicsOfNamespaceResponse),
             34 => Ok(proto::base_command::Type::GetSchema),
             35 => Ok(proto::base_command::Type::GetSchemaResponse),
-            _ => Err(())
+            _ => Err(()),
         }
     }
 }
@@ -1259,8 +1370,8 @@ impl From<prost::DecodeError> for ConnectionError {
 mod tests {
     use crate::message::Codec;
     use bytes::BytesMut;
-    use tokio_util::codec::{Decoder, Encoder};
     use std::convert::TryFrom;
+    use tokio_util::codec::{Decoder, Encoder};
 
     #[test]
     fn parse_simple_command() {

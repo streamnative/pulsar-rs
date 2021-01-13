@@ -20,7 +20,10 @@ use url::Url;
 use crate::consumer::ConsumerOptions;
 use crate::error::{ConnectionError, SharedError};
 use crate::executor::{Executor, ExecutorKind};
-use crate::message::{proto::{self, command_subscribe::SubType}, Codec, Message, BaseCommand};
+use crate::message::{
+    proto::{self, command_subscribe::SubType},
+    BaseCommand, Codec, Message,
+};
 use crate::producer::{self, ProducerOptions};
 
 pub(crate) enum Register {
@@ -41,7 +44,7 @@ pub(crate) enum Register {
 pub enum RequestKey {
     RequestId(u64),
     ProducerSend { producer_id: u64, sequence_id: u64 },
-    Consumer { consumer_id: u64 }
+    Consumer { consumer_id: u64 },
 }
 
 /// Authentication parameters
@@ -129,17 +132,23 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> 
         loop {
             match self.inbound.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(msg))) => match msg {
-                    Message { command: BaseCommand { ping: Some(_), .. }, .. } => {
+                    Message {
+                        command: BaseCommand { ping: Some(_), .. },
+                        ..
+                    } => {
                         let _ = self.outbound.unbounded_send(messages::pong());
                     }
-                    Message { command: BaseCommand { pong: Some(_), .. }, .. } => {
+                    Message {
+                        command: BaseCommand { pong: Some(_), .. },
+                        ..
+                    } => {
                         if let Some(sender) = self.ping.take() {
                             let _ = sender.send(());
                         }
                     }
                     msg => match msg.request_key() {
-                        Some(key @ RequestKey::RequestId(_)) |
-                        Some(key @ RequestKey::ProducerSend { .. }) => {
+                        Some(key @ RequestKey::RequestId(_))
+                        | Some(key @ RequestKey::ProducerSend { .. }) => {
                             if let Some(resolver) = self.pending_requests.remove(&key) {
                                 // We don't care if the receiver has dropped their future
                                 let _ = resolver.send(msg);
@@ -154,10 +163,13 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> 
                                 .map(move |consumer| consumer.unbounded_send(msg));
                         }
                         None => {
-                            warn!("Received unexpected message; dropping. Message {:?}", msg.command)
+                            warn!(
+                                "Received unexpected message; dropping. Message {:?}",
+                                msg.command
+                            )
                         }
-                    }
-                }
+                    },
+                },
                 Poll::Ready(None) => {
                     self.error.set(ConnectionError::Disconnected);
                     return Poll::Ready(Err(()));
@@ -462,24 +474,25 @@ impl Connection {
         };
 
         let u = url.clone();
-        let address: SocketAddr = match executor.spawn_blocking(move || {
-            u.socket_addrs(|| match u.scheme() {
-                "pulsar" => Some(6650),
-                "pulsar+ssl" => Some(6651),
-                _ => None,
+        let address: SocketAddr = match executor
+            .spawn_blocking(move || {
+                u.socket_addrs(|| match u.scheme() {
+                    "pulsar" => Some(6650),
+                    "pulsar+ssl" => Some(6651),
+                    _ => None,
+                })
+                .map_err(|e| {
+                    error!("could not look up address: {:?}", e);
+                    e
+                })
+                .ok()
+                .and_then(|v| {
+                    let mut rng = thread_rng();
+                    let index: usize = rng.gen_range(0, v.len());
+                    v.get(index).copied()
+                })
             })
-            .map_err(|e| {
-                error!("could not look up address: {:?}", e);
-                e
-            })
-            .ok()
-            .and_then(|v| {
-                let mut rng = thread_rng();
-                let index: usize = rng.gen_range(0, v.len());
-                v.get(index).copied()
-            })
-        })
-        .await
+            .await
         {
             Some(Some(address)) => address,
             _ =>
@@ -626,32 +639,34 @@ impl Connection {
         let error = SharedError::new();
         let (receiver_shutdown_tx, receiver_shutdown_rx) = oneshot::channel();
 
-        if executor.spawn(Box::pin(
-            Receiver::new(
-                stream,
-                tx.clone(),
-                error.clone(),
-                registrations_rx,
-                receiver_shutdown_rx,
-            )
-            .map(|_| ()),
-        ))
-        .is_err()
+        if executor
+            .spawn(Box::pin(
+                Receiver::new(
+                    stream,
+                    tx.clone(),
+                    error.clone(),
+                    registrations_rx,
+                    receiver_shutdown_rx,
+                )
+                .map(|_| ()),
+            ))
+            .is_err()
         {
             error!("the executor could not spawn the Receiver future");
             return Err(ConnectionError::Shutdown);
         }
 
         let err = error.clone();
-        if executor.spawn(Box::pin(async move {
-            while let Some(msg) = rx.next().await {
-                if let Err(e) = sink.send(msg).await {
-                    err.set(e);
-                    break;
+        if executor
+            .spawn(Box::pin(async move {
+                while let Some(msg) = rx.next().await {
+                    if let Err(e) = sink.send(msg).await {
+                        err.set(e);
+                        break;
+                    }
                 }
-            }
-        }))
-        .is_err()
+            }))
+            .is_err()
         {
             error!("the executor could not spawn the Receiver future");
             return Err(ConnectionError::Shutdown);
