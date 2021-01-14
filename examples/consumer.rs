@@ -1,7 +1,10 @@
 #[macro_use]
 extern crate serde;
 use futures::TryStreamExt;
-use pulsar::{Consumer, DeserializeMessage, Payload, Pulsar, SubType, TokioExecutor};
+use pulsar::{
+    Authentication, Consumer, DeserializeMessage, Payload, Pulsar, SubType, TokioExecutor,
+};
+use std::env;
 
 #[derive(Serialize, Deserialize)]
 struct TestData {
@@ -20,12 +23,29 @@ impl DeserializeMessage for TestData {
 async fn main() -> Result<(), pulsar::Error> {
     env_logger::init();
 
-    let addr = "pulsar://127.0.0.1:6650";
-    let pulsar: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await?;
+    let addr = env::var("PULSAR_ADDRESS")
+        .ok()
+        .unwrap_or_else(|| "pulsar://127.0.0.1:6650".to_string());
+    let topic = env::var("PULSAR_TOPIC")
+        .ok()
+        .unwrap_or_else(|| "non-persistent://public/default/test".to_string());
+
+    let mut builder = Pulsar::builder(addr, TokioExecutor);
+
+    if let Ok(token) = env::var("PULSAR_TOKEN") {
+        let authentication = Authentication {
+            name: "token".to_string(),
+            data: token.into_bytes(),
+        };
+
+        builder = builder.with_auth(authentication);
+    }
+
+    let pulsar: Pulsar<_> = builder.build().await?;
 
     let mut consumer: Consumer<TestData, _> = pulsar
         .consumer()
-        .with_topic("non-persistent://public/default/test")
+        .with_topic(topic)
         .with_consumer_name("test_consumer")
         .with_subscription_type(SubType::Exclusive)
         .with_subscription("test_subscription")

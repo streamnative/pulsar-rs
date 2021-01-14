@@ -1,8 +1,10 @@
 #[macro_use]
 extern crate serde;
 use pulsar::{
-    message::proto, producer, Error as PulsarError, Pulsar, SerializeMessage, TokioExecutor,
+    message::proto, producer, Authentication, Error as PulsarError, Pulsar, SerializeMessage,
+    TokioExecutor,
 };
+use std::env;
 
 #[derive(Serialize, Deserialize)]
 struct TestData {
@@ -23,11 +25,28 @@ impl SerializeMessage for TestData {
 async fn main() -> Result<(), pulsar::Error> {
     env_logger::init();
 
-    let addr = "pulsar://127.0.0.1:6650";
-    let pulsar: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await?;
+    let addr = env::var("PULSAR_ADDRESS")
+        .ok()
+        .unwrap_or_else(|| "pulsar://127.0.0.1:6650".to_string());
+    let topic = env::var("PULSAR_TOPIC")
+        .ok()
+        .unwrap_or_else(|| "non-persistent://public/default/test".to_string());
+
+    let mut builder = Pulsar::builder(addr, TokioExecutor);
+
+    if let Ok(token) = env::var("PULSAR_TOKEN") {
+        let authentication = Authentication {
+            name: "token".to_string(),
+            data: token.into_bytes(),
+        };
+
+        builder = builder.with_auth(authentication);
+    }
+
+    let pulsar: Pulsar<_> = builder.build().await?;
     let mut producer = pulsar
         .producer()
-        .with_topic("non-persistent://public/default/test")
+        .with_topic(topic)
         .with_name("my producer")
         .with_options(producer::ProducerOptions {
             schema: Some(proto::Schema {
