@@ -10,7 +10,7 @@ use crate::connection::{Connection, SerialId};
 use crate::error::{ConnectionError, ProducerError};
 use crate::executor::Executor;
 use crate::message::proto::{
-    self, CommandSendReceipt, CompressionType, EncryptionKeys, Schema, ServerError,
+    self, CommandSendReceipt, CompressionType, EncryptionKeys, Schema,
 };
 use crate::message::BatchedMessage;
 use crate::{Error, Pulsar};
