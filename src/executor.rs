@@ -8,6 +8,7 @@ pub enum ExecutorKind {
 
 /// Wrapper trait abstracting the Tokio and async-std executors
 pub trait Executor: Clone + Send + Sync + 'static {
+    #[allow(clippy::clippy::result_unit_err)]
     fn spawn(&self, f: Pin<Box<dyn Future<Output = ()> + Send>>) -> Result<(), ()>;
     fn spawn_blocking<F, Res>(&self, f: F) -> JoinHandle<Res>
     where

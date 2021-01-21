@@ -250,7 +250,7 @@ impl ConnectionSender {
         let (resolver, response) = oneshot::channel();
         trace!("sending ping");
 
-        let res = match (
+        match (
             self.registrations
                 .unbounded_send(Register::Ping { resolver }),
             self.tx.unbounded_send(messages::ping()),
@@ -260,8 +260,7 @@ impl ConnectionSender {
                 .map_err(|oneshot::Canceled| ConnectionError::Disconnected)
                 .map(move |_| trace!("received pong")),
             _ => Err(ConnectionError::Disconnected),
-        };
-        res
+        }
     }
 
     pub async fn lookup_topic<S: Into<String>>(
@@ -447,15 +446,14 @@ impl ConnectionSender {
                 })?
         };
 
-        let res = match (
+        match (
             self.registrations
                 .unbounded_send(Register::Request { key, resolver }),
             self.tx.unbounded_send(msg),
         ) {
             (Ok(_), Ok(_)) => response.await,
             _ => Err(ConnectionError::Disconnected),
-        };
-        res
+        }
     }
 }
 
@@ -672,17 +670,15 @@ impl Connection {
         }
 
         let err = error.clone();
-        if executor
-            .spawn(Box::pin(async move {
-                while let Some(msg) = rx.next().await {
-                    if let Err(e) = sink.send(msg).await {
-                        err.set(e);
-                        break;
-                    }
+        let res = executor.spawn(Box::pin(async move {
+            while let Some(msg) = rx.next().await {
+                if let Err(e) = sink.send(msg).await {
+                    err.set(e);
+                    break;
                 }
-            }))
-            .is_err()
-        {
+            }
+        }));
+        if res.is_err() {
             error!("the executor could not spawn the Receiver future");
             return Err(ConnectionError::Shutdown);
         }
