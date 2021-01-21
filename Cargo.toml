@@ -22,10 +22,10 @@ travis-ci = {repository = "wyyerd/pulsar-rs"}
 bytes = "0.5.0"
 crc = "1.0.0"
 futures = "0.3"
-nom = "5.0.0"
-prost = "0.6.0"
-prost-derive = "0.6.0"
-rand = "0.7"
+nom = "6.0.0"
+prost = "0.7.0"
+prost-derive = "0.7.0"
+rand = "0.8"
 chrono = "0.4.6"
 futures-timer = "3.0"
 log = "0.4.6"
@@ -38,21 +38,21 @@ pem = "0.8"
 tokio = { version = "0.2", features = ["rt-threaded", "blocking", "full"], optional = true }
 tokio-util = { version = "0.3", features = ["codec"], optional = true }
 tokio-native-tls = { version = "0.1", optional = true }
-async-std = {version = "1.5", features = [ "attributes", "unstable" ], optional = true }
+async-std = {version = "1.9", features = [ "attributes", "unstable" ], optional = true }
 futures_codec = { version = "0.4", optional = true }
 async-native-tls = { version = "0.3", optional = true }
 lz4 = { version = "1.23", optional = true }
 flate2 = { version = "1.0", optional = true }
-zstd = { version = "0.5", optional = true }
+zstd = { version = "0.6", optional = true }
 snap = { version = "1.0", optional = true }
 
 [dev-dependencies]
-serde = { version = "1.0.101", features = ["derive"] }
-serde_json = "1.0.40"
-env_logger = "0.7"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+env_logger = "0.8"
 
 [build-dependencies]
-prost-build = "0.6.0"
+prost-build = "0.7.0"
 
 [features]
 default = [ "compression", "tokio-runtime", "async-std-runtime" ]

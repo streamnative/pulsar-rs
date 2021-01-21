@@ -1351,6 +1351,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
         let subscription = subscription.unwrap_or_else(|| {
             let s: String = (0..8)
                 .map(|_| rand::thread_rng().sample(Alphanumeric))
+                .map(|c| c as char)
                 .collect();
             let subscription = format!("sub_{}", s);
             warn!(
@@ -1858,6 +1859,7 @@ mod tests {
             topic: std::iter::repeat(())
                 .map(|()| rand::thread_rng().sample(Alphanumeric))
                 .take(8)
+                .map(|c| c as char)
                 .collect(),
             msg: 1,
         };
