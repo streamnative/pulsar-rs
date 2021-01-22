@@ -1,10 +1,7 @@
 #[macro_use]
 extern crate serde;
 use futures::TryStreamExt;
-use pulsar::{
-    SubType, Payload, Consumer, DeserializeMessage,
-    Pulsar, TokioExecutor,
-};
+use pulsar::{Consumer, DeserializeMessage, Payload, Pulsar, SubType, TokioExecutor};
 
 #[derive(Serialize, Deserialize)]
 struct TestData {

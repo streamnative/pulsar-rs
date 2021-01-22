@@ -167,9 +167,7 @@ impl<Exe: Executor> MultiTopicProducer<Exe> {
             if let Some(name) = &self.name {
                 builder = builder.with_name(name.clone());
             }
-            let producer = builder
-                .build()
-                .await?;
+            let producer = builder.build().await?;
             self.producers.insert(topic.clone(), producer);
         }
 
@@ -193,8 +191,9 @@ impl<Exe: Executor> MultiTopicProducer<Exe> {
         for msg in messages {
             sends.push(self.send(&topic, msg).await);
         }
-        // TODO determine whether to keep this approach or go with the partial send, but more mem friendly lazy approach.
-        // serialize all messages before sending to avoid a partial send
+        // TODO determine whether to keep this approach or go with the partial send, but more mem
+        // friendly lazy approach. serialize all messages before sending to avoid a partial
+        // send
         if sends.iter().all(|s| s.is_ok()) {
             Ok(sends.into_iter().map(|s| s.unwrap()).collect())
         } else {
@@ -223,11 +222,7 @@ impl<Exe: Executor> Producer<Exe> {
         match &self.inner {
             ProducerInner::Single(_) => None,
             ProducerInner::Partitioned(p) => {
-                Some(
-                    p.producers.iter()
-                        .map(|p| p.topic().to_owned())
-                        .collect()
-                )
+                Some(p.producers.iter().map(|p| p.topic().to_owned()).collect())
             }
         }
     }
@@ -771,7 +766,7 @@ impl<Exe: Executor> ProducerBuilder<Exe> {
                     }
                 }),
         )
-            .await?;
+        .await?;
 
         let producer = if producers.len() == 1 {
             ProducerInner::Single(producers.into_iter().next().unwrap())

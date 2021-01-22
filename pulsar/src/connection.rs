@@ -20,7 +20,10 @@ use url::Url;
 use crate::consumer::ConsumerOptions;
 use crate::error::{ConnectionError, SharedError};
 use crate::executor::{Executor, ExecutorKind};
-use crate::message::{proto::{self, command_subscribe::SubType}, Codec, Message, BaseCommand};
+use crate::message::{
+    proto::{self, command_subscribe::SubType},
+    BaseCommand, Codec, Message,
+};
 use crate::producer::{self, ProducerOptions};
 
 pub(crate) enum Register {
@@ -41,7 +44,7 @@ pub(crate) enum Register {
 pub enum RequestKey {
     RequestId(u64),
     ProducerSend { producer_id: u64, sequence_id: u64 },
-    Consumer { consumer_id: u64 }
+    Consumer { consumer_id: u64 },
 }
 
 /// Authentication parameters
@@ -129,17 +132,23 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> 
         loop {
             match self.inbound.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(msg))) => match msg {
-                    Message { command: BaseCommand { ping: Some(_), .. }, .. } => {
+                    Message {
+                        command: BaseCommand { ping: Some(_), .. },
+                        ..
+                    } => {
                         let _ = self.outbound.unbounded_send(messages::pong());
                     }
-                    Message { command: BaseCommand { pong: Some(_), .. }, .. } => {
+                    Message {
+                        command: BaseCommand { pong: Some(_), .. },
+                        ..
+                    } => {
                         if let Some(sender) = self.ping.take() {
                             let _ = sender.send(());
                         }
                     }
                     msg => match msg.request_key() {
-                        Some(key @ RequestKey::RequestId(_)) |
-                        Some(key @ RequestKey::ProducerSend { .. }) => {
+                        Some(key @ RequestKey::RequestId(_))
+                        | Some(key @ RequestKey::ProducerSend { .. }) => {
                             if let Some(resolver) = self.pending_requests.remove(&key) {
                                 // We don't care if the receiver has dropped their future
                                 let _ = resolver.send(msg);
@@ -154,10 +163,13 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> 
                                 .map(move |consumer| consumer.unbounded_send(msg));
                         }
                         None => {
-                            warn!("Received unexpected message; dropping. Message {:?}", msg.command)
+                            warn!(
+                                "Received unexpected message; dropping. Message {:?}",
+                                msg.command
+                            )
                         }
-                    }
-                }
+                    },
+                },
                 Poll::Ready(None) => {
                     self.error.set(ConnectionError::Disconnected);
                     return Poll::Ready(Err(()));
@@ -294,7 +306,7 @@ impl ConnectionSender {
     pub async fn get_topics_of_namespace(
         &self,
         namespace: String,
-        mode: proto::get_topics::Mode,
+        mode: proto::command_get_topics_of_namespace::Mode,
     ) -> Result<proto::CommandGetTopicsOfNamespaceResponse, ConnectionError> {
         let request_id = self.request_id.get();
         let msg = messages::get_topics_of_namespace(request_id, namespace, mode);
@@ -462,24 +474,25 @@ impl Connection {
         };
 
         let u = url.clone();
-        let address: SocketAddr = match executor.spawn_blocking(move || {
-            u.socket_addrs(|| match u.scheme() {
-                "pulsar" => Some(6650),
-                "pulsar+ssl" => Some(6651),
-                _ => None,
+        let address: SocketAddr = match executor
+            .spawn_blocking(move || {
+                u.socket_addrs(|| match u.scheme() {
+                    "pulsar" => Some(6650),
+                    "pulsar+ssl" => Some(6651),
+                    _ => None,
+                })
+                .map_err(|e| {
+                    error!("could not look up address: {:?}", e);
+                    e
+                })
+                .ok()
+                .and_then(|v| {
+                    let mut rng = thread_rng();
+                    let index: usize = rng.gen_range(0, v.len());
+                    v.get(index).copied()
+                })
             })
-            .map_err(|e| {
-                error!("could not look up address: {:?}", e);
-                e
-            })
-            .ok()
-            .and_then(|v| {
-                let mut rng = thread_rng();
-                let index: usize = rng.gen_range(0, v.len());
-                v.get(index).copied()
-            })
-        })
-        .await
+            .await
         {
             Some(Some(address)) => address,
             _ =>
@@ -626,32 +639,34 @@ impl Connection {
         let error = SharedError::new();
         let (receiver_shutdown_tx, receiver_shutdown_rx) = oneshot::channel();
 
-        if executor.spawn(Box::pin(
-            Receiver::new(
-                stream,
-                tx.clone(),
-                error.clone(),
-                registrations_rx,
-                receiver_shutdown_rx,
-            )
-            .map(|_| ()),
-        ))
-        .is_err()
+        if executor
+            .spawn(Box::pin(
+                Receiver::new(
+                    stream,
+                    tx.clone(),
+                    error.clone(),
+                    registrations_rx,
+                    receiver_shutdown_rx,
+                )
+                .map(|_| ()),
+            ))
+            .is_err()
         {
             error!("the executor could not spawn the Receiver future");
             return Err(ConnectionError::Shutdown);
         }
 
         let err = error.clone();
-        if executor.spawn(Box::pin(async move {
-            while let Some(msg) = rx.next().await {
-                if let Err(e) = sink.send(msg).await {
-                    err.set(e);
-                    break;
+        if executor
+            .spawn(Box::pin(async move {
+                while let Some(msg) = rx.next().await {
+                    if let Err(e) = sink.send(msg).await {
+                        err.set(e);
+                        break;
+                    }
                 }
-            }
-        }))
-        .is_err()
+            }))
+            .is_err()
         {
             error!("the executor could not spawn the Receiver future");
             return Err(ConnectionError::Shutdown);
@@ -737,7 +752,7 @@ pub(crate) mod messages {
 
         Message {
             command: proto::BaseCommand {
-                type_: CommandType::Connect as i32,
+                r#type: CommandType::Connect as i32,
                 connect: Some(proto::CommandConnect {
                     auth_method_name,
                     auth_data,
@@ -755,7 +770,7 @@ pub(crate) mod messages {
     pub fn ping() -> Message {
         Message {
             command: proto::BaseCommand {
-                type_: CommandType::Ping as i32,
+                r#type: CommandType::Ping as i32,
                 ping: Some(proto::CommandPing {}),
                 ..Default::default()
             },
@@ -766,7 +781,7 @@ pub(crate) mod messages {
     pub fn pong() -> Message {
         Message {
             command: proto::BaseCommand {
-                type_: CommandType::Pong as i32,
+                r#type: CommandType::Pong as i32,
                 pong: Some(proto::CommandPong {}),
                 ..Default::default()
             },
@@ -783,7 +798,7 @@ pub(crate) mod messages {
     ) -> Message {
         Message {
             command: proto::BaseCommand {
-                type_: CommandType::Producer as i32,
+                r#type: CommandType::Producer as i32,
                 producer: Some(proto::CommandProducer {
                     topic,
                     producer_id,
@@ -799,6 +814,7 @@ pub(crate) mod messages {
                         })
                         .collect(),
                     schema: options.schema,
+                    ..Default::default()
                 }),
                 ..Default::default()
             },
@@ -809,11 +825,11 @@ pub(crate) mod messages {
     pub fn get_topics_of_namespace(
         request_id: u64,
         namespace: String,
-        mode: proto::get_topics::Mode,
+        mode: proto::command_get_topics_of_namespace::Mode,
     ) -> Message {
         Message {
             command: proto::BaseCommand {
-                type_: CommandType::GetTopicsOfNamespace as i32,
+                r#type: CommandType::GetTopicsOfNamespace as i32,
                 get_topics_of_namespace: Some(proto::CommandGetTopicsOfNamespace {
                     request_id,
                     namespace,
@@ -839,11 +855,12 @@ pub(crate) mod messages {
 
         Message {
             command: proto::BaseCommand {
-                type_: CommandType::Send as i32,
+                r#type: CommandType::Send as i32,
                 send: Some(proto::CommandSend {
                     producer_id,
                     sequence_id,
                     num_messages: message.num_messages_in_batch,
+                    ..Default::default()
                 }),
                 ..Default::default()
             },
@@ -864,6 +881,7 @@ pub(crate) mod messages {
                     encryption_algo: message.encryption_algo,
                     encryption_param: message.encryption_param,
                     schema_version: message.schema_version,
+                    ..Default::default()
                 },
                 data: message.payload,
             }),
@@ -873,7 +891,7 @@ pub(crate) mod messages {
     pub fn lookup_topic(topic: String, authoritative: bool, request_id: u64) -> Message {
         Message {
             command: proto::BaseCommand {
-                type_: CommandType::Lookup as i32,
+                r#type: CommandType::Lookup as i32,
                 lookup_topic: Some(proto::CommandLookupTopic {
                     topic,
                     request_id,
@@ -889,7 +907,7 @@ pub(crate) mod messages {
     pub fn lookup_partitioned_topic(topic: String, request_id: u64) -> Message {
         Message {
             command: proto::BaseCommand {
-                type_: CommandType::PartitionedMetadata as i32,
+                r#type: CommandType::PartitionedMetadata as i32,
                 partition_metadata: Some(proto::CommandPartitionedTopicMetadata {
                     topic,
                     request_id,
@@ -904,7 +922,7 @@ pub(crate) mod messages {
     pub fn close_producer(producer_id: u64, request_id: u64) -> Message {
         Message {
             command: proto::BaseCommand {
-                type_: CommandType::CloseProducer as i32,
+                r#type: CommandType::CloseProducer as i32,
                 close_producer: Some(proto::CommandCloseProducer {
                     producer_id,
                     request_id,
@@ -926,7 +944,7 @@ pub(crate) mod messages {
     ) -> Message {
         Message {
             command: proto::BaseCommand {
-                type_: CommandType::Subscribe as i32,
+                r#type: CommandType::Subscribe as i32,
                 subscribe: Some(proto::CommandSubscribe {
                     topic,
                     subscription,
@@ -948,6 +966,11 @@ pub(crate) mod messages {
                     initial_position: options.initial_position,
                     schema: options.schema,
                     start_message_id: options.start_message_id,
+                    force_topic_creation: options.force_topic_creation,
+                    key_shared_meta: None, // TODO: key shared
+                    replicate_subscription_state: options.replicate_subscription_state,
+                    start_message_rollback_duration_sec: options
+                        .start_message_rollback_duration_sec,
                 }),
                 ..Default::default()
             },
@@ -958,7 +981,7 @@ pub(crate) mod messages {
     pub fn flow(consumer_id: u64, message_permits: u32) -> Message {
         Message {
             command: proto::BaseCommand {
-                type_: CommandType::Flow as i32,
+                r#type: CommandType::Flow as i32,
                 flow: Some(proto::CommandFlow {
                     consumer_id,
                     message_permits,
@@ -976,7 +999,7 @@ pub(crate) mod messages {
     ) -> Message {
         Message {
             command: proto::BaseCommand {
-                type_: CommandType::Ack as i32,
+                r#type: CommandType::Ack as i32,
                 ack: Some(proto::CommandAck {
                     consumer_id,
                     ack_type: if cumulative {
@@ -986,6 +1009,9 @@ pub(crate) mod messages {
                     },
                     message_id,
                     validation_error: None,
+                    request_id: None,
+                    txnid_most_bits: None,
+                    txnid_least_bits: None,
                     properties: Vec::new(),
                 }),
                 ..Default::default()
@@ -1000,7 +1026,7 @@ pub(crate) mod messages {
     ) -> Message {
         Message {
             command: proto::BaseCommand {
-                type_: CommandType::RedeliverUnacknowledgedMessages as i32,
+                r#type: CommandType::RedeliverUnacknowledgedMessages as i32,
                 redeliver_unacknowledged_messages: Some(
                     proto::CommandRedeliverUnacknowledgedMessages {
                         consumer_id,
@@ -1016,7 +1042,7 @@ pub(crate) mod messages {
     pub fn close_consumer(consumer_id: u64, request_id: u64) -> Message {
         Message {
             command: proto::BaseCommand {
-                type_: CommandType::CloseConsumer as i32,
+                r#type: CommandType::CloseConsumer as i32,
                 close_consumer: Some(proto::CommandCloseConsumer {
                     consumer_id,
                     request_id,

@@ -50,7 +50,7 @@
 //!         .with_name("my producer")
 //!         .with_options(producer::ProducerOptions {
 //!             schema: Some(proto::Schema {
-//!                 type_: proto::schema::Type::String as i32,
+//!                 r#type: proto::schema::Type::String as i32,
 //!                 ..Default::default()
 //!             }),
 //!             ..Default::default()
@@ -140,14 +140,13 @@ extern crate futures;
 extern crate log;
 #[macro_use]
 extern crate nom;
-#[macro_use]
-extern crate prost_derive;
+extern crate prost;
 
 #[cfg(test)]
 #[macro_use]
 extern crate serde;
 
-pub use client::{Pulsar, PulsarBuilder, DeserializeMessage, SerializeMessage};
+pub use client::{DeserializeMessage, Pulsar, PulsarBuilder, SerializeMessage};
 pub use connection::Authentication;
 pub use connection_manager::{BackOffOptions, BrokerAddress, TlsOptions};
 pub use consumer::{Consumer, ConsumerBuilder, ConsumerOptions};
@@ -158,8 +157,11 @@ pub use executor::Executor;
 #[cfg(feature = "tokio-runtime")]
 pub use executor::TokioExecutor;
 pub use message::proto::command_subscribe::SubType;
+pub use message::{
+    proto::{self, CommandSendReceipt},
+    Payload,
+};
 pub use producer::{MultiTopicProducer, Producer, ProducerOptions};
-pub use message::{Payload, proto::{self, CommandSendReceipt}};
 
 mod client;
 mod connection;
@@ -173,10 +175,10 @@ mod service_discovery;
 
 #[cfg(test)]
 mod tests {
+    use futures::{future::try_join_all, StreamExt};
+    use log::{LevelFilter, Metadata, Record};
     use std::collections::BTreeSet;
     use std::time::{Duration, Instant};
-    use log::{LevelFilter, Metadata, Record};
-    use futures::{future::try_join_all, StreamExt};
 
     #[cfg(feature = "tokio-runtime")]
     use tokio::time::timeout;
@@ -185,13 +187,12 @@ mod tests {
     use crate::executor::TokioExecutor;
 
     use crate::client::SerializeMessage;
-    use crate::message::Payload;
-    use crate::Error as PulsarError;
     use crate::consumer::Message;
     use crate::message::proto::command_subscribe::SubType;
+    use crate::message::Payload;
+    use crate::Error as PulsarError;
 
     use super::*;
-
 
     #[derive(Debug, Serialize, Deserialize)]
     struct TestData {
@@ -493,7 +494,8 @@ mod tests {
         let topic = format!("test_batching_{}", rand::random::<u16>());
 
         let pulsar: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await.unwrap();
-        let mut producer = pulsar.producer()
+        let mut producer = pulsar
+            .producer()
             .with_topic(&topic)
             .with_options(ProducerOptions {
                 batch_size: Some(5),
@@ -503,25 +505,29 @@ mod tests {
             .await
             .unwrap();
 
-        let mut consumer: Consumer<String, _> = pulsar
-            .consumer()
-            .with_topic(topic)
-            .build()
-            .await
-            .unwrap();
+        let mut consumer: Consumer<String, _> =
+            pulsar.consumer().with_topic(topic).build().await.unwrap();
 
         let mut send_receipts = Vec::new();
         for i in 0..4 {
             send_receipts.push(producer.send(i.to_string()).await.unwrap());
         }
-        assert!(timeout(Duration::from_millis(100), consumer.next()).await.is_err());
+        assert!(timeout(Duration::from_millis(100), consumer.next())
+            .await
+            .is_err());
 
         send_receipts.push(producer.send(5.to_string()).await.unwrap());
 
-        timeout(Duration::from_millis(100), try_join_all(send_receipts)).await.unwrap().unwrap();
+        timeout(Duration::from_millis(100), try_join_all(send_receipts))
+            .await
+            .unwrap()
+            .unwrap();
 
         let mut count = 0;
-        while let Some(message) = timeout(Duration::from_millis(100), consumer.next()).await.unwrap() {
+        while let Some(message) = timeout(Duration::from_millis(100), consumer.next())
+            .await
+            .unwrap()
+        {
             let message = message.unwrap();
             count += 1;
             let _ = consumer.ack(&message).await;
@@ -536,8 +542,14 @@ mod tests {
             send_receipts.push(producer.send(i.to_string()).await.unwrap());
         }
         producer.send_batch().await.unwrap();
-        timeout(Duration::from_millis(100), try_join_all(send_receipts)).await.unwrap().unwrap();
-        while let Some(message) = timeout(Duration::from_millis(100), consumer.next()).await.unwrap() {
+        timeout(Duration::from_millis(100), try_join_all(send_receipts))
+            .await
+            .unwrap()
+            .unwrap();
+        while let Some(message) = timeout(Duration::from_millis(100), consumer.next())
+            .await
+            .unwrap()
+        {
             let message = message.unwrap();
             count += 1;
             let _ = consumer.ack(&message).await;

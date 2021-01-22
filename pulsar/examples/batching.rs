@@ -39,16 +39,14 @@ async fn main() -> Result<(), pulsar::Error> {
         .producer()
         .with_topic("test-batch-compression-snappy")
         .with_name("my-producer2".to_string())
-        .with_options(
-            producer::ProducerOptions {
-                batch_size: Some(4),
-                //compression: Some(proto::CompressionType::Lz4),
-                //compression: Some(proto::CompressionType::Zlib),
-                //compression: Some(proto::CompressionType::Zstd),
-                compression: Some(proto::CompressionType::Snappy),
-                ..Default::default()
-            }
-        )
+        .with_options(producer::ProducerOptions {
+            batch_size: Some(4),
+            //compression: Some(proto::CompressionType::Lz4),
+            //compression: Some(proto::CompressionType::Zlib),
+            //compression: Some(proto::CompressionType::Zstd),
+            compression: Some(proto::CompressionType::Snappy),
+            ..Default::default()
+        })
         .build()
         .await?;
 
