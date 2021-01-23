@@ -166,7 +166,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
                     .into_iter()
                     .map(|c| (c.topic().to_owned(), Box::pin(c)))
                     .collect();
-                let topics = consumers.keys().map(|c| c.clone()).collect();
+                let topics = consumers.keys().cloned().collect();
                 let topic_refresh = Duration::from_secs(30);
                 let refresh = Box::pin(client.executor.interval(topic_refresh).map(drop));
                 let namespace = c.namespace.clone();
@@ -301,12 +301,14 @@ enum InnerConsumer<T: DeserializeMessage, Exe: Executor> {
     Multi(MultiTopicConsumer<T, Exe>),
 }
 
+type MessageIdDataReceiver = mpsc::Receiver<Result<(proto::MessageIdData, Payload), Error>>;
+
 pub(crate) struct TopicConsumer<T: DeserializeMessage> {
     consumer_id: u64,
     config: ConsumerConfig,
     connection: Arc<Connection>,
     topic: String,
-    messages: Pin<Box<mpsc::Receiver<Result<(proto::MessageIdData, Payload), Error>>>>,
+    messages: Pin<Box<MessageIdDataReceiver>>,
     ack_tx: mpsc::UnboundedSender<AckMessage>,
     #[allow(unused)]
     data_type: PhantomData<fn(Payload) -> T::Output>,
@@ -436,22 +438,19 @@ impl<T: DeserializeMessage> TopicConsumer<T> {
         if unacked_message_redelivery_delay.is_some() {
             let mut redelivery_tx = ack_tx.clone();
             let mut interval = client.executor.interval(Duration::from_millis(500));
-            if client
-                .executor
-                .spawn(Box::pin(async move {
-                    while interval.next().await.is_some() {
-                        if redelivery_tx
-                            .send(AckMessage::UnackedRedelivery)
-                            .await
-                            .is_err()
-                        {
-                            // Consumer shut down - stop ticker
-                            break;
-                        }
+            let res = client.executor.spawn(Box::pin(async move {
+                while interval.next().await.is_some() {
+                    if redelivery_tx
+                        .send(AckMessage::UnackedRedelivery)
+                        .await
+                        .is_err()
+                    {
+                        // Consumer shut down - stop ticker
+                        break;
                     }
-                }))
-                .is_err()
-            {
+                }
+            }));
+            if res.is_err() {
                 return Err(Error::Executor);
             }
         }
@@ -781,10 +780,10 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
     fn ack(&mut self, message_id: MessageData, cumulative: bool) {
         //FIXME: this does not handle cumulative acks
         self.unacked_messages.remove(&message_id.id);
-        let res =
-            self.connection
-                .sender()
-                .send_ack(self.id, vec![message_id.id.clone()], cumulative);
+        let res = self
+            .connection
+            .sender()
+            .send_ack(self.id, vec![message_id.id], cumulative);
         if res.is_err() {
             error!("ack error: {:?}", res);
         }
@@ -1334,10 +1333,10 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
         .flatten()
         .collect();
 
-        if topics.len() == 0 && topic_regex.is_none() {
-            return Err(Error::Custom(format!(
-                "Unable to create consumer - topic not found"
-            )));
+        if topics.is_empty() && topic_regex.is_none() {
+            return Err(Error::Custom(
+                "Unable to create consumer - topic not found".to_string(),
+            ));
         }
 
         let consumer_id = match (consumer_id, topics.len()) {
@@ -1390,8 +1389,8 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
                 .into_iter()
                 .map(|c| (c.topic().to_owned(), Box::pin(c)))
                 .collect();
-            let topics = consumers.keys().map(|c| c.clone()).collect();
-            let topic_refresh = topic_refresh.unwrap_or(Duration::from_secs(30));
+            let topics = consumers.keys().cloned().collect();
+            let topic_refresh = topic_refresh.unwrap_or_else(|| Duration::from_secs(30));
             let refresh = Box::pin(pulsar.executor.interval(topic_refresh).map(drop));
             let mut consumer = MultiTopicConsumer {
                 namespace: namespace.unwrap_or_else(|| "public/default".to_string()),
@@ -1435,6 +1434,7 @@ struct MultiTopicConsumer<T: DeserializeMessage, Exe: Executor> {
     pulsar: Pulsar<Exe>,
     consumers: BTreeMap<String, Pin<Box<TopicConsumer<T>>>>,
     topics: VecDeque<String>,
+    #[allow(clippy::type_complexity)]
     new_consumers:
         Option<Pin<Box<dyn Future<Output = Result<Vec<TopicConsumer<T>>, Error>> + Send>>>,
     refresh: Pin<Box<dyn Stream<Item = ()> + Send>>,
@@ -1774,10 +1774,10 @@ mod tests {
         let client: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await.unwrap();
 
         try_join_all(vec![
-            client.send(&topic1, &data1).await.unwrap(),
-            client.send(&topic1, &data2).await.unwrap(),
-            client.send(&topic2, &data3).await.unwrap(),
-            client.send(&topic2, &data4).await.unwrap(),
+            client.send(&topic1, &data1),
+            client.send(&topic1, &data2),
+            client.send(&topic2, &data3),
+            client.send(&topic2, &data4),
         ])
         .await
         .unwrap();
@@ -1815,14 +1815,8 @@ mod tests {
                 &connected_topics
             );
             assert_eq!(connected_topics.len(), 2);
-            assert!(connected_topics
-                .iter()
-                .find(|t| t.ends_with(&topic1))
-                .is_some());
-            assert!(connected_topics
-                .iter()
-                .find(|t| t.ends_with(&topic2))
-                .is_some());
+            assert!(connected_topics.iter().any(|t| t.ends_with(&topic1)));
+            assert!(connected_topics.iter().any(|t| t.ends_with(&topic2)));
 
             let mut received = HashSet::new();
             while let Some(message) = timeout(Duration::from_secs(1), consumer.next())

@@ -134,7 +134,8 @@
 //!     Ok(())
 //! }
 //! ```
-
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::large_enum_variant)]
 extern crate futures;
 #[macro_use]
 extern crate log;

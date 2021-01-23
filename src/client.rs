@@ -179,7 +179,7 @@ impl<Exe: Executor> Pulsar<Exe> {
             auth: None,
             back_off_options: None,
             tls_options: None,
-            executor: executor,
+            executor,
         }
     }
 

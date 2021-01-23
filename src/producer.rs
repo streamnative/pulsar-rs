@@ -9,9 +9,7 @@ use crate::client::SerializeMessage;
 use crate::connection::{Connection, SerialId};
 use crate::error::{ConnectionError, ProducerError};
 use crate::executor::Executor;
-use crate::message::proto::{
-    self, CommandSendReceipt, CompressionType, EncryptionKeys, Schema,
-};
+use crate::message::proto::{self, CommandSendReceipt, CompressionType, EncryptionKeys, Schema};
 use crate::message::BatchedMessage;
 use crate::{Error, Pulsar};
 use futures::task::{Context, Poll};
@@ -524,7 +522,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
                 };
 
                 trace!("sending a batched message of size {}", message_count);
-                let send_receipt = self.send_compress(message).await.map_err(|e| Arc::new(e));
+                let send_receipt = self.send_compress(message).await.map_err(Arc::new);
                 for resolver in receipts {
                     let _ = resolver.send(
                         send_receipt
@@ -571,7 +569,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
                         ..Default::default()
                     };
 
-                    let send_receipt = self.send_compress(message).await.map_err(|e| Arc::new(e));
+                    let send_receipt = self.send_compress(message).await.map_err(Arc::new);
 
                     trace!("sending a batched message of size {}", counter);
                     for tx in receipts.drain(..) {
@@ -795,7 +793,7 @@ impl<Exe: Executor> ProducerBuilder<Exe> {
             name,
             producer_options,
         } = self;
-        let topic = topic.ok_or(Error::Custom(format!("topic not set")))?;
+        let topic = topic.ok_or_else(|| Error::Custom("topic not set".to_string()))?;
         let options = producer_options.unwrap_or_default();
 
         let producers: Vec<TopicProducer<Exe>> = try_join_all(
@@ -818,23 +816,26 @@ impl<Exe: Executor> ProducerBuilder<Exe> {
         )
         .await?;
 
-        let producer = if producers.len() == 1 {
-            ProducerInner::Single(producers.into_iter().next().unwrap())
-        } else if producers.len() > 1 {
-            let mut producers = VecDeque::from(producers);
-            // write to topic-1 first
-            producers.rotate_right(1);
-            ProducerInner::Partitioned(PartitionedProducer {
-                producers,
-                topic,
-                options,
-            })
-        } else {
-            return Err(Error::Custom(format!(
-                "Unexpected error: Partition lookup returned no topics for {}",
-                topic
-            )));
+        let producer = match producers.len() {
+            0 => {
+                return Err(Error::Custom(format!(
+                    "Unexpected error: Partition lookup returned no topics for {}",
+                    topic
+                )))
+            }
+            1 => ProducerInner::Single(producers.into_iter().next().unwrap()),
+            _ => {
+                let mut producers = VecDeque::from(producers);
+                // write to topic-1 first
+                producers.rotate_right(1);
+                ProducerInner::Partitioned(PartitionedProducer {
+                    producers,
+                    topic,
+                    options,
+                })
+            }
         };
+
         Ok(Producer { inner: producer })
     }
 
@@ -852,6 +853,7 @@ struct Batch {
     pub length: u32,
     // put it in a mutex because the design of Producer requires an immutable TopicProducer,
     // so we cannot have a mutable Batch in a send_raw(&mut self, ...)
+    #[allow(clippy::type_complexity)]
     pub storage: Mutex<
         VecDeque<(
             oneshot::Sender<Result<proto::CommandSendReceipt, Error>>,
