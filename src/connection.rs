@@ -1,6 +1,5 @@
 use native_tls::Certificate;
 use proto::MessageIdData;
-use rand::{thread_rng, Rng};
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::net::SocketAddr;
@@ -19,6 +18,7 @@ use futures::{
     task::{Context, Poll},
     Future, FutureExt, Sink, SinkExt, Stream, StreamExt,
 };
+use rand::{thread_rng, seq::SliceRandom};
 use url::Url;
 
 use crate::consumer::ConsumerOptions;
@@ -491,7 +491,7 @@ impl Connection {
         };
 
         let u = url.clone();
-        let address: SocketAddr = match executor.spawn_blocking(move || {
+        let mut addresses: Vec<SocketAddr> = match executor.spawn_blocking(move || {
             u.socket_addrs(|| match u.scheme() {
                 "pulsar" => Some(6650),
                 "pulsar+ssl" => Some(6651),
@@ -502,13 +502,12 @@ impl Connection {
                 e
             })
             .ok()
-            .and_then(|v| {
-                let mut rng = thread_rng();
-                let index: usize = rng.gen_range(0..v.len());
-                v.get(index).copied()
+            .map(|mut v| {
+                v.shuffle(&mut thread_rng());
+                v
             })
         }).await {
-            Some(Some(address)) => address,
+            Some(Some(addresses)) if !addresses.is_empty() => addresses,
             _ =>
             //return Err(Error::Custom(format!("could not query address: {}", url))),
             {
@@ -516,36 +515,44 @@ impl Connection {
             }
         };
 
-        let hostname = hostname.unwrap_or_else(|| address.ip().to_string());
+        let mut error = None;
+        for address in addresses.drain(..) {
+            let hostname = hostname.clone().unwrap_or_else(|| address.ip().to_string());
 
-        debug!("Connecting to {}: {}", url, address);
-        let sender_prepare = Connection::prepare_stream(
-            address,
-            hostname,
-            tls,
-            auth_data,
-            proxy_to_broker_url,
-            certificate_chain,
-            executor.clone(),
-        );
-        let delay_f = executor.delay(connection_timeout);
+            debug!("Connecting to {}: {}", url, address);
+            let sender_prepare = Connection::prepare_stream(
+                address,
+                hostname,
+                tls,
+                auth_data.clone(),
+                proxy_to_broker_url.clone(),
+                certificate_chain,
+                executor.clone(),
+            );
+            let delay_f = executor.delay(connection_timeout);
 
-        pin_mut!(sender_prepare);
-        pin_mut!(delay_f);
+            pin_mut!(sender_prepare);
+            pin_mut!(delay_f);
 
-        let sender;
-        match select(sender_prepare, delay_f).await {
-            Either::Left((res, _)) => sender = res?,
-            Either::Right(_) => {
-                return Err(ConnectionError::Io(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "timeout connecting to the Pulsar server",
-                )));
-            }
-        };
+            let sender = match select(sender_prepare, delay_f).await {
+                Either::Left((Ok(sender), _)) => sender,
+                Either::Left((Err(err), _)) => {
+                    error = Some(err);
+                    continue;
+                }
+                Either::Right(_) => {
+                    error = Some(ConnectionError::Io(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "timeout connecting to the Pulsar server",
+                    )));
+                    continue;
+                }
+            };
 
-        let id = rand::random();
-        Ok(Connection { id, url, sender })
+            let id = rand::random();
+            return Ok(Connection { id, url, sender })
+        }
+        return Err(error.unwrap());
     }
 
     async fn prepare_stream<Exe: Executor>(
