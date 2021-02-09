@@ -132,22 +132,20 @@ impl<T> Future for JoinHandle<T> {
     type Output = Option<T>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context) -> std::task::Poll<Self::Output> {
-        unsafe {
-            match Pin::get_unchecked_mut(self) {
-                #[cfg(feature = "tokio-runtime")]
-                JoinHandle::Tokio(j) => match Pin::new_unchecked(j).poll(cx) {
-                    Poll::Pending => Poll::Pending,
-                    Poll::Ready(v) => Poll::Ready(v.ok()),
-                },
-                #[cfg(feature = "async-std-runtime")]
-                JoinHandle::AsyncStd(j) => match Pin::new_unchecked(j).poll(cx) {
-                    Poll::Pending => Poll::Pending,
-                    Poll::Ready(v) => Poll::Ready(Some(v)),
-                },
-                #[cfg(all(not(feature = "tokio-runtime"), not(feature = "async-std-runtime")))]
-                JoinHandle::PlaceHolder(t) => {
-                    unimplemented!("please activate one of the following cargo features: tokio-runtime, async-std-runtime")
-                }
+        match self.get_mut() {
+            #[cfg(feature = "tokio-runtime")]
+            JoinHandle::Tokio(j) => match Pin::new(j).poll(cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(v) => Poll::Ready(v.ok()),
+            },
+            #[cfg(feature = "async-std-runtime")]
+            JoinHandle::AsyncStd(j) => match Pin::new(j).poll(cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(v) => Poll::Ready(Some(v)),
+            },
+            #[cfg(all(not(feature = "tokio-runtime"), not(feature = "async-std-runtime")))]
+            JoinHandle::PlaceHolder(t) => {
+                unimplemented!("please activate one of the following cargo features: tokio-runtime, async-std-runtime")
             }
         }
     }
