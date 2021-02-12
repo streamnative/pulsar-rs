@@ -326,8 +326,8 @@ mod tests {
             .with_consumer_name("test_consumer")
             .with_subscription_type(SubType::Exclusive)
             .with_subscription("test_subscription")
+            .with_initial_position(1)
             .with_options(ConsumerOptions {
-                initial_position: Some(1),
                 ..Default::default()
             })
             .build()
@@ -381,8 +381,8 @@ mod tests {
                 .with_topic(&topic)
                 .with_subscription_type(SubType::Exclusive)
                 .with_subscription("test_subscription")
+                .with_initial_position(1)
                 .with_options(ConsumerOptions {
-                    initial_position: Some(1),
                     ..Default::default()
                 })
                 .build::<String>()
@@ -419,8 +419,8 @@ mod tests {
                 .with_topic(&topic)
                 .with_subscription_type(SubType::Exclusive)
                 .with_subscription("test_subscription")
+                .with_initial_position(1)
                 .with_options(ConsumerOptions {
-                    initial_position: Some(1),
                     ..Default::default()
                 })
                 .build::<Vec<u8>>()
@@ -461,8 +461,8 @@ mod tests {
             .consumer()
             .with_topic(topic)
             .with_unacked_message_resend_delay(Some(Duration::from_millis(100)))
+            .with_initial_position(1)
             .with_options(ConsumerOptions {
-                initial_position: Some(1),
                 ..Default::default()
             })
             .build()

@@ -53,6 +53,11 @@ pub struct DeadLetterPolicy {
     pub dead_letter_topic: String,
 }
 
+// pub enum InitialiPosition {
+//     Earliest,
+//     Latestdf
+// }
+
 /// the consumer is used to subscribe to a topic
 ///
 /// ```rust,no_run
@@ -333,11 +338,11 @@ impl<T: DeserializeMessage> TopicConsumer<T> {
             unacked_message_redelivery_delay,
             options,
             dead_letter_policy,
+            initial_position,
         } = config.clone();
         let consumer_id = consumer_id.unwrap_or_else(rand::random);
         let (resolver, messages) = mpsc::unbounded();
         let batch_size = batch_size.unwrap_or(1000);
-
         let mut connection = client.manager.get_connection(&addr).await?;
         let mut max_retries = 20u8;
         let mut retried = false;
@@ -352,6 +357,7 @@ impl<T: DeserializeMessage> TopicConsumer<T> {
                     sub_type,
                     consumer_id,
                     consumer_name.clone(),
+                    initial_position,
                     options.clone(),
                 )
                 .await
@@ -470,6 +476,7 @@ impl<T: DeserializeMessage> TopicConsumer<T> {
             unacked_message_redelivery_delay,
             dead_letter_policy.clone(),
             options.clone(),
+            initial_position,
             _drop_signal,
         );
         let f = async move {
@@ -599,6 +606,7 @@ struct ConsumerEngine<Exe: Executor> {
     unacked_messages: HashMap<MessageIdData, Instant>,
     dead_letter_policy: Option<DeadLetterPolicy>,
     options: ConsumerOptions,
+    initial_position: Option<i32>,
     _drop_signal: oneshot::Sender<()>,
 }
 
@@ -624,6 +632,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         unacked_message_redelivery_delay: Option<Duration>,
         dead_letter_policy: Option<DeadLetterPolicy>,
         options: ConsumerOptions,
+        initial_position: Option<i32>,
         _drop_signal: oneshot::Sender<()>,
     ) -> ConsumerEngine<Exe> {
         ConsumerEngine {
@@ -643,6 +652,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             unacked_messages: HashMap::new(),
             dead_letter_policy,
             options,
+            initial_position,
             _drop_signal,
         }
     }
@@ -1057,6 +1067,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 self.sub_type,
                 self.id,
                 self.name.clone(),
+                self.initial_position.clone(),
                 self.options.clone(),
             )
             .await
@@ -1192,6 +1203,7 @@ pub struct ConsumerBuilder<Exe: Executor> {
     consumer_options: Option<ConsumerOptions>,
     namespace: Option<String>,
     topic_refresh: Option<Duration>,
+    initial_position: Option<i32>,
 }
 
 impl<Exe: Executor> ConsumerBuilder<Exe> {
@@ -1211,6 +1223,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
             consumer_options: None,
             namespace: None,
             topic_refresh: None,
+            initial_position: None,
         }
     }
 
@@ -1299,6 +1312,12 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
         self
     }
 
+    /// Initial Position 0 is latest which is default and 1 is earliest
+    pub fn with_initial_position(mut self, initial_position: i32) -> Self {
+        self.initial_position = Some(initial_position);
+        self
+    }
+    
     pub async fn build<T: DeserializeMessage>(self) -> Result<Consumer<T, Exe>, Error> {
         let ConsumerBuilder {
             pulsar,
@@ -1314,6 +1333,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
             topic_refresh,
             consumer_options,
             dead_letter_policy,
+            initial_position,
         } = self;
 
         if topics.is_none() && topic_regex.is_none() {
@@ -1373,6 +1393,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
             unacked_message_redelivery_delay: unacked_message_resend_delay,
             options: consumer_options.unwrap_or_default(),
             dead_letter_policy,
+            initial_position,
         };
 
         let consumers =
@@ -1423,6 +1444,7 @@ pub struct ConsumerConfig {
     consumer_name: Option<String>,
     consumer_id: Option<u64>,
     unacked_message_redelivery_delay: Option<Duration>,
+    initial_position: Option<i32>,
     options: ConsumerOptions,
     dead_letter_policy: Option<DeadLetterPolicy>,
 }
@@ -1786,10 +1808,7 @@ mod tests {
             .consumer()
             .with_subscription_type(SubType::Shared)
             // get earliest messages
-            .with_options(ConsumerOptions {
-                initial_position: Some(1),
-                ..Default::default()
-            });
+            .with_initial_position(1);
 
         let consumer_1: Consumer<TestData, _> = builder
             .clone()
@@ -1869,8 +1888,8 @@ mod tests {
                 .with_subscription("dropped_ack")
                 .with_subscription_type(SubType::Shared)
                 // get earliest messages
+                .with_initial_position(1)
                 .with_options(ConsumerOptions {
-                    initial_position: Some(1),
                     ..Default::default()
                 })
                 .build()
@@ -1901,8 +1920,8 @@ mod tests {
                 .with_topic(&topic)
                 .with_subscription("dropped_ack")
                 .with_subscription_type(SubType::Shared)
+                .with_initial_position(1)
                 .with_options(ConsumerOptions {
-                    initial_position: Some(1),
                     ..Default::default()
                 })
                 .build()
@@ -2022,8 +2041,8 @@ mod tests {
             .with_topic(&topic)
             .with_subscription_type(SubType::Failover)
             // get earliest messages
+            .with_initial_position(1)
             .with_options(ConsumerOptions {
-                initial_position: Some(1),
                 ..Default::default()
             });
 
@@ -2171,5 +2190,47 @@ mod tests {
         //then check if all messages were received
         assert_eq!(50, consumed_1);
         assert_eq!(100, consumed_2);
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "tokio-runtime")]
+    async fn close_consumer() {
+        let _ = log::set_logger(&TEST_LOGGER);
+        let _ = log::set_max_level(LevelFilter::Debug);
+        let addr = "pulsar://127.0.0.1:6650";
+
+        let test_id: u16 = rand::random();
+        let topic = format!("close_consumer_{}", test_id);
+
+        let client: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await.unwrap();
+
+        println!("creating consumer1");
+        let consumer1: Consumer<TestData, _> = client
+            .consumer()
+            .with_topic(topic.clone())
+            .with_subscription("nack")
+            .with_subscription_type(SubType::Exclusive)
+            .build()
+            .await
+            .unwrap();
+
+        println!("created consumer1");
+        println!("dropping consumer1");
+
+        drop(consumer1);
+
+        println!("dropped consumer1");
+
+        println!("creating consumer2");
+        let consumer2: Consumer<TestData, _> = client
+            .consumer()
+            .with_topic(topic.clone())
+            .with_subscription("nack")
+            .with_subscription_type(SubType::Exclusive)
+            .build()
+            .await
+            .unwrap();
+
+        println!("created consumer2");
     }
 }

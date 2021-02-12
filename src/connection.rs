@@ -336,6 +336,7 @@ impl ConnectionSender {
         sub_type: SubType,
         consumer_id: u64,
         consumer_name: Option<String>,
+        initial_position: Option<i32>,
         options: ConsumerOptions,
     ) -> Result<proto::CommandSuccess, ConnectionError> {
         let request_id = self.request_id.get();
@@ -346,6 +347,7 @@ impl ConnectionSender {
             consumer_id,
             request_id,
             consumer_name,
+            initial_position,
             options,
         );
         match self.registrations.unbounded_send(Register::Consumer {
@@ -949,6 +951,7 @@ pub(crate) mod messages {
         consumer_id: u64,
         request_id: u64,
         consumer_name: Option<String>,
+        initial_position: Option<i32>,
         options: ConsumerOptions,
     ) -> Message {
         Message {
@@ -972,7 +975,7 @@ pub(crate) mod messages {
                         })
                         .collect(),
                     read_compacted: options.read_compacted,
-                    initial_position: options.initial_position,
+                    initial_position: initial_position,
                     schema: options.schema,
                     start_message_id: options.start_message_id,
                 }),
