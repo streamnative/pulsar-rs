@@ -13,6 +13,8 @@ use std::sync::{
 use futures::{
     self,
     channel::{mpsc, oneshot},
+    future::{select, Either},
+    pin_mut,
     task::{Context, Poll},
     Future, FutureExt, Sink, SinkExt, Stream, StreamExt,
 };
@@ -515,16 +517,30 @@ impl Connection {
         let hostname = hostname.unwrap_or_else(|| address.ip().to_string());
 
         debug!("Connecting to {}: {}", url, address);
-        let sender = Connection::prepare_stream(
+        let sender_prepare = Connection::prepare_stream(
             address,
             hostname,
             tls,
             auth_data,
             proxy_to_broker_url,
             certificate_chain,
-            executor,
-        )
-        .await?;
+            executor.clone(),
+        );
+        let delay_f = executor.delay(std::time::Duration::from_secs(10));
+
+        pin_mut!(sender_prepare);
+        pin_mut!(delay_f);
+
+        let sender;
+        match select(sender_prepare, delay_f).await {
+            Either::Left((res, _)) => sender = res?,
+            Either::Right(_) => {
+                return Err(ConnectionError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "timeout connecting to the Pulsar server",
+                )));
+            }
+        };
 
         let id = rand::random();
         Ok(Connection { id, url, sender })
