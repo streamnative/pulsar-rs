@@ -28,6 +28,7 @@ pub struct BackOffOptions {
     pub min_backoff: Duration,
     pub max_backoff: Duration,
     pub max_retries: u32,
+    pub connection_timeout: Duration,
 }
 
 impl std::default::Default for BackOffOptions {
@@ -36,6 +37,7 @@ impl std::default::Default for BackOffOptions {
             min_backoff: Duration::from_millis(10),
             max_backoff: Duration::from_secs(30),
             max_retries: 12u32,
+            connection_timeout: Duration::from_secs(10),
         }
     }
 }
@@ -231,6 +233,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                 self.auth.clone(),
                 proxy_url.clone(),
                 &self.certificate_chain,
+                self.back_off_options.connection_timeout,
                 self.executor.clone(),
             )
             .await
