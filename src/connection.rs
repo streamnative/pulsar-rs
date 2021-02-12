@@ -9,6 +9,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
+use std::time::Duration;
 
 use futures::{
     self,
@@ -471,6 +472,7 @@ impl Connection {
         auth_data: Option<Authentication>,
         proxy_to_broker_url: Option<String>,
         certificate_chain: &[Certificate],
+        connection_timeout: Duration,
         executor: Arc<Exe>,
     ) -> Result<Connection, ConnectionError> {
         if url.scheme() != "pulsar" && url.scheme() != "pulsar+ssl" {
@@ -526,7 +528,7 @@ impl Connection {
             certificate_chain,
             executor.clone(),
         );
-        let delay_f = executor.delay(std::time::Duration::from_secs(10));
+        let delay_f = executor.delay(connection_timeout);
 
         pin_mut!(sender_prepare);
         pin_mut!(delay_f);
