@@ -19,14 +19,14 @@ keywords = ["pulsar", "api", "client"]
 travis-ci = {repository = "wyyerd/pulsar-rs"}
 
 [dependencies]
-bytes = "0.5.0"
+bytes = "1.0.0"
 crc = "1.0.0"
 futures = "0.3"
-nom = "6.0.0"
+nom = { version="6.0.0", default-features=false, features=["alloc"] }
 prost = "0.7.0"
 prost-derive = "0.7.0"
 rand = "0.8"
-chrono = "0.4.6"
+chrono = "0.4"
 futures-timer = "3.0"
 log = "0.4.6"
 url = "2.1"
@@ -35,11 +35,11 @@ bit-vec = "0.6"
 futures-io = "0.3"
 native-tls = "0.2"
 pem = "0.8"
-tokio = { version = "0.2", features = ["rt-threaded", "blocking", "full"], optional = true }
-tokio-util = { version = "0.3", features = ["codec"], optional = true }
-tokio-native-tls = { version = "0.1", optional = true }
+tokio = { version = "1.0", features = ["rt", "net", "time"], optional = true }
+tokio-util = { version = "0.6", features = ["codec"], optional = true }
+tokio-native-tls = { version = "0.3", optional = true }
 async-std = {version = "1.9", features = [ "attributes", "unstable" ], optional = true }
-futures_codec = { version = "0.4", optional = true }
+asynchronous-codec = { version = "0.6", optional = true }
 async-native-tls = { version = "0.3", optional = true }
 lz4 = { version = "1.23", optional = true }
 flate2 = { version = "1.0", optional = true }
@@ -50,6 +50,7 @@ snap = { version = "1.0", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 env_logger = "0.8"
+tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
 
 [build-dependencies]
 prost-build = "0.7.0"
@@ -58,4 +59,4 @@ prost-build = "0.7.0"
 default = [ "compression", "tokio-runtime", "async-std-runtime" ]
 compression = [ "lz4", "flate2", "zstd", "snap" ]
 tokio-runtime = [ "tokio", "tokio-util", "tokio-native-tls" ]
-async-std-runtime = [ "async-std", "futures_codec", "async-native-tls" ]
+async-std-runtime = [ "async-std", "asynchronous-codec", "async-native-tls" ]

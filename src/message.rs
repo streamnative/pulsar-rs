@@ -301,7 +301,7 @@ impl tokio_util::codec::Decoder for Codec {
 }
 
 #[cfg(feature = "async-std-runtime")]
-impl futures_codec::Encoder for Codec {
+impl asynchronous_codec::Encoder for Codec {
     type Item = Message;
     type Error = ConnectionError;
 
@@ -350,7 +350,7 @@ impl futures_codec::Encoder for Codec {
 }
 
 #[cfg(feature = "async-std-runtime")]
-impl futures_codec::Decoder for Codec {
+impl asynchronous_codec::Decoder for Codec {
     type Item = Message;
     type Error = ConnectionError;
 

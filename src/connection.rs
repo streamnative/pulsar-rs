@@ -9,10 +9,13 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
+use std::time::Duration;
 
 use futures::{
     self,
     channel::{mpsc, oneshot},
+    future::{select, Either},
+    pin_mut,
     task::{Context, Poll},
     Future, FutureExt, Sink, SinkExt, Stream, StreamExt,
 };
@@ -469,6 +472,7 @@ impl Connection {
         auth_data: Option<Authentication>,
         proxy_to_broker_url: Option<String>,
         certificate_chain: &[Certificate],
+        connection_timeout: Duration,
         executor: Arc<Exe>,
     ) -> Result<Connection, ConnectionError> {
         if url.scheme() != "pulsar" && url.scheme() != "pulsar+ssl" {
@@ -487,26 +491,23 @@ impl Connection {
         };
 
         let u = url.clone();
-        let address: SocketAddr = match executor
-            .spawn_blocking(move || {
-                u.socket_addrs(|| match u.scheme() {
-                    "pulsar" => Some(6650),
-                    "pulsar+ssl" => Some(6651),
-                    _ => None,
-                })
-                .map_err(|e| {
-                    error!("could not look up address: {:?}", e);
-                    e
-                })
-                .ok()
-                .and_then(|v| {
-                    let mut rng = thread_rng();
-                    let index: usize = rng.gen_range(0..v.len());
-                    v.get(index).copied()
-                })
+        let address: SocketAddr = match executor.spawn_blocking(move || {
+            u.socket_addrs(|| match u.scheme() {
+                "pulsar" => Some(6650),
+                "pulsar+ssl" => Some(6651),
+                _ => None,
             })
-            .await
-        {
+            .map_err(|e| {
+                error!("could not look up address: {:?}", e);
+                e
+            })
+            .ok()
+            .and_then(|v| {
+                let mut rng = thread_rng();
+                let index: usize = rng.gen_range(0..v.len());
+                v.get(index).copied()
+            })
+        }).await {
             Some(Some(address)) => address,
             _ =>
             //return Err(Error::Custom(format!("could not query address: {}", url))),
@@ -518,16 +519,30 @@ impl Connection {
         let hostname = hostname.unwrap_or_else(|| address.ip().to_string());
 
         debug!("Connecting to {}: {}", url, address);
-        let sender = Connection::prepare_stream(
+        let sender_prepare = Connection::prepare_stream(
             address,
             hostname,
             tls,
             auth_data,
             proxy_to_broker_url,
             certificate_chain,
-            executor,
-        )
-        .await?;
+            executor.clone(),
+        );
+        let delay_f = executor.delay(connection_timeout);
+
+        pin_mut!(sender_prepare);
+        pin_mut!(delay_f);
+
+        let sender;
+        match select(sender_prepare, delay_f).await {
+            Either::Left((res, _)) => sender = res?,
+            Either::Right(_) => {
+                return Err(ConnectionError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "timeout connecting to the Pulsar server",
+                )));
+            }
+        };
 
         let id = rand::random();
         Ok(Connection { id, url, sender })
@@ -583,13 +598,13 @@ impl Connection {
                     let stream = connector
                         .connect(&hostname, stream)
                         .await
-                        .map(|stream| futures_codec::Framed::new(stream, Codec))?;
+                        .map(|stream| asynchronous_codec::Framed::new(stream, Codec))?;
 
                     Connection::connect(stream, auth_data, proxy_to_broker_url, executor).await
                 } else {
                     let stream = async_std::net::TcpStream::connect(&address)
                         .await
-                        .map(|stream| futures_codec::Framed::new(stream, Codec))?;
+                        .map(|stream| asynchronous_codec::Framed::new(stream, Codec))?;
 
                     Connection::connect(stream, auth_data, proxy_to_broker_url, executor).await
                 }
