@@ -39,7 +39,7 @@ tokio = { version = "1.0", features = ["full"], optional = true }
 tokio-util = { version = "0.6", features = ["codec"], optional = true }
 tokio-native-tls = { version = "0.3", optional = true }
 async-std = {version = "1.5", features = [ "attributes", "unstable" ], optional = true }
-asynchronous-codec = { version = "0.5", optional = true }
+asynchronous-codec = { version = "0.6", optional = true }
 async-native-tls = { version = "0.3", optional = true }
 lz4 = { version = "1.23", optional = true }
 flate2 = { version = "1.0", optional = true }
