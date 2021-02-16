@@ -309,7 +309,7 @@ impl ConnectionSender {
     pub async fn get_topics_of_namespace(
         &self,
         namespace: String,
-        mode: proto::get_topics::Mode,
+        mode: proto::command_get_topics_of_namespace::Mode,
     ) -> Result<proto::CommandGetTopicsOfNamespaceResponse, ConnectionError> {
         let request_id = self.request_id.get();
         let msg = messages::get_topics_of_namespace(request_id, namespace, mode);
@@ -779,7 +779,7 @@ pub(crate) mod messages {
 
         Message {
             command: proto::BaseCommand {
-                type_: CommandType::Connect as i32,
+                r#type: CommandType::Connect as i32,
                 connect: Some(proto::CommandConnect {
                     auth_method_name,
                     auth_data,
@@ -797,7 +797,7 @@ pub(crate) mod messages {
     pub fn ping() -> Message {
         Message {
             command: proto::BaseCommand {
-                type_: CommandType::Ping as i32,
+                r#type: CommandType::Ping as i32,
                 ping: Some(proto::CommandPing {}),
                 ..Default::default()
             },
@@ -808,7 +808,7 @@ pub(crate) mod messages {
     pub fn pong() -> Message {
         Message {
             command: proto::BaseCommand {
-                type_: CommandType::Pong as i32,
+                r#type: CommandType::Pong as i32,
                 pong: Some(proto::CommandPong {}),
                 ..Default::default()
             },
@@ -825,7 +825,7 @@ pub(crate) mod messages {
     ) -> Message {
         Message {
             command: proto::BaseCommand {
-                type_: CommandType::Producer as i32,
+                r#type: CommandType::Producer as i32,
                 producer: Some(proto::CommandProducer {
                     topic,
                     producer_id,
@@ -841,6 +841,7 @@ pub(crate) mod messages {
                         })
                         .collect(),
                     schema: options.schema,
+                    ..Default::default()
                 }),
                 ..Default::default()
             },
@@ -851,11 +852,11 @@ pub(crate) mod messages {
     pub fn get_topics_of_namespace(
         request_id: u64,
         namespace: String,
-        mode: proto::get_topics::Mode,
+        mode: proto::command_get_topics_of_namespace::Mode,
     ) -> Message {
         Message {
             command: proto::BaseCommand {
-                type_: CommandType::GetTopicsOfNamespace as i32,
+                r#type: CommandType::GetTopicsOfNamespace as i32,
                 get_topics_of_namespace: Some(proto::CommandGetTopicsOfNamespace {
                     request_id,
                     namespace,
@@ -881,11 +882,12 @@ pub(crate) mod messages {
 
         Message {
             command: proto::BaseCommand {
-                type_: CommandType::Send as i32,
+                r#type: CommandType::Send as i32,
                 send: Some(proto::CommandSend {
                     producer_id,
                     sequence_id,
                     num_messages: message.num_messages_in_batch,
+                    ..Default::default()
                 }),
                 ..Default::default()
             },
@@ -906,6 +908,7 @@ pub(crate) mod messages {
                     encryption_algo: message.encryption_algo,
                     encryption_param: message.encryption_param,
                     schema_version: message.schema_version,
+                    ..Default::default()
                 },
                 data: message.payload,
             }),
@@ -915,7 +918,7 @@ pub(crate) mod messages {
     pub fn lookup_topic(topic: String, authoritative: bool, request_id: u64) -> Message {
         Message {
             command: proto::BaseCommand {
-                type_: CommandType::Lookup as i32,
+                r#type: CommandType::Lookup as i32,
                 lookup_topic: Some(proto::CommandLookupTopic {
                     topic,
                     request_id,
@@ -931,7 +934,7 @@ pub(crate) mod messages {
     pub fn lookup_partitioned_topic(topic: String, request_id: u64) -> Message {
         Message {
             command: proto::BaseCommand {
-                type_: CommandType::PartitionedMetadata as i32,
+                r#type: CommandType::PartitionedMetadata as i32,
                 partition_metadata: Some(proto::CommandPartitionedTopicMetadata {
                     topic,
                     request_id,
@@ -946,7 +949,7 @@ pub(crate) mod messages {
     pub fn close_producer(producer_id: u64, request_id: u64) -> Message {
         Message {
             command: proto::BaseCommand {
-                type_: CommandType::CloseProducer as i32,
+                r#type: CommandType::CloseProducer as i32,
                 close_producer: Some(proto::CommandCloseProducer {
                     producer_id,
                     request_id,
@@ -968,7 +971,7 @@ pub(crate) mod messages {
     ) -> Message {
         Message {
             command: proto::BaseCommand {
-                type_: CommandType::Subscribe as i32,
+                r#type: CommandType::Subscribe as i32,
                 subscribe: Some(proto::CommandSubscribe {
                     topic,
                     subscription,
@@ -990,6 +993,7 @@ pub(crate) mod messages {
                     initial_position: options.initial_position,
                     schema: options.schema,
                     start_message_id: options.start_message_id,
+                    ..Default::default()
                 }),
                 ..Default::default()
             },
@@ -1000,7 +1004,7 @@ pub(crate) mod messages {
     pub fn flow(consumer_id: u64, message_permits: u32) -> Message {
         Message {
             command: proto::BaseCommand {
-                type_: CommandType::Flow as i32,
+                r#type: CommandType::Flow as i32,
                 flow: Some(proto::CommandFlow {
                     consumer_id,
                     message_permits,
@@ -1018,7 +1022,7 @@ pub(crate) mod messages {
     ) -> Message {
         Message {
             command: proto::BaseCommand {
-                type_: CommandType::Ack as i32,
+                r#type: CommandType::Ack as i32,
                 ack: Some(proto::CommandAck {
                     consumer_id,
                     ack_type: if cumulative {
@@ -1029,6 +1033,7 @@ pub(crate) mod messages {
                     message_id,
                     validation_error: None,
                     properties: Vec::new(),
+                    ..Default::default()
                 }),
                 ..Default::default()
             },
@@ -1042,7 +1047,7 @@ pub(crate) mod messages {
     ) -> Message {
         Message {
             command: proto::BaseCommand {
-                type_: CommandType::RedeliverUnacknowledgedMessages as i32,
+                r#type: CommandType::RedeliverUnacknowledgedMessages as i32,
                 redeliver_unacknowledged_messages: Some(
                     proto::CommandRedeliverUnacknowledgedMessages {
                         consumer_id,
@@ -1058,7 +1063,7 @@ pub(crate) mod messages {
     pub fn close_consumer(consumer_id: u64, request_id: u64) -> Message {
         Message {
             command: proto::BaseCommand {
-                type_: CommandType::CloseConsumer as i32,
+                r#type: CommandType::CloseConsumer as i32,
                 close_consumer: Some(proto::CommandCloseConsumer {
                     consumer_id,
                     request_id,
@@ -1077,7 +1082,7 @@ pub(crate) mod messages {
     ) -> Message {
         Message {
             command: proto::BaseCommand {
-                type_: CommandType::Seek as i32,
+                r#type: CommandType::Seek as i32,
                 seek: Some(proto::CommandSeek {
                     consumer_id,
                     request_id,

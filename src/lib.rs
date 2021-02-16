@@ -50,7 +50,7 @@
 //!         .with_name("my producer")
 //!         .with_options(producer::ProducerOptions {
 //!             schema: Some(proto::Schema {
-//!                 type_: proto::schema::Type::String as i32,
+//!                 r#type: proto::schema::Type::String as i32,
 //!                 ..Default::default()
 //!             }),
 //!             ..Default::default()

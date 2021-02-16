@@ -258,7 +258,7 @@ impl<Exe: Executor> Pulsar<Exe> {
     pub async fn get_topics_of_namespace(
         &self,
         namespace: String,
-        mode: proto::get_topics::Mode,
+        mode: proto::command_get_topics_of_namespace::Mode,
     ) -> Result<Vec<String>, Error> {
         let conn = self.manager.get_base_connection().await?;
         let topics = conn

@@ -855,12 +855,12 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 self.reconnect().await?;
             }
             unexpected => {
-                let type_ = proto::base_command::Type::try_from(unexpected.command.type_)
+                let r#type = proto::base_command::Type::try_from(unexpected.command.r#type)
                     .map(|t| format!("{:?}", t))
-                    .unwrap_or_else(|_| unexpected.command.type_.to_string());
+                    .unwrap_or_else(|_| unexpected.command.r#type.to_string());
                 warn!(
                     "Unexpected message type sent to consumer: {}. This is probably a bug!",
-                    type_
+                    r#type
                 );
             }
         }
@@ -1110,7 +1110,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 struct MessageData {
     id: proto::MessageIdData,
     batch_size: Option<i32>,
@@ -1507,7 +1507,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
 
             self.new_consumers = Some(Box::pin(async move {
                 let topics = pulsar
-                    .get_topics_of_namespace(namespace.clone(), proto::get_topics::Mode::All)
+                    .get_topics_of_namespace(namespace.clone(), proto::command_get_topics_of_namespace::Mode::All)
                     .await?;
                 trace!("fetched topics {:?}", topics);
 
