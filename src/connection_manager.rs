@@ -240,7 +240,8 @@ impl<Exe: Executor> ConnectionManager<Exe> {
             {
                 Ok(c) => break c,
                 Err(ConnectionError::Io(e)) => {
-                    if e.kind() != std::io::ErrorKind::ConnectionRefused {
+                    if e.kind() != std::io::ErrorKind::ConnectionRefused ||
+                      e.kind() != std::io::ErrorKind::TimedOut {
                         return Err(ConnectionError::Io(e));
                     }
 
