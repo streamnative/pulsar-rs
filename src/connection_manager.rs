@@ -24,7 +24,7 @@ pub struct BrokerAddress {
 
 /// configuration for reconnection exponential back off
 #[derive(Debug, Clone)]
-pub struct BackOffOptions {
+pub struct ConnectionRetryOptions {
     /// minimum time between connection retries
     pub min_backoff: Duration,
     /// maximum time between rconnection etries
@@ -37,9 +37,9 @@ pub struct BackOffOptions {
     pub operation_timeout: Duration,
 }
 
-impl std::default::Default for BackOffOptions {
+impl std::default::Default for ConnectionRetryOptions {
     fn default() -> Self {
-        BackOffOptions {
+        ConnectionRetryOptions {
             min_backoff: Duration::from_millis(10),
             max_backoff: Duration::from_secs(30),
             max_retries: 12u32,
@@ -71,7 +71,7 @@ pub struct ConnectionManager<Exe: Executor> {
     auth: Option<Authentication>,
     pub(crate) executor: Arc<Exe>,
     connections: Arc<Mutex<HashMap<BrokerAddress, ConnectionStatus<Exe>>>>,
-    back_off_options: BackOffOptions,
+    connection_retry_options: ConnectionRetryOptions,
     tls_options: TlsOptions,
     certificate_chain: Vec<native_tls::Certificate>,
 }
@@ -80,11 +80,11 @@ impl<Exe: Executor> ConnectionManager<Exe> {
     pub async fn new(
         url: String,
         auth: Option<Authentication>,
-        backoff: Option<BackOffOptions>,
+        connection_retry: Option<ConnectionRetryOptions>,
         tls: Option<TlsOptions>,
         executor: Arc<Exe>,
     ) -> Result<Self, ConnectionError> {
-        let back_off_options = backoff.unwrap_or_default();
+        let connection_retry_options = connection_retry.unwrap_or_default();
         let tls_options = tls.unwrap_or_default();
         let url = Url::parse(&url)
             .map_err(|e| {
@@ -118,7 +118,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
             auth,
             executor,
             connections: Arc::new(Mutex::new(HashMap::new())),
-            back_off_options,
+            connection_retry_options,
             tls_options,
             certificate_chain,
         };
@@ -240,8 +240,8 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                 self.auth.clone(),
                 proxy_url.clone(),
                 &self.certificate_chain,
-                self.back_off_options.connection_timeout,
-                self.back_off_options.operation_timeout,
+                self.connection_retry_options.connection_timeout,
+                self.connection_retry_options.operation_timeout,
                 self.executor.clone(),
             )
             .await
@@ -253,15 +253,15 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                         return Err(ConnectionError::Io(e));
                     }
 
-                    if current_retries == self.back_off_options.max_retries {
+                    if current_retries == self.connection_retry_options.max_retries {
                         return Err(ConnectionError::Io(e));
                     }
 
                     let jitter = rand::thread_rng().gen_range(0..10);
                     current_backoff = std::cmp::min(
-                        self.back_off_options.min_backoff * 2u32.saturating_pow(current_retries),
-                        self.back_off_options.max_backoff,
-                    ) + self.back_off_options.min_backoff * jitter;
+                        self.connection_retry_options.min_backoff * 2u32.saturating_pow(current_retries),
+                        self.connection_retry_options.max_backoff,
+                    ) + self.connection_retry_options.min_backoff * jitter;
                     current_retries += 1;
 
                     trace!(

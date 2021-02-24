@@ -4,7 +4,7 @@ use std::sync::Arc;
 use futures::channel::{mpsc, oneshot};
 
 use crate::connection::Authentication;
-use crate::connection_manager::{BackOffOptions, BrokerAddress, ConnectionManager, TlsOptions};
+use crate::connection_manager::{ConnectionRetryOptions, BrokerAddress, ConnectionManager, TlsOptions};
 use crate::consumer::ConsumerBuilder;
 use crate::error::Error;
 use crate::executor::Executor;
@@ -105,12 +105,12 @@ impl<'a> SerializeMessage for &'a str {
 /// ```rust,no_run
 /// use pulsar::{Pulsar, TokioExecutor};
 ///
-/// # async fn run(auth: pulsar::Authentication, backoff: pulsar::BackOffOptions) -> Result<(), pulsar::Error> {
+/// # async fn run(auth: pulsar::Authentication, retry: pulsar::ConnectionRetryOptions) -> Result<(), pulsar::Error> {
 /// let addr = "pulsar://127.0.0.1:6650";
 /// // you can indicate which executor you use as the return type of client creation
 /// let pulsar: Pulsar<_> = Pulsar::builder(addr, TokioExecutor)
 ///     .with_auth(auth)
-///     .with_back_off_options(backoff)
+///     .with_connection_retry_options(retry)
 ///     .build()
 ///     .await?;
 ///
@@ -145,14 +145,14 @@ impl<Exe: Executor> Pulsar<Exe> {
     pub(crate) async fn new<S: Into<String>>(
         url: S,
         auth: Option<Authentication>,
-        backoff_parameters: Option<BackOffOptions>,
+        retry_parameters: Option<ConnectionRetryOptions>,
         tls_options: Option<TlsOptions>,
         executor: Exe,
     ) -> Result<Self, Error> {
         let url: String = url.into();
         let executor = Arc::new(executor);
         let manager =
-            ConnectionManager::new(url, auth, backoff_parameters, tls_options, executor.clone())
+            ConnectionManager::new(url, auth, retry_parameters, tls_options, executor.clone())
                 .await?;
         let manager = Arc::new(manager);
         let service_discovery = Arc::new(ServiceDiscovery::with_manager(manager.clone()));
@@ -177,7 +177,7 @@ impl<Exe: Executor> Pulsar<Exe> {
         PulsarBuilder {
             url: url.into(),
             auth: None,
-            back_off_options: None,
+            connection_retry_options: None,
             tls_options: None,
             executor,
         }
@@ -304,7 +304,7 @@ impl<Exe: Executor> Pulsar<Exe> {
 pub struct PulsarBuilder<Exe: Executor> {
     url: String,
     auth: Option<Authentication>,
-    back_off_options: Option<BackOffOptions>,
+    connection_retry_options: Option<ConnectionRetryOptions>,
     tls_options: Option<TlsOptions>,
     executor: Exe,
 }
@@ -315,18 +315,18 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
         PulsarBuilder {
             url: self.url,
             auth: Some(auth),
-            back_off_options: self.back_off_options,
+            connection_retry_options: self.connection_retry_options,
             tls_options: self.tls_options,
             executor: self.executor,
         }
     }
 
     /// Exponential back off parameters for automatic reconnection
-    pub fn with_back_off_options(self, back_off_options: BackOffOptions) -> Self {
+    pub fn with_connection_retry_options(self, connection_retry_options: ConnectionRetryOptions) -> Self {
         PulsarBuilder {
             url: self.url,
             auth: self.auth,
-            back_off_options: Some(back_off_options),
+            connection_retry_options: Some(connection_retry_options),
             tls_options: self.tls_options,
             executor: self.executor,
         }
@@ -337,7 +337,7 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
         PulsarBuilder {
             url: self.url,
             auth: self.auth,
-            back_off_options: self.back_off_options,
+            connection_retry_options: self.connection_retry_options,
             tls_options: Some(TlsOptions {
                 certificate_chain: Some(certificate_chain),
             }),
@@ -364,11 +364,11 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
         let PulsarBuilder {
             url,
             auth,
-            back_off_options,
+            connection_retry_options,
             tls_options,
             executor,
         } = self;
-        Pulsar::new(url, auth, back_off_options, tls_options, executor).await
+        Pulsar::new(url, auth, connection_retry_options, tls_options, executor).await
     }
 }
 
