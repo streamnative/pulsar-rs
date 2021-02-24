@@ -339,7 +339,7 @@ impl<Exe: Executor> PartitionedProducer<Exe> {
 /// a producer is used to publish messages on a topic
 struct TopicProducer<Exe: Executor> {
     client: Pulsar<Exe>,
-    connection: Arc<Connection>,
+    connection: Arc<Connection<Exe>>,
     id: ProducerId,
     name: ProducerName,
     topic: String,
@@ -355,7 +355,7 @@ struct TopicProducer<Exe: Executor> {
 impl<Exe: Executor> TopicProducer<Exe> {
     pub(crate) async fn from_connection<S: Into<String>>(
         client: Pulsar<Exe>,
-        mut connection: Arc<Connection>,
+        mut connection: Arc<Connection<Exe>>,
         topic: S,
         name: Option<String>,
         options: ProducerOptions,
@@ -688,6 +688,10 @@ impl<Exe: Executor> TopicProducer<Exe> {
         {
             Ok(receipt) => return Ok(receipt),
             Err(ConnectionError::Disconnected) => {}
+            Err(ConnectionError::Io(e)) => if e.kind() != std::io::ErrorKind::TimedOut {
+                error!("send_inner got io error: {:?}", e);
+                return Err(ProducerError::Connection(ConnectionError::Io(e)).into());
+            }
             Err(e) => {
                 error!("send_inner got error: {:?}", e);
                 return Err(ProducerError::Connection(e).into());

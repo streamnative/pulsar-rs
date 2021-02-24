@@ -208,28 +208,34 @@ impl SerialId {
 
 /// An owned type that can send messages like a connection
 //#[derive(Clone)]
-pub struct ConnectionSender {
+pub struct ConnectionSender<Exe: Executor> {
     tx: mpsc::UnboundedSender<Message>,
     registrations: mpsc::UnboundedSender<Register>,
     receiver_shutdown: Option<oneshot::Sender<()>>,
     request_id: SerialId,
     error: SharedError,
+    executor: Arc<Exe>,
+    operation_timeout: Duration,
 }
 
-impl ConnectionSender {
+impl<Exe: Executor> ConnectionSender<Exe> {
     pub(crate) fn new(
         tx: mpsc::UnboundedSender<Message>,
         registrations: mpsc::UnboundedSender<Register>,
         receiver_shutdown: oneshot::Sender<()>,
         request_id: SerialId,
         error: SharedError,
-    ) -> ConnectionSender {
+        executor: Arc<Exe>,
+        operation_timeout: Duration,
+    ) -> ConnectionSender<Exe> {
         ConnectionSender {
             tx,
             registrations,
             receiver_shutdown: Some(receiver_shutdown),
             request_id,
             error,
+            executor,
+            operation_timeout,
         }
     }
 
@@ -454,27 +460,42 @@ impl ConnectionSender {
                 .unbounded_send(Register::Request { key, resolver }),
             self.tx.unbounded_send(msg),
         ) {
-            (Ok(_), Ok(_)) => response.await,
+            (Ok(_), Ok(_)) => {
+                let delay_f = self.executor.delay(self.operation_timeout);
+                pin_mut!(response);
+                pin_mut!(delay_f);
+
+                match select(response, delay_f).await {
+                    Either::Left((res, _)) => res,
+                    Either::Right(_) => {
+                        Err(ConnectionError::Io(std::io::Error::new(
+                                    std::io::ErrorKind::TimedOut,
+                                    "timeout sending message to the Pulsar server",
+                        )))
+                    }
+                }
+            },
             _ => Err(ConnectionError::Disconnected),
         }
     }
 }
 
-pub struct Connection {
+pub struct Connection<Exe: Executor> {
     id: i64,
     url: Url,
-    sender: ConnectionSender,
+    sender: ConnectionSender<Exe>,
 }
 
-impl Connection {
-    pub async fn new<Exe: Executor>(
+impl<Exe: Executor> Connection<Exe> {
+    pub async fn new(
         url: Url,
         auth_data: Option<Authentication>,
         proxy_to_broker_url: Option<String>,
         certificate_chain: &[Certificate],
         connection_timeout: Duration,
+        operation_timeout: Duration,
         executor: Arc<Exe>,
-    ) -> Result<Connection, ConnectionError> {
+    ) -> Result<Connection<Exe>, ConnectionError> {
         if url.scheme() != "pulsar" && url.scheme() != "pulsar+ssl" {
             error!("invalid scheme: {}", url.scheme());
             return Err(ConnectionError::NotFound);
@@ -527,6 +548,7 @@ impl Connection {
             proxy_to_broker_url,
             certificate_chain,
             executor.clone(),
+            operation_timeout,
         );
         let delay_f = executor.delay(connection_timeout);
 
@@ -548,7 +570,7 @@ impl Connection {
         Ok(Connection { id, url, sender })
     }
 
-    async fn prepare_stream<Exe: Executor>(
+    async fn prepare_stream(
         address: SocketAddr,
         hostname: String,
         tls: bool,
@@ -556,7 +578,8 @@ impl Connection {
         proxy_to_broker_url: Option<String>,
         certificate_chain: &[Certificate],
         executor: Arc<Exe>,
-    ) -> Result<ConnectionSender, ConnectionError> {
+        operation_timeout: Duration,
+    ) -> Result<ConnectionSender<Exe>, ConnectionError> {
         match executor.kind() {
             #[cfg(feature = "tokio-runtime")]
             ExecutorKind::Tokio => {
@@ -574,13 +597,13 @@ impl Connection {
                         .await
                         .map(|stream| tokio_util::codec::Framed::new(stream, Codec))?;
 
-                    Connection::connect(stream, auth_data, proxy_to_broker_url, executor).await
+                    Connection::connect(stream, auth_data, proxy_to_broker_url, executor, operation_timeout).await
                 } else {
                     let stream = tokio::net::TcpStream::connect(&address)
                         .await
                         .map(|stream| tokio_util::codec::Framed::new(stream, Codec))?;
 
-                    Connection::connect(stream, auth_data, proxy_to_broker_url, executor).await
+                    Connection::connect(stream, auth_data, proxy_to_broker_url, executor, operation_timeout).await
                 }
             }
             #[cfg(not(feature = "tokio-runtime"))]
@@ -600,13 +623,13 @@ impl Connection {
                         .await
                         .map(|stream| asynchronous_codec::Framed::new(stream, Codec))?;
 
-                    Connection::connect(stream, auth_data, proxy_to_broker_url, executor).await
+                    Connection::connect(stream, auth_data, proxy_to_broker_url, executor, operation_timeout).await
                 } else {
                     let stream = async_std::net::TcpStream::connect(&address)
                         .await
                         .map(|stream| asynchronous_codec::Framed::new(stream, Codec))?;
 
-                    Connection::connect(stream, auth_data, proxy_to_broker_url, executor).await
+                    Connection::connect(stream, auth_data, proxy_to_broker_url, executor, operation_timeout).await
                 }
             }
             #[cfg(not(feature = "async-std-runtime"))]
@@ -616,12 +639,13 @@ impl Connection {
         }
     }
 
-    pub async fn connect<Exe: Executor, S>(
+    pub async fn connect<S>(
         mut stream: S,
         auth_data: Option<Authentication>,
         proxy_to_broker_url: Option<String>,
         executor: Arc<Exe>,
-    ) -> Result<ConnectionSender, ConnectionError>
+        operation_timeout: Duration,
+    ) -> Result<ConnectionSender<Exe>, ConnectionError>
     where
         S: Stream<Item = Result<Message, ConnectionError>>,
         S: Sink<Message, Error = ConnectionError>,
@@ -704,6 +728,8 @@ impl Connection {
             receiver_shutdown_tx,
             SerialId::new(),
             error,
+            executor.clone(),
+            operation_timeout,
         );
 
         Ok(sender)
@@ -726,12 +752,12 @@ impl Connection {
     }
 
     /// Chain to send a message, e.g. conn.sender().send_ping()
-    pub fn sender(&self) -> &ConnectionSender {
+    pub fn sender(&self) -> &ConnectionSender<Exe> {
         &self.sender
     }
 }
 
-impl Drop for Connection {
+impl<Exe: Executor> Drop for Connection<Exe> {
     fn drop(&mut self) {
         if let Some(shutdown) = self.sender.receiver_shutdown.take() {
             let _ = shutdown.send(());

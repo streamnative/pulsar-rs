@@ -297,16 +297,16 @@ impl<T: DeserializeMessage + 'static, Exe: Executor> Stream for Consumer<T, Exe>
 }
 
 enum InnerConsumer<T: DeserializeMessage, Exe: Executor> {
-    Single(TopicConsumer<T>),
+    Single(TopicConsumer<T, Exe>),
     Multi(MultiTopicConsumer<T, Exe>),
 }
 
 type MessageIdDataReceiver = mpsc::Receiver<Result<(proto::MessageIdData, Payload), Error>>;
 
-pub(crate) struct TopicConsumer<T: DeserializeMessage> {
+pub(crate) struct TopicConsumer<T: DeserializeMessage, Exe: Executor> {
     consumer_id: u64,
     config: ConsumerConfig,
-    connection: Arc<Connection>,
+    connection: Arc<Connection<Exe>>,
     topic: String,
     messages: Pin<Box<MessageIdDataReceiver>>,
     ack_tx: mpsc::UnboundedSender<AckMessage>,
@@ -317,13 +317,13 @@ pub(crate) struct TopicConsumer<T: DeserializeMessage> {
     messages_received: u64,
 }
 
-impl<T: DeserializeMessage> TopicConsumer<T> {
-    async fn new<Exe: Executor>(
+impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
+    async fn new(
         client: Pulsar<Exe>,
         topic: String,
         mut addr: BrokerAddress,
         config: ConsumerConfig,
-    ) -> Result<TopicConsumer<T>, Error> {
+    ) -> Result<TopicConsumer<T, Exe>, Error> {
         let ConsumerConfig {
             subscription,
             sub_type,
@@ -565,7 +565,7 @@ impl<T: DeserializeMessage> TopicConsumer<T> {
     }
 }
 
-impl<T: DeserializeMessage> Stream for TopicConsumer<T> {
+impl<T: DeserializeMessage, Exe: Executor> Stream for TopicConsumer<T, Exe> {
     type Item = Result<Message<T>, Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -584,7 +584,7 @@ impl<T: DeserializeMessage> Stream for TopicConsumer<T> {
 
 struct ConsumerEngine<Exe: Executor> {
     client: Pulsar<Exe>,
-    connection: Arc<Connection>,
+    connection: Arc<Connection<Exe>>,
     topic: String,
     subscription: String,
     sub_type: SubType,
@@ -611,7 +611,7 @@ enum AckMessage {
 impl<Exe: Executor> ConsumerEngine<Exe> {
     fn new(
         client: Pulsar<Exe>,
-        connection: Arc<Connection>,
+        connection: Arc<Connection<Exe>>,
         topic: String,
         subscription: String,
         sub_type: SubType,
@@ -1432,11 +1432,11 @@ struct MultiTopicConsumer<T: DeserializeMessage, Exe: Executor> {
     namespace: String,
     topic_regex: Option<Regex>,
     pulsar: Pulsar<Exe>,
-    consumers: BTreeMap<String, Pin<Box<TopicConsumer<T>>>>,
+    consumers: BTreeMap<String, Pin<Box<TopicConsumer<T, Exe>>>>,
     topics: VecDeque<String>,
     #[allow(clippy::type_complexity)]
     new_consumers:
-        Option<Pin<Box<dyn Future<Output = Result<Vec<TopicConsumer<T>>, Error>> + Send>>>,
+        Option<Pin<Box<dyn Future<Output = Result<Vec<TopicConsumer<T, Exe>>, Error>> + Send>>>,
     refresh: Pin<Box<dyn Stream<Item = ()> + Send>>,
     config: ConsumerConfig,
     // Stats on disconnected consumers to keep metrics correct
@@ -1476,7 +1476,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
         Ok(())
     }
 
-    fn add_consumers<I: IntoIterator<Item = TopicConsumer<T>>>(&mut self, consumers: I) {
+    fn add_consumers<I: IntoIterator<Item = TopicConsumer<T, Exe>>>(&mut self, consumers: I) {
         for consumer in consumers {
             let topic = consumer.topic().to_owned();
             self.consumers.insert(topic.clone(), Box::pin(consumer));

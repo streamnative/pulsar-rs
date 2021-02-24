@@ -25,10 +25,16 @@ pub struct BrokerAddress {
 /// configuration for reconnection exponential back off
 #[derive(Debug, Clone)]
 pub struct BackOffOptions {
+    /// minimum time between connection retries
     pub min_backoff: Duration,
+    /// maximum time between rconnection etries
     pub max_backoff: Duration,
+    /// maximum number of connection retries
     pub max_retries: u32,
+    /// time limit to establish a connection
     pub connection_timeout: Duration,
+    /// time limit to receive an answer to a Pulsar operation
+    pub operation_timeout: Duration,
 }
 
 impl std::default::Default for BackOffOptions {
@@ -38,6 +44,7 @@ impl std::default::Default for BackOffOptions {
             max_backoff: Duration::from_secs(30),
             max_retries: 12u32,
             connection_timeout: Duration::from_secs(10),
+            operation_timeout: Duration::from_secs(30),
         }
     }
 }
@@ -48,9 +55,9 @@ pub struct TlsOptions {
     pub certificate_chain: Option<Vec<u8>>,
 }
 
-enum ConnectionStatus {
-    Connected(Arc<Connection>),
-    Connecting(Vec<oneshot::Sender<Result<Arc<Connection>, ConnectionError>>>),
+enum ConnectionStatus<Exe: Executor> {
+    Connected(Arc<Connection<Exe>>),
+    Connecting(Vec<oneshot::Sender<Result<Arc<Connection<Exe>>, ConnectionError>>>),
 }
 
 /// Look up broker addresses for topics and partitioned topics
@@ -63,7 +70,7 @@ pub struct ConnectionManager<Exe: Executor> {
     pub url: Url,
     auth: Option<Authentication>,
     pub(crate) executor: Arc<Exe>,
-    connections: Arc<Mutex<HashMap<BrokerAddress, ConnectionStatus>>>,
+    connections: Arc<Mutex<HashMap<BrokerAddress, ConnectionStatus<Exe>>>>,
     back_off_options: BackOffOptions,
     tls_options: TlsOptions,
     certificate_chain: Vec<native_tls::Certificate>,
@@ -139,7 +146,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
     /// get an active Connection from a broker address
     ///
     /// creates a connection if not available
-    pub async fn get_base_connection(&self) -> Result<Arc<Connection>, ConnectionError> {
+    pub async fn get_base_connection(&self) -> Result<Arc<Connection<Exe>>, ConnectionError> {
         let broker_address = BrokerAddress {
             url: self.url.clone(),
             broker_url: format!(
@@ -159,7 +166,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
     pub async fn get_connection(
         &self,
         broker: &BrokerAddress,
-    ) -> Result<Arc<Connection>, ConnectionError> {
+    ) -> Result<Arc<Connection<Exe>>, ConnectionError> {
         let rx = {
             match self.connections.lock().unwrap().get_mut(broker) {
                 None => None,
@@ -187,7 +194,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
         }
     }
 
-    async fn connect(&self, broker: BrokerAddress) -> Result<Arc<Connection>, ConnectionError> {
+    async fn connect(&self, broker: BrokerAddress) -> Result<Arc<Connection<Exe>>, ConnectionError> {
         debug!("ConnectionManager::connect({:?})", broker);
 
         let rx = {
@@ -234,6 +241,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                 proxy_url.clone(),
                 &self.certificate_chain,
                 self.back_off_options.connection_timeout,
+                self.back_off_options.operation_timeout,
                 self.executor.clone(),
             )
             .await
