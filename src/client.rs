@@ -4,7 +4,8 @@ use std::sync::Arc;
 use futures::channel::{mpsc, oneshot};
 
 use crate::connection::Authentication;
-use crate::connection_manager::{ConnectionRetryOptions, BrokerAddress, ConnectionManager, TlsOptions};
+use crate::connection_manager::{ConnectionRetryOptions, OperationRetryOptions,
+  BrokerAddress, ConnectionManager, TlsOptions};
 use crate::consumer::ConsumerBuilder;
 use crate::error::Error;
 use crate::executor::Executor;
@@ -137,6 +138,7 @@ pub struct Pulsar<Exe: Executor> {
     // run_producer, then fill in the producer field afterwards in the
     // main Pulsar instance
     producer: Option<mpsc::UnboundedSender<SendMessage>>,
+    pub(crate) operation_retry_options: OperationRetryOptions,
     pub(crate) executor: Arc<Exe>,
 }
 
@@ -145,14 +147,18 @@ impl<Exe: Executor> Pulsar<Exe> {
     pub(crate) async fn new<S: Into<String>>(
         url: S,
         auth: Option<Authentication>,
-        retry_parameters: Option<ConnectionRetryOptions>,
+        connection_retry_parameters: Option<ConnectionRetryOptions>,
+        operation_retry_parameters: Option<OperationRetryOptions>,
         tls_options: Option<TlsOptions>,
         executor: Exe,
     ) -> Result<Self, Error> {
         let url: String = url.into();
         let executor = Arc::new(executor);
+        let operation_retry_options = operation_retry_parameters.unwrap_or_default();
         let manager =
-            ConnectionManager::new(url, auth, retry_parameters, tls_options, executor.clone())
+            ConnectionManager::new(url, auth, connection_retry_parameters,
+                                   operation_retry_options.clone(), tls_options,
+                                   executor.clone())
                 .await?;
         let manager = Arc::new(manager);
         let service_discovery = Arc::new(ServiceDiscovery::with_manager(manager.clone()));
@@ -162,6 +168,7 @@ impl<Exe: Executor> Pulsar<Exe> {
             manager,
             service_discovery,
             producer: None,
+            operation_retry_options,
             executor,
         };
 
@@ -178,6 +185,7 @@ impl<Exe: Executor> Pulsar<Exe> {
             url: url.into(),
             auth: None,
             connection_retry_options: None,
+            operation_retry_options: None,
             tls_options: None,
             executor,
         }
@@ -305,6 +313,7 @@ pub struct PulsarBuilder<Exe: Executor> {
     url: String,
     auth: Option<Authentication>,
     connection_retry_options: Option<ConnectionRetryOptions>,
+    operation_retry_options: Option<OperationRetryOptions>,
     tls_options: Option<TlsOptions>,
     executor: Exe,
 }
@@ -319,6 +328,12 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
     /// Exponential back off parameters for automatic reconnection
     pub fn with_connection_retry_options(mut self, connection_retry_options: ConnectionRetryOptions) -> Self {
         self.connection_retry_options = Some(connection_retry_options);
+        self
+    }
+
+    /// Retry parameters for Pulsar operations
+    pub fn with_operation_retry_options(mut self, operation_retry_options: OperationRetryOptions) -> Self {
+        self.operation_retry_options = Some(operation_retry_options);
         self
     }
 
@@ -350,10 +365,11 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
             url,
             auth,
             connection_retry_options,
+            operation_retry_options,
             tls_options,
             executor,
         } = self;
-        Pulsar::new(url, auth, connection_retry_options, tls_options, executor).await
+        Pulsar::new(url, auth, connection_retry_options, operation_retry_options, tls_options, executor).await
     }
 }
 

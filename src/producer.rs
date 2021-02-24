@@ -389,9 +389,9 @@ impl<Exe: Executor> TopicProducer<Exe> {
         };
 
         let producer_name: ProducerName;
-        let mut max_retries = 20u8;
-        let mut retried = false;
+        let mut current_retries = 0u32;
         let start = std::time::Instant::now();
+        let operation_retry_options = client.operation_retry_options.clone();
 
         loop {
             match connection
@@ -405,12 +405,12 @@ impl<Exe: Executor> TopicProducer<Exe> {
                 Ok(success) => {
                     producer_name = success.producer_name;
 
-                    if retried {
+                    if current_retries > 0 {
                         let dur = (std::time::Instant::now() - start).as_secs();
                         log::info!(
                             "subscribe({}) success after {} retries over {} seconds",
                             topic,
-                            20 - max_retries,
+                            current_retries + 1,
                             dur
                         );
                     }
@@ -420,13 +420,16 @@ impl<Exe: Executor> TopicProducer<Exe> {
                     Some(proto::ServerError::ServiceNotReady),
                     text,
                 )) => {
-                    if max_retries > 0 {
-                        error!("create_producer({}) answered ServiceNotReady, retrying request after 500ms (max_retries = {}): {}", topic, max_retries, text.unwrap_or_else(String::new));
-                        max_retries -= 1;
-                        retried = true;
+                    if operation_retry_options.max_retries.is_none() ||
+                        operation_retry_options.max_retries.unwrap() > current_retries {
+                        error!("create_producer({}) answered ServiceNotReady, retrying request after {}ms (max_retries = {:?}): {}",
+                        topic, operation_retry_options.retry_delay.as_millis(),
+                        operation_retry_options.max_retries, text.unwrap_or_else(String::new));
+
+                        current_retries += 1;
                         client
                             .executor
-                            .delay(std::time::Duration::from_millis(500))
+                            .delay(operation_retry_options.retry_delay)
                             .await;
 
                         let addr = client.lookup_topic(&topic).await?;

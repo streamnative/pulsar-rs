@@ -339,9 +339,10 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         let batch_size = batch_size.unwrap_or(1000);
 
         let mut connection = client.manager.get_connection(&addr).await?;
-        let mut max_retries = 20u8;
-        let mut retried = false;
+        let mut current_retries = 0u32;
         let start = std::time::Instant::now();
+        let operation_retry_options = client.operation_retry_options.clone();
+
         loop {
             match connection
                 .sender()
@@ -357,12 +358,12 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
                 .await
             {
                 Ok(_) => {
-                    if retried {
+                    if current_retries > 0 {
                         let dur = (std::time::Instant::now() - start).as_secs();
                         log::info!(
                             "subscribe({}) success after {} retries over {} seconds",
                             topic,
-                            20 - max_retries,
+                            current_retries +1,
                             dur
                         );
                     }
@@ -372,13 +373,14 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
                     Some(proto::ServerError::ServiceNotReady),
                     text,
                 )) => {
-                    if max_retries > 0 {
-                        error!("subscribe({}) answered ServiceNotReady, retrying request after 500ms (max_retries = {}): {}",
-                            topic, max_retries, text.unwrap_or_else(String::new));
+                    if operation_retry_options.max_retries.is_none() ||
+                        operation_retry_options.max_retries.unwrap() > current_retries {
+                        error!("subscribe({}) answered ServiceNotReady, retrying request after {}ms (max_retries = {:?}): {}",
+                        topic, operation_retry_options.retry_delay.as_millis(),
+                        operation_retry_options.max_retries, text.unwrap_or_else(String::new));
 
-                        max_retries -= 1;
-                        retried = true;
-                        client.executor.delay(Duration::from_millis(500)).await;
+                        current_retries += 1;
+                        client.executor.delay(operation_retry_options.retry_delay).await;
 
                         // we need to look up again the topic's address
                         let prev = addr;

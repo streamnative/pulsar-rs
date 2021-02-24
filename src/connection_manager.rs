@@ -25,16 +25,14 @@ pub struct BrokerAddress {
 /// configuration for reconnection exponential back off
 #[derive(Debug, Clone)]
 pub struct ConnectionRetryOptions {
-    /// minimum time between connection retries
+    /// minimum delay between connection retries
     pub min_backoff: Duration,
-    /// maximum time between rconnection etries
+    /// maximum delay between rconnection etries
     pub max_backoff: Duration,
     /// maximum number of connection retries
     pub max_retries: u32,
     /// time limit to establish a connection
     pub connection_timeout: Duration,
-    /// time limit to receive an answer to a Pulsar operation
-    pub operation_timeout: Duration,
 }
 
 impl std::default::Default for ConnectionRetryOptions {
@@ -44,7 +42,27 @@ impl std::default::Default for ConnectionRetryOptions {
             max_backoff: Duration::from_secs(30),
             max_retries: 12u32,
             connection_timeout: Duration::from_secs(10),
+        }
+    }
+}
+
+/// configuration for Pulsar operation retries
+#[derive(Debug, Clone)]
+pub struct OperationRetryOptions {
+    /// time limit to receive an answer to a Pulsar operation
+    pub operation_timeout: Duration,
+    /// delay between operation retries after a ServiceNotReady error
+    pub retry_delay: Duration,
+    /// maximum number of operation retries. None indicates infinite retries
+    pub max_retries: Option<u32>,
+}
+
+impl std::default::Default for OperationRetryOptions {
+    fn default() -> Self {
+        OperationRetryOptions {
             operation_timeout: Duration::from_secs(30),
+            retry_delay: Duration::from_millis(500),
+            max_retries: None,
         }
     }
 }
@@ -72,6 +90,7 @@ pub struct ConnectionManager<Exe: Executor> {
     pub(crate) executor: Arc<Exe>,
     connections: Arc<Mutex<HashMap<BrokerAddress, ConnectionStatus<Exe>>>>,
     connection_retry_options: ConnectionRetryOptions,
+    pub(crate) operation_retry_options: OperationRetryOptions,
     tls_options: TlsOptions,
     certificate_chain: Vec<native_tls::Certificate>,
 }
@@ -81,6 +100,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
         url: String,
         auth: Option<Authentication>,
         connection_retry: Option<ConnectionRetryOptions>,
+        operation_retry_options: OperationRetryOptions,
         tls: Option<TlsOptions>,
         executor: Arc<Exe>,
     ) -> Result<Self, ConnectionError> {
@@ -119,6 +139,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
             executor,
             connections: Arc::new(Mutex::new(HashMap::new())),
             connection_retry_options,
+            operation_retry_options,
             tls_options,
             certificate_chain,
         };
@@ -241,7 +262,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                 proxy_url.clone(),
                 &self.certificate_chain,
                 self.connection_retry_options.connection_timeout,
-                self.connection_retry_options.operation_timeout,
+                self.operation_retry_options.operation_timeout,
                 self.executor.clone(),
             )
             .await

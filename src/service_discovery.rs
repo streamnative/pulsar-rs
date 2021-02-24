@@ -36,9 +36,9 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
         let mut is_authoritative = false;
         let mut broker_address = self.manager.get_base_address();
 
-        let mut max_retries = 20u8;
-        let mut retried = false;
+        let mut current_retries = 0u32;
         let start = std::time::Instant::now();
+        let operation_retry_options = self.manager.operation_retry_options.clone();
 
         loop {
             let response = match conn
@@ -62,19 +62,19 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
                     == Some(command_lookup_topic_response::LookupType::Failed as i32)
             {
                 let error = response.error.and_then(crate::error::server_error);
-                if error == Some(crate::message::proto::ServerError::ServiceNotReady)
-                    && max_retries > 0
-                {
-                    error!("lookup({}) answered ServiceNotReady, retrying request after 500ms (max_retries = {})", topic, max_retries);
-                    max_retries -= 1;
-                    retried = true;
-                    self.manager
-                        .executor
-                        .delay(Duration::from_millis(500))
-                        .await;
-                    continue;
-                } else if max_retries == 0 {
-                    error!("lookup({}) reached max retries", topic);
+                if error == Some(crate::message::proto::ServerError::ServiceNotReady) {
+                    if operation_retry_options.max_retries.is_none() ||
+                        operation_retry_options.max_retries.unwrap() > current_retries {
+                            error!("lookup({}) answered ServiceNotReady, retrying request after {}ms (max_retries = {:?})", topic, operation_retry_options.retry_delay.as_millis(), operation_retry_options.max_retries);
+                            current_retries += 1;
+                            self.manager
+                                .executor
+                                .delay(operation_retry_options.retry_delay)
+                                .await;
+                            continue;
+                        } else {
+                            error!("lookup({}) reached max retries", topic);
+                        }
                 }
                 return Err(ServiceDiscoveryError::Query(
                     error,
@@ -82,12 +82,12 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
                 ));
             }
 
-            if retried {
+            if current_retries >0 {
                 let dur = (std::time::Instant::now() - start).as_secs();
                 log::info!(
                     "lookup({}) success after {} retries over {} seconds",
                     topic,
-                    20 - max_retries,
+                    current_retries + 1,
                     dur
                 );
             }
@@ -151,9 +151,9 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
         let mut connection = self.manager.get_base_connection().await?;
         let topic = topic.into();
 
-        let mut max_retries = 20u8;
-        let mut retried = false;
+        let mut current_retries = 0u32;
         let start = std::time::Instant::now();
+        let operation_retry_options = self.manager.operation_retry_options.clone();
 
         let response = loop {
             let response = match connection.sender().lookup_partitioned_topic(&topic).await {
@@ -171,23 +171,26 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
                     == Some(command_partitioned_topic_metadata_response::LookupType::Failed as i32)
             {
                 let error = response.error.and_then(crate::error::server_error);
-                if error == Some(crate::message::proto::ServerError::ServiceNotReady)
-                    && max_retries > 0
-                {
-                    error!("lookup_partitioned_topic_number({}) answered ServiceNotReady, retrying request after 500ms (max_retries = {})", topic, max_retries);
-                    max_retries -= 1;
-                    retried = true;
+                if error == Some(crate::message::proto::ServerError::ServiceNotReady) {
+                    if operation_retry_options.max_retries.is_none() ||
+                        operation_retry_options.max_retries.unwrap() > current_retries {
+                    error!("lookup_partitioned_topic_number({}) answered ServiceNotReady, retrying request after {}ms (max_retries = {:?})",
+                    topic, operation_retry_options.retry_delay.as_millis(),
+                    operation_retry_options.max_retries);
+
+                    current_retries += 1;
                     self.manager
                         .executor
-                        .delay(Duration::from_millis(500))
+                        .delay(operation_retry_options.retry_delay)
                         .await;
                     continue;
-                } else if max_retries == 0 {
+                } else {
                     error!(
                         "lookup_partitioned_topic_number({}) reached max retries",
                         topic
                     );
                 }
+            }
                 return Err(ServiceDiscoveryError::Query(
                     error,
                     response.message.clone(),
@@ -197,12 +200,12 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
             break response;
         };
 
-        if retried {
+        if current_retries > 0 {
             let dur = (std::time::Instant::now() - start).as_secs();
             log::info!(
                 "lookup_partitioned_topic_number({}) success after {} retries over {} seconds",
                 topic,
-                20 - max_retries,
+                current_retries + 1,
                 dur
             );
         }
