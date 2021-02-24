@@ -311,38 +311,23 @@ pub struct PulsarBuilder<Exe: Executor> {
 
 impl<Exe: Executor> PulsarBuilder<Exe> {
     /// Authentication parameters (JWT, Biscuit, etc)
-    pub fn with_auth(self, auth: Authentication) -> Self {
-        PulsarBuilder {
-            url: self.url,
-            auth: Some(auth),
-            connection_retry_options: self.connection_retry_options,
-            tls_options: self.tls_options,
-            executor: self.executor,
-        }
+    pub fn with_auth(mut self, auth: Authentication) -> Self {
+        self.auth = Some(auth);
+        self
     }
 
     /// Exponential back off parameters for automatic reconnection
-    pub fn with_connection_retry_options(self, connection_retry_options: ConnectionRetryOptions) -> Self {
-        PulsarBuilder {
-            url: self.url,
-            auth: self.auth,
-            connection_retry_options: Some(connection_retry_options),
-            tls_options: self.tls_options,
-            executor: self.executor,
-        }
+    pub fn with_connection_retry_options(mut self, connection_retry_options: ConnectionRetryOptions) -> Self {
+        self.connection_retry_options = Some(connection_retry_options);
+        self
     }
 
     /// add a custom certificate chain to authenticate the server in TLS connectioons
-    pub fn with_certificate_chain(self, certificate_chain: Vec<u8>) -> Self {
-        PulsarBuilder {
-            url: self.url,
-            auth: self.auth,
-            connection_retry_options: self.connection_retry_options,
-            tls_options: Some(TlsOptions {
-                certificate_chain: Some(certificate_chain),
-            }),
-            executor: self.executor,
-        }
+    pub fn with_certificate_chain(mut self, certificate_chain: Vec<u8>) -> Self {
+        self.tls_options = Some(TlsOptions {
+            certificate_chain: Some(certificate_chain),
+        });
+        self
     }
 
     /// add a custom certificate chain from a file to authenticate the server in TLS connectioons
