@@ -20,9 +20,10 @@ Features:
 Cargo.toml
 ```toml
 futures = "0.3"
-pulsar = "1.0"
-tokio = "0.2"
+pulsar = "2.0"
+tokio = "1.0"
 ```
+
 #### Producing
 ```rust
 use serde::{Serialize, Deserialize};
