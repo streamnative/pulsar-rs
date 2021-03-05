@@ -363,7 +363,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
                         log::info!(
                             "subscribe({}) success after {} retries over {} seconds",
                             topic,
-                            current_retries +1,
+                            current_retries + 1,
                             dur
                         );
                     }
@@ -373,14 +373,18 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
                     Some(proto::ServerError::ServiceNotReady),
                     text,
                 )) => {
-                    if operation_retry_options.max_retries.is_none() ||
-                        operation_retry_options.max_retries.unwrap() > current_retries {
+                    if operation_retry_options.max_retries.is_none()
+                        || operation_retry_options.max_retries.unwrap() > current_retries
+                    {
                         error!("subscribe({}) answered ServiceNotReady, retrying request after {}ms (max_retries = {:?}): {}",
                         topic, operation_retry_options.retry_delay.as_millis(),
                         operation_retry_options.max_retries, text.unwrap_or_else(String::new));
 
                         current_retries += 1;
-                        client.executor.delay(operation_retry_options.retry_delay).await;
+                        client
+                            .executor
+                            .delay(operation_retry_options.retry_delay)
+                            .await;
 
                         // we need to look up again the topic's address
                         let prev = addr;
@@ -1509,7 +1513,10 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
 
             self.new_consumers = Some(Box::pin(async move {
                 let topics = pulsar
-                    .get_topics_of_namespace(namespace.clone(), proto::command_get_topics_of_namespace::Mode::All)
+                    .get_topics_of_namespace(
+                        namespace.clone(),
+                        proto::command_get_topics_of_namespace::Mode::All,
+                    )
                     .await?;
                 trace!("fetched topics {:?}", topics);
 

@@ -420,8 +420,9 @@ impl<Exe: Executor> TopicProducer<Exe> {
                     Some(proto::ServerError::ServiceNotReady),
                     text,
                 )) => {
-                    if operation_retry_options.max_retries.is_none() ||
-                        operation_retry_options.max_retries.unwrap() > current_retries {
+                    if operation_retry_options.max_retries.is_none()
+                        || operation_retry_options.max_retries.unwrap() > current_retries
+                    {
                         error!("create_producer({}) answered ServiceNotReady, retrying request after {}ms (max_retries = {:?}): {}",
                         topic, operation_retry_options.retry_delay.as_millis(),
                         operation_retry_options.max_retries, text.unwrap_or_else(String::new));
@@ -691,9 +692,11 @@ impl<Exe: Executor> TopicProducer<Exe> {
         {
             Ok(receipt) => return Ok(receipt),
             Err(ConnectionError::Disconnected) => {}
-            Err(ConnectionError::Io(e)) => if e.kind() != std::io::ErrorKind::TimedOut {
-                error!("send_inner got io error: {:?}", e);
-                return Err(ProducerError::Connection(ConnectionError::Io(e)).into());
+            Err(ConnectionError::Io(e)) => {
+                if e.kind() != std::io::ErrorKind::TimedOut {
+                    error!("send_inner got io error: {:?}", e);
+                    return Err(ProducerError::Connection(ConnectionError::Io(e)).into());
+                }
             }
             Err(e) => {
                 error!("send_inner got error: {:?}", e);

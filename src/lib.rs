@@ -149,8 +149,9 @@ extern crate serde;
 
 pub use client::{DeserializeMessage, Pulsar, PulsarBuilder, SerializeMessage};
 pub use connection::Authentication;
-pub use connection_manager::{ConnectionRetryOptions, OperationRetryOptions,
-  BrokerAddress, TlsOptions};
+pub use connection_manager::{
+    BrokerAddress, ConnectionRetryOptions, OperationRetryOptions, TlsOptions,
+};
 pub use consumer::{Consumer, ConsumerBuilder, ConsumerOptions};
 pub use error::Error;
 #[cfg(feature = "async-std-runtime")]

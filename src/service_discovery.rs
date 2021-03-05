@@ -63,18 +63,19 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
             {
                 let error = response.error.and_then(crate::error::server_error);
                 if error == Some(crate::message::proto::ServerError::ServiceNotReady) {
-                    if operation_retry_options.max_retries.is_none() ||
-                        operation_retry_options.max_retries.unwrap() > current_retries {
-                            error!("lookup({}) answered ServiceNotReady, retrying request after {}ms (max_retries = {:?})", topic, operation_retry_options.retry_delay.as_millis(), operation_retry_options.max_retries);
-                            current_retries += 1;
-                            self.manager
-                                .executor
-                                .delay(operation_retry_options.retry_delay)
-                                .await;
-                            continue;
-                        } else {
-                            error!("lookup({}) reached max retries", topic);
-                        }
+                    if operation_retry_options.max_retries.is_none()
+                        || operation_retry_options.max_retries.unwrap() > current_retries
+                    {
+                        error!("lookup({}) answered ServiceNotReady, retrying request after {}ms (max_retries = {:?})", topic, operation_retry_options.retry_delay.as_millis(), operation_retry_options.max_retries);
+                        current_retries += 1;
+                        self.manager
+                            .executor
+                            .delay(operation_retry_options.retry_delay)
+                            .await;
+                        continue;
+                    } else {
+                        error!("lookup({}) reached max retries", topic);
+                    }
                 }
                 return Err(ServiceDiscoveryError::Query(
                     error,
@@ -82,7 +83,7 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
                 ));
             }
 
-            if current_retries >0 {
+            if current_retries > 0 {
                 let dur = (std::time::Instant::now() - start).as_secs();
                 log::info!(
                     "lookup({}) success after {} retries over {} seconds",
@@ -172,25 +173,26 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
             {
                 let error = response.error.and_then(crate::error::server_error);
                 if error == Some(crate::message::proto::ServerError::ServiceNotReady) {
-                    if operation_retry_options.max_retries.is_none() ||
-                        operation_retry_options.max_retries.unwrap() > current_retries {
-                    error!("lookup_partitioned_topic_number({}) answered ServiceNotReady, retrying request after {}ms (max_retries = {:?})",
+                    if operation_retry_options.max_retries.is_none()
+                        || operation_retry_options.max_retries.unwrap() > current_retries
+                    {
+                        error!("lookup_partitioned_topic_number({}) answered ServiceNotReady, retrying request after {}ms (max_retries = {:?})",
                     topic, operation_retry_options.retry_delay.as_millis(),
                     operation_retry_options.max_retries);
 
-                    current_retries += 1;
-                    self.manager
-                        .executor
-                        .delay(operation_retry_options.retry_delay)
-                        .await;
-                    continue;
-                } else {
-                    error!(
-                        "lookup_partitioned_topic_number({}) reached max retries",
-                        topic
-                    );
+                        current_retries += 1;
+                        self.manager
+                            .executor
+                            .delay(operation_retry_options.retry_delay)
+                            .await;
+                        continue;
+                    } else {
+                        error!(
+                            "lookup_partitioned_topic_number({}) reached max retries",
+                            topic
+                        );
+                    }
                 }
-            }
                 return Err(ServiceDiscoveryError::Query(
                     error,
                     response.message.clone(),

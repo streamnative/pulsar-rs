@@ -467,14 +467,12 @@ impl<Exe: Executor> ConnectionSender<Exe> {
 
                 match select(response, delay_f).await {
                     Either::Left((res, _)) => res,
-                    Either::Right(_) => {
-                        Err(ConnectionError::Io(std::io::Error::new(
-                                    std::io::ErrorKind::TimedOut,
-                                    "timeout sending message to the Pulsar server",
-                        )))
-                    }
+                    Either::Right(_) => Err(ConnectionError::Io(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "timeout sending message to the Pulsar server",
+                    ))),
                 }
-            },
+            }
             _ => Err(ConnectionError::Disconnected),
         }
     }
@@ -512,23 +510,26 @@ impl<Exe: Executor> Connection<Exe> {
         };
 
         let u = url.clone();
-        let address: SocketAddr = match executor.spawn_blocking(move || {
-            u.socket_addrs(|| match u.scheme() {
-                "pulsar" => Some(6650),
-                "pulsar+ssl" => Some(6651),
-                _ => None,
+        let address: SocketAddr = match executor
+            .spawn_blocking(move || {
+                u.socket_addrs(|| match u.scheme() {
+                    "pulsar" => Some(6650),
+                    "pulsar+ssl" => Some(6651),
+                    _ => None,
+                })
+                .map_err(|e| {
+                    error!("could not look up address: {:?}", e);
+                    e
+                })
+                .ok()
+                .and_then(|v| {
+                    let mut rng = thread_rng();
+                    let index: usize = rng.gen_range(0..v.len());
+                    v.get(index).copied()
+                })
             })
-            .map_err(|e| {
-                error!("could not look up address: {:?}", e);
-                e
-            })
-            .ok()
-            .and_then(|v| {
-                let mut rng = thread_rng();
-                let index: usize = rng.gen_range(0..v.len());
-                v.get(index).copied()
-            })
-        }).await {
+            .await
+        {
             Some(Some(address)) => address,
             _ =>
             //return Err(Error::Custom(format!("could not query address: {}", url))),
@@ -597,13 +598,27 @@ impl<Exe: Executor> Connection<Exe> {
                         .await
                         .map(|stream| tokio_util::codec::Framed::new(stream, Codec))?;
 
-                    Connection::connect(stream, auth_data, proxy_to_broker_url, executor, operation_timeout).await
+                    Connection::connect(
+                        stream,
+                        auth_data,
+                        proxy_to_broker_url,
+                        executor,
+                        operation_timeout,
+                    )
+                    .await
                 } else {
                     let stream = tokio::net::TcpStream::connect(&address)
                         .await
                         .map(|stream| tokio_util::codec::Framed::new(stream, Codec))?;
 
-                    Connection::connect(stream, auth_data, proxy_to_broker_url, executor, operation_timeout).await
+                    Connection::connect(
+                        stream,
+                        auth_data,
+                        proxy_to_broker_url,
+                        executor,
+                        operation_timeout,
+                    )
+                    .await
                 }
             }
             #[cfg(not(feature = "tokio-runtime"))]
@@ -623,13 +638,27 @@ impl<Exe: Executor> Connection<Exe> {
                         .await
                         .map(|stream| asynchronous_codec::Framed::new(stream, Codec))?;
 
-                    Connection::connect(stream, auth_data, proxy_to_broker_url, executor, operation_timeout).await
+                    Connection::connect(
+                        stream,
+                        auth_data,
+                        proxy_to_broker_url,
+                        executor,
+                        operation_timeout,
+                    )
+                    .await
                 } else {
                     let stream = async_std::net::TcpStream::connect(&address)
                         .await
                         .map(|stream| asynchronous_codec::Framed::new(stream, Codec))?;
 
-                    Connection::connect(stream, auth_data, proxy_to_broker_url, executor, operation_timeout).await
+                    Connection::connect(
+                        stream,
+                        auth_data,
+                        proxy_to_broker_url,
+                        executor,
+                        operation_timeout,
+                    )
+                    .await
                 }
             }
             #[cfg(not(feature = "async-std-runtime"))]

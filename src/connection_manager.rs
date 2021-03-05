@@ -215,7 +215,10 @@ impl<Exe: Executor> ConnectionManager<Exe> {
         }
     }
 
-    async fn connect(&self, broker: BrokerAddress) -> Result<Arc<Connection<Exe>>, ConnectionError> {
+    async fn connect(
+        &self,
+        broker: BrokerAddress,
+    ) -> Result<Arc<Connection<Exe>>, ConnectionError> {
         debug!("ConnectionManager::connect({:?})", broker);
 
         let rx = {
@@ -269,8 +272,9 @@ impl<Exe: Executor> ConnectionManager<Exe> {
             {
                 Ok(c) => break c,
                 Err(ConnectionError::Io(e)) => {
-                    if e.kind() != std::io::ErrorKind::ConnectionRefused ||
-                      e.kind() != std::io::ErrorKind::TimedOut {
+                    if e.kind() != std::io::ErrorKind::ConnectionRefused
+                        || e.kind() != std::io::ErrorKind::TimedOut
+                    {
                         return Err(ConnectionError::Io(e));
                     }
 
@@ -280,7 +284,8 @@ impl<Exe: Executor> ConnectionManager<Exe> {
 
                     let jitter = rand::thread_rng().gen_range(0..10);
                     current_backoff = std::cmp::min(
-                        self.connection_retry_options.min_backoff * 2u32.saturating_pow(current_retries),
+                        self.connection_retry_options.min_backoff
+                            * 2u32.saturating_pow(current_retries),
                         self.connection_retry_options.max_backoff,
                     ) + self.connection_retry_options.min_backoff * jitter;
                     current_retries += 1;
