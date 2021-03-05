@@ -6,7 +6,7 @@ use crate::message::proto::{
     CommandLookupTopicResponse,
 };
 use futures::{future::try_join_all, FutureExt};
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 use url::Url;
 
 /// Look up broker addresses for topics and partitioned topics

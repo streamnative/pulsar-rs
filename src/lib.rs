@@ -141,7 +141,6 @@ extern crate futures;
 extern crate log;
 #[macro_use]
 extern crate nom;
-#[macro_use]
 extern crate prost_derive;
 
 #[cfg(test)]

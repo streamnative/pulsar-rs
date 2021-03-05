@@ -505,7 +505,7 @@ impl BatchedMessage {
 pub mod proto {
     include!(concat!(env!("OUT_DIR"), "/pulsar.proto.rs"));
 
-    //trait implermentations used in Consumer::unacked_messages
+    //trait implementations used in Consumer::unacked_messages
     impl std::cmp::Eq for MessageIdData {}
 
     impl std::hash::Hash for MessageIdData {
