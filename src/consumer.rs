@@ -533,37 +533,37 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         })
     }
 
-    pub fn topic(&self) -> &str {
+    fn topic(&self) -> &str {
         &self.topic
     }
 
-    pub async fn check_connection(&self) -> Result<(), Error> {
+    async fn check_connection(&self) -> Result<(), Error> {
         self.connection.sender().send_ping().await?;
         Ok(())
     }
 
-    pub async fn ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
+    async fn ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         self.ack_tx
             .send(AckMessage::Ack(msg.message_id.clone(), false))
             .await?;
         Ok(())
     }
 
-    pub async fn cumulative_ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
+    async fn cumulative_ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         self.ack_tx
             .send(AckMessage::Ack(msg.message_id.clone(), true))
             .await?;
         Ok(())
     }
 
-    pub async fn nack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
+    async fn nack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         self.ack_tx
             .send(AckMessage::Nack(msg.message_id.clone()))
             .await?;
         Ok(())
     }
 
-    pub async fn seek(
+    async fn seek(
         &mut self,
         message_id: Option<MessageIdData>,
         timestamp: Option<u64>,
@@ -576,15 +576,15 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         Ok(())
     }
 
-    pub fn last_message_received(&self) -> Option<DateTime<Utc>> {
+    fn last_message_received(&self) -> Option<DateTime<Utc>> {
         self.last_message_received
     }
 
-    pub fn messages_received(&self) -> u64 {
+    fn messages_received(&self) -> u64 {
         self.messages_received
     }
 
-    pub fn config(&self) -> &ConsumerConfig {
+    fn config(&self) -> &ConsumerConfig {
         &self.config
     }
 
@@ -1515,11 +1515,11 @@ struct MultiTopicConsumer<T: DeserializeMessage, Exe: Executor> {
 }
 
 impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
-    pub fn topics(&self) -> Vec<String> {
+    fn topics(&self) -> Vec<String> {
         self.topics.iter().map(|s| s.to_string()).collect()
     }
 
-    pub fn last_message_received(&self) -> Option<DateTime<Utc>> {
+    fn last_message_received(&self) -> Option<DateTime<Utc>> {
         self.consumers
             .values()
             .filter_map(|c| c.last_message_received)
@@ -1527,7 +1527,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
             .max()
     }
 
-    pub fn messages_received(&self) -> u64 {
+    fn messages_received(&self) -> u64 {
         self.consumers
             .values()
             .map(|c| c.messages_received)
@@ -1535,7 +1535,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
             .sum()
     }
 
-    pub async fn check_connections(&self) -> Result<(), Error> {
+    async fn check_connections(&self) -> Result<(), Error> {
         let base_conn = self.pulsar.manager.get_base_connection().await?;
         let connections: BTreeMap<_, _> = iter::once(base_conn)
             .chain(self.consumers.values().map(|c| c.connection.clone()))
@@ -1612,7 +1612,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
         }
     }
 
-    pub async fn ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
+    async fn ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         if let Some(c) = self.consumers.get_mut(&msg.topic) {
             c.ack(&msg).await
         } else {
@@ -1620,7 +1620,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
         }
     }
 
-    pub async fn cumulative_ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
+    async fn cumulative_ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         if let Some(c) = self.consumers.get_mut(&msg.topic) {
             c.cumulative_ack(&msg).await
         } else {
@@ -1628,7 +1628,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
         }
     }
 
-    pub async fn nack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
+    async fn nack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         if let Some(c) = self.consumers.get_mut(&msg.topic) {
             c.nack(&msg).await?;
             Ok(())
@@ -1638,7 +1638,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
     }
 
     /// Assume that this seek method will call seek for the topics given in the consumer_ids
-    pub async fn seek(
+    async fn seek(
         &mut self,
         consumer_ids: Option<Vec<String>>,
         message_id: Option<MessageIdData>,

@@ -501,20 +501,20 @@ impl<Exe: Executor> TopicProducer<Exe> {
         })
     }
 
-    pub fn topic(&self) -> &str {
+    fn topic(&self) -> &str {
         &self.topic
     }
 
-    pub fn options(&self) -> &ProducerOptions {
+    fn options(&self) -> &ProducerOptions {
         &self.options
     }
 
-    pub async fn check_connection(&self) -> Result<(), Error> {
+    async fn check_connection(&self) -> Result<(), Error> {
         self.connection.sender().send_ping().await?;
         Ok(())
     }
 
-    pub async fn send<T: SerializeMessage + Sized>(
+    async fn send<T: SerializeMessage + Sized>(
         &mut self,
         message: T,
     ) -> Result<SendFuture, Error> {
@@ -524,7 +524,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
         }
     }
 
-    pub async fn send_batch(&mut self) -> Result<(), Error> {
+    async fn send_batch(&mut self) -> Result<(), Error> {
         match self.batch.as_ref() {
             None => Err(ProducerError::Custom("not a batching producer".to_string()).into()),
             Some(batch) => {
