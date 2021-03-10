@@ -19,6 +19,11 @@ use tokio::macros::support::Pin;
 type ProducerId = u64;
 type ProducerName = String;
 
+/// returned by [Producer::send]
+///
+/// it contains a channel on which we can await to get the message receipt.
+/// Depending on the producer's configuration (batching, flow control, etc)and
+/// the server's load, the send receipt could come much later after sending it
 pub struct SendFuture(pub(crate) oneshot::Receiver<Result<CommandSendReceipt, Error>>);
 
 impl Future for SendFuture {
@@ -46,14 +51,16 @@ impl Future for SendFuture {
 pub struct Message {
     /// serialized data
     pub payload: Vec<u8>,
+    /// user defined properties
     pub properties: HashMap<String, String>,
-    /// key to decide partition for the msg
+    /// key to decide partition for the message
     pub partition_key: ::std::option::Option<String>,
     /// Override namespace's replication
     pub replicate_to: ::std::vec::Vec<String>,
     /// the timestamp that this event occurs. it is typically set by applications.
     /// if this field is omitted, `publish_time` can be used for the purpose of `event_time`.
     pub event_time: ::std::option::Option<u64>,
+    /// current version of the schema
     pub schema_version: ::std::option::Option<Vec<u8>>,
 }
 
@@ -101,10 +108,15 @@ impl From<Message> for ProducerMessage {
 /// Configuration options for producers
 #[derive(Clone, Default)]
 pub struct ProducerOptions {
+    /// end to end message encryption (not implemented yet)
     pub encrypted: Option<bool>,
+    /// user defined properties added to all messages
     pub metadata: BTreeMap<String, String>,
+    /// schema used to encode this producer's messages
     pub schema: Option<Schema>,
+    /// batch message size
     pub batch_size: Option<u32>,
+    /// algorithm used to compress the messages
     pub compression: Option<proto::CompressionType>,
 }
 
@@ -135,14 +147,17 @@ pub struct MultiTopicProducer<Exe: Executor> {
 }
 
 impl<Exe: Executor> MultiTopicProducer<Exe> {
+    /// producer options
     pub fn options(&self) -> &ProducerOptions {
         &self.options
     }
 
+    /// list topics currently handled by this producer
     pub fn topics(&self) -> Vec<String> {
         self.producers.keys().cloned().collect()
     }
 
+    /// stops the producer
     pub async fn close_producer<S: Into<String>>(&mut self, topic: S) -> Result<(), Error> {
         let partitions = self.client.lookup_partitioned_topic(topic).await?;
         for (topic, _) in partitions {
@@ -151,6 +166,7 @@ impl<Exe: Executor> MultiTopicProducer<Exe> {
         Ok(())
     }
 
+    /// sends one message on a topic
     pub async fn send<T: SerializeMessage + Sized, S: Into<String>>(
         &mut self,
         topic: S,
@@ -175,6 +191,7 @@ impl<Exe: Executor> MultiTopicProducer<Exe> {
         producer.send(message).await
     }
 
+    /// sends a list of messages on a topic
     pub async fn send_all<'a, 'b, T, S, I>(
         &mut self,
         topic: S,
@@ -201,15 +218,18 @@ impl<Exe: Executor> MultiTopicProducer<Exe> {
     }
 }
 
+/// a producer for a single topic
 pub struct Producer<Exe: Executor> {
     inner: ProducerInner<Exe>,
 }
 
 impl<Exe: Executor> Producer<Exe> {
+    /// creates a producer builder from a client instance
     pub fn builder(pulsar: &Pulsar<Exe>) -> ProducerBuilder<Exe> {
         ProducerBuilder::new(&pulsar)
     }
 
+    /// this producer's topic
     pub fn topic(&self) -> &str {
         match &self.inner {
             ProducerInner::Single(p) => p.topic(),
@@ -217,6 +237,7 @@ impl<Exe: Executor> Producer<Exe> {
         }
     }
 
+    /// list of partitions for this producer's topic
     pub fn partitions(&self) -> Option<Vec<String>> {
         match &self.inner {
             ProducerInner::Single(_) => None,
@@ -226,6 +247,7 @@ impl<Exe: Executor> Producer<Exe> {
         }
     }
 
+    /// configuration options
     pub fn options(&self) -> &ProducerOptions {
         match &self.inner {
             ProducerInner::Single(p) => p.options(),
@@ -233,10 +255,14 @@ impl<Exe: Executor> Producer<Exe> {
         }
     }
 
+    /// creates a message builder
+    ///
+    /// the created message will ber sent by this producer in [MessageBuilder::send]
     pub fn create_message(&mut self) -> MessageBuilder<(), Exe> {
         MessageBuilder::new(self)
     }
 
+    /// test that the broker connections are still valid
     pub async fn check_connection(&self) -> Result<(), Error> {
         match &self.inner {
             ProducerInner::Single(p) => p.check_connection().await,
@@ -277,6 +303,7 @@ impl<Exe: Executor> Producer<Exe> {
         }
     }
 
+    /// sends a list of messages
     pub async fn send_all<T, I>(&mut self, messages: I) -> Result<Vec<SendFuture>, Error>
     where
         T: SerializeMessage,
@@ -772,6 +799,7 @@ pub struct ProducerBuilder<Exe: Executor> {
 }
 
 impl<Exe: Executor> ProducerBuilder<Exe> {
+    /// creates a new ProducerBuilder from a client
     pub fn new(pulsar: &Pulsar<Exe>) -> Self {
         ProducerBuilder {
             pulsar: pulsar.clone(),
@@ -781,21 +809,25 @@ impl<Exe: Executor> ProducerBuilder<Exe> {
         }
     }
 
+    /// sets the producer's topic
     pub fn with_topic<S: Into<String>>(mut self, topic: S) -> Self {
         self.topic = Some(topic.into());
         self
     }
 
+    /// sets the producer's name
     pub fn with_name<S: Into<String>>(mut self, name: S) -> Self {
         self.name = Some(name.into());
         self
     }
 
+    /// configuration options
     pub fn with_options(mut self, options: ProducerOptions) -> Self {
         self.producer_options = Some(options);
         self
     }
 
+    /// creates a new producer
     pub async fn build(self) -> Result<Producer<Exe>, Error> {
         let ProducerBuilder {
             pulsar,
@@ -849,6 +881,7 @@ impl<Exe: Executor> ProducerBuilder<Exe> {
         Ok(Producer { inner: producer })
     }
 
+    /// creates a new [MultiTopicProducer]
     pub fn build_multi_topic(self) -> MultiTopicProducer<Exe> {
         MultiTopicProducer {
             client: self.pulsar,
@@ -932,6 +965,7 @@ pub struct MessageBuilder<'a, T, Exe: Executor> {
 }
 
 impl<'a, Exe: Executor> MessageBuilder<'a, (), Exe> {
+    /// creates a message builder from an existing producer
     pub fn new(producer: &'a mut Producer<Exe>) -> Self {
         MessageBuilder {
             producer,
@@ -943,6 +977,7 @@ impl<'a, Exe: Executor> MessageBuilder<'a, (), Exe> {
 }
 
 impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
+    /// sets the message's content
     pub fn with_content<C>(self, content: C) -> MessageBuilder<'a, C, Exe> {
         MessageBuilder {
             producer: self.producer,
@@ -952,11 +987,13 @@ impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
         }
     }
 
+    /// sets the message's partition key
     pub fn with_partition_key<S: Into<String>>(mut self, partition_key: S) -> Self {
         self.partition_key = Some(partition_key.into());
         self
     }
 
+    /// sets a user defined property
     pub fn with_property<S1: Into<String>, S2: Into<String>>(mut self, key: S1, value: S2) -> Self {
         self.properties.insert(key.into(), value.into());
         self
@@ -964,6 +1001,7 @@ impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
 }
 
 impl<'a, T: SerializeMessage + Sized, Exe: Executor> MessageBuilder<'a, T, Exe> {
+    /// sends the message through the producer that created it
     pub async fn send(self) -> Result<SendFuture, Error> {
         let MessageBuilder {
             producer,

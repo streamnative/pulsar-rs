@@ -37,19 +37,27 @@ use url::Url;
 #[derive(Clone, Default, Debug)]
 pub struct ConsumerOptions {
     pub priority_level: Option<i32>,
+    /// Signal wether the subscription should be backed by a
+    /// durable cursor or not
     pub durable: Option<bool>,
+    /// If specified, the subscription will position the cursor
+    /// markd-delete position on the particular message id and
+    /// will send messages from that point
     pub start_message_id: Option<MessageIdData>,
+    /// Add optional metadata key=value to this consumer
     pub metadata: BTreeMap<String, String>,
     pub read_compacted: Option<bool>,
     pub schema: Option<Schema>,
+    /// Signal whether the subscription will initialize on latest
+    /// or not -- earliest
     pub initial_position: Option<i32>,
 }
 
 #[derive(Debug, Clone)]
 pub struct DeadLetterPolicy {
-    //Maximum number of times that a message will be redelivered before being sent to the dead letter queue.
+    /// Maximum number of times that a message will be redelivered before being sent to the dead letter queue.
     pub max_redeliver_count: usize,
-    //Name of the dead topic where the failing messages will be sent.
+    /// Name of the dead topic where the failing messages will be sent.
     pub dead_letter_topic: String,
 }
 
@@ -91,10 +99,12 @@ pub struct Consumer<T: DeserializeMessage, Exe: Executor> {
     inner: InnerConsumer<T, Exe>,
 }
 impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
+    /// creates a [ConsumerBuilder] from a client instance
     pub fn builder(pulsar: &Pulsar<Exe>) -> ConsumerBuilder<Exe> {
         ConsumerBuilder::new(pulsar)
     }
 
+    /// test that the connections to the Pulsar brokers are still valid
     pub async fn check_connection(&self) -> Result<(), Error> {
         match &self.inner {
             InnerConsumer::Single(c) => c.check_connection().await,
@@ -102,6 +112,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         }
     }
 
+    /// acknowledges a single message
     pub async fn ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         match &mut self.inner {
             InnerConsumer::Single(c) => c.ack(msg).await,
@@ -109,6 +120,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         }
     }
 
+    /// acknowledges a message and all the preceding messages
     pub async fn cumulative_ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         match &mut self.inner {
             InnerConsumer::Single(c) => c.cumulative_ack(msg).await,
@@ -116,6 +128,9 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         }
     }
 
+    /// negative acknowledgement
+    ///
+    /// the message will be sent again on the subscription
     pub async fn nack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         match &mut self.inner {
             InnerConsumer::Single(c) => c.nack(msg).await,
@@ -191,6 +206,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         Ok(())
     }
 
+    /// returns the list of topics this consumer is subscribed on
     pub fn topics(&self) -> Vec<String> {
         match &self.inner {
             InnerConsumer::Single(c) => vec![c.topic.clone()],
@@ -198,6 +214,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         }
     }
 
+    /// returns a list of broker URLs this consumer is connnected to
     pub fn connections(&self) -> Vec<&Url> {
         match &self.inner {
             InnerConsumer::Single(c) => vec![c.connection.url()],
@@ -211,6 +228,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         }
     }
 
+    /// returns the consumer's configuration options
     pub fn options(&self) -> &ConsumerOptions {
         match &self.inner {
             InnerConsumer::Single(c) => &c.config.options,
@@ -218,6 +236,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         }
     }
 
+    /// returns the consumer's dead letter policy options
     pub fn dead_letter_policy(&self) -> Option<&DeadLetterPolicy> {
         match &self.inner {
             InnerConsumer::Single(c) => c.dead_letter_policy.as_ref(),
@@ -225,6 +244,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         }
     }
 
+    /// returns the consumer's subscription name
     pub fn subscription(&self) -> &str {
         match &self.inner {
             InnerConsumer::Single(c) => &c.config.subscription,
@@ -232,6 +252,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         }
     }
 
+    /// returns the consumer's subscription type
     pub fn sub_type(&self) -> SubType {
         match &self.inner {
             InnerConsumer::Single(c) => c.config.sub_type,
@@ -239,6 +260,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         }
     }
 
+    /// returns the consumer's batch size
     pub fn batch_size(&self) -> Option<u32> {
         match &self.inner {
             InnerConsumer::Single(c) => c.config.batch_size,
@@ -246,6 +268,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         }
     }
 
+    /// returns the consumer's name
     pub fn consumer_name(&self) -> Option<&str> {
         match &self.inner {
             InnerConsumer::Single(c) => &c.config.consumer_name,
@@ -255,6 +278,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         .map(|s| s.as_str())
     }
 
+    /// returns the consumer's list of ids
     pub fn consumer_id(&self) -> Vec<u64> {
         match &self.inner {
             InnerConsumer::Single(c) => vec![c.consumer_id],
@@ -262,6 +286,10 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         }
     }
 
+    /// returns the consumer's redelivery delay
+    ///
+    /// if messages are not acknowledged before this delay, they will be sent
+    /// again on the subscription
     pub fn unacked_message_redelivery_delay(&self) -> Option<Duration> {
         match &self.inner {
             InnerConsumer::Single(c) => c.config.unacked_message_redelivery_delay,
@@ -269,6 +297,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         }
     }
 
+    /// returns the date of the last message reception
     pub fn last_message_received(&self) -> Option<DateTime<Utc>> {
         match &self.inner {
             InnerConsumer::Single(c) => c.last_message_received(),
@@ -276,6 +305,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         }
     }
 
+    /// returns the current number of messages received
     pub fn messages_received(&self) -> u64 {
         match &self.inner {
             InnerConsumer::Single(c) => c.messages_received(),
@@ -1183,6 +1213,9 @@ impl Iterator for BatchedMessageIterator {
     }
 }
 
+/// Builder structure for consumers
+///
+/// This is the main way to create a [Consumer]
 #[derive(Clone)]
 pub struct ConsumerBuilder<Exe: Executor> {
     pulsar: Pulsar<Exe>,
@@ -1201,6 +1234,7 @@ pub struct ConsumerBuilder<Exe: Executor> {
 }
 
 impl<Exe: Executor> ConsumerBuilder<Exe> {
+    /// Creates a new [ConsumerBuilder] from an existing client instance
     pub fn new(pulsar: &Pulsar<Exe>) -> Self {
         ConsumerBuilder {
             pulsar: pulsar.clone(),
@@ -1220,6 +1254,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
         }
     }
 
+    /// sets the consumer's topic or add one to the list of topics
     pub fn with_topic<S: Into<String>>(mut self, topic: S) -> ConsumerBuilder<Exe> {
         match &mut self.topics {
             Some(topics) => topics.push(topic.into()),
@@ -1228,6 +1263,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
         self
     }
 
+    /// adds a list of topics to the future consumer
     pub fn with_topics<S: AsRef<str>, I: IntoIterator<Item = S>>(
         mut self,
         topics: I,
@@ -1242,16 +1278,20 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
         self
     }
 
+    /// sets up a consumer that will listen on all topics matching the regular
+    /// expression
     pub fn with_topic_regex(mut self, regex: Regex) -> ConsumerBuilder<Exe> {
         self.topic_regex = Some(regex);
         self
     }
 
+    /// sets the subscription's name
     pub fn with_subscription<S: Into<String>>(mut self, subscription: S) -> Self {
         self.subscription = Some(subscription.into());
         self
     }
 
+    /// sets the kind of subscription
     pub fn with_subscription_type(mut self, subscription_type: SubType) -> Self {
         self.subscription_type = Some(subscription_type);
         self
@@ -1272,26 +1312,36 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
         self
     }
 
+    /// sets the consumer id for this consumer
     pub fn with_consumer_id(mut self, consumer_id: u64) -> Self {
         self.consumer_id = Some(consumer_id);
         self
     }
 
+    /// sets the consumer's name
     pub fn with_consumer_name<S: Into<String>>(mut self, consumer_name: S) -> Self {
         self.consumer_name = Some(consumer_name.into());
         self
     }
 
+    /// sets the batch size
+    ///
+    /// batch messages containing more than the configured batch size will
+    /// not be sent by Pulsar
+    ///
+    /// default value: 1000
     pub fn with_batch_size(mut self, batch_size: u32) -> Self {
         self.batch_size = Some(batch_size);
         self
     }
 
+    /// sets consumer options
     pub fn with_options(mut self, options: ConsumerOptions) -> Self {
         self.consumer_options = Some(options);
         self
     }
 
+    /// sets the dead letter policy
     pub fn with_dead_letter_policy(mut self, dead_letter_policy: DeadLetterPolicy) -> Self {
         self.dead_letter_policy = Some(dead_letter_policy);
         self
@@ -1305,6 +1355,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
         self
     }
 
+    /// creates a [Consumer] from this builder
     pub async fn build<T: DeserializeMessage>(self) -> Result<Consumer<T, Exe>, Error> {
         let ConsumerBuilder {
             pulsar,
@@ -1421,15 +1472,28 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
     }
 }
 
+/// the complete configuration of a consumer
 #[derive(Debug, Clone, Default)]
 pub struct ConsumerConfig {
+    /// subscription name
     subscription: String,
+    /// subscription type
+    ///
+    /// default: Shared
     sub_type: SubType,
+    /// maximum size for batched messages
+    ///
+    /// default: 1000
     batch_size: Option<u32>,
+    /// name of the consumer
     consumer_name: Option<String>,
+    /// numerical id of the consumer
     consumer_id: Option<u64>,
+    /// time after which unacked messages will be sent again
     unacked_message_redelivery_delay: Option<Duration>,
+    /// consumer options
     options: ConsumerOptions,
+    /// dead letter policy
     dead_letter_policy: Option<DeadLetterPolicy>,
 }
 
@@ -1609,24 +1673,31 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
         }
     }
 
-    pub fn config(&self) -> &ConsumerConfig {
+    fn config(&self) -> &ConsumerConfig {
         &self.config
     }
 }
 
+/// a message received by a consumer
+///
+/// it is generic over the type it can be deserialized to
 pub struct Message<T> {
+    /// origin topic of the message
     pub topic: String,
+    /// contains the message's data and other metadata
     pub payload: Payload,
     message_id: MessageData,
     _phantom: PhantomData<T>,
 }
 
 impl<T> Message<T> {
+    /// Pulsar metadata for the message
     pub fn metadata(&self) -> &MessageMetadata {
         &self.payload.metadata
     }
 }
 impl<T: DeserializeMessage> Message<T> {
+    /// directly deserialize a message
     pub fn deserialize(&self) -> T::Output {
         T::deserialize_message(&self.payload)
     }

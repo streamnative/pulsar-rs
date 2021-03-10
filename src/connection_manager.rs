@@ -70,6 +70,7 @@ impl std::default::Default for OperationRetryOptions {
 /// configuration for TLS connections
 #[derive(Debug, Clone, Default)]
 pub struct TlsOptions {
+    /// contains a list of PEM encoded certificates
     pub certificate_chain: Option<Vec<u8>>,
 }
 

@@ -18,7 +18,9 @@ use futures::StreamExt;
 
 /// Helper trait for consumer deserialization
 pub trait DeserializeMessage {
+    /// type produced from the message
     type Output: Sized;
+    /// deserialize method that will be called by the consumer
     fn deserialize_message(payload: &Payload) -> Self::Output;
 }
 
@@ -40,6 +42,7 @@ impl DeserializeMessage for String {
 
 /// Helper trait for message serialization
 pub trait SerializeMessage {
+    /// serialize method that will be called by the producer
     fn serialize_message(input: Self) -> Result<producer::Message, Error>;
 }
 
@@ -185,6 +188,19 @@ impl<Exe: Executor> Pulsar<Exe> {
     }
 
     /// creates a new client builder
+    ///
+    /// ```rust,no_run
+    /// use pulsar::{Pulsar, TokioExecutor};
+    ///
+    /// # async fn run() -> Result<(), pulsar::Error> {
+    /// let addr = "pulsar://127.0.0.1:6650";
+    /// // you can indicate which executor you use as the return type of client creation
+    /// let pulsar: Pulsar<_> = Pulsar::builder(addr, TokioExecutor)
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn builder<S: Into<String>>(url: S, executor: Exe) -> PulsarBuilder<Exe> {
         PulsarBuilder {
             url: url.into(),
@@ -236,6 +252,13 @@ impl<Exe: Executor> Pulsar<Exe> {
     }
 
     /// gets the address of a broker handling the topic
+    ///
+    /// ```rust,no_run
+    /// # async fn run(pulsar: pulsar::Pulsar<pulsar::TokioExecutor>) -> Result<(), pulsar::Error> {
+    /// let broker_address = pulsar.lookup_topic("persistent://public/default/test").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn lookup_topic<S: Into<String>>(&self, topic: S) -> Result<BrokerAddress, Error> {
         self.service_discovery
             .lookup_topic(topic)
@@ -244,6 +267,13 @@ impl<Exe: Executor> Pulsar<Exe> {
     }
 
     /// gets the number of partitions for a partitioned topic
+    ///
+    /// ```rust,no_run
+    /// # async fn run(pulsar: pulsar::Pulsar<pulsar::TokioExecutor>) -> Result<(), pulsar::Error> {
+    /// let nb = pulsar.lookup_partitioned_topic_number("persistent://public/default/test").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn lookup_partitioned_topic_number<S: Into<String>>(
         &self,
         topic: S,
@@ -257,6 +287,13 @@ impl<Exe: Executor> Pulsar<Exe> {
     /// gets the address of brokers handling the topic's partitions. If the topic is not
     /// a partitioned topic, result will be a single element containing the topic and address
     /// of the non-partitioned topic provided.
+    ///
+    /// ```rust,no_run
+    /// # async fn run(pulsar: pulsar::Pulsar<pulsar::TokioExecutor>) -> Result<(), pulsar::Error> {
+    /// let broker_addresses = pulsar.lookup_partitioned_topic("persistent://public/default/test").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn lookup_partitioned_topic<S: Into<String>>(
         &self,
         topic: S,
@@ -268,6 +305,15 @@ impl<Exe: Executor> Pulsar<Exe> {
     }
 
     /// gets the list of topics from a namespace
+    ///
+    /// ```rust,no_run
+    /// use pulsar::message::proto::command_get_topics_of_namespace::Mode;
+    ///
+    /// # async fn run(pulsar: pulsar::Pulsar<pulsar::TokioExecutor>) -> Result<(), pulsar::Error> {
+    /// let topics = pulsar.get_topics_of_namespace("public/default".to_string(), Mode::Persistent).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn get_topics_of_namespace(
         &self,
         namespace: String,
@@ -285,6 +331,15 @@ impl<Exe: Executor> Pulsar<Exe> {
     ///
     /// This function will lazily initialize and re-use producers as needed. For better
     /// control over producers, creating and using a `Producer` is recommended.
+    ///
+    /// ```rust,no_run
+    /// use pulsar::message::proto::command_get_topics_of_namespace::Mode;
+    ///
+    /// # async fn run(pulsar: pulsar::Pulsar<pulsar::TokioExecutor>) -> Result<(), pulsar::Error> {
+    /// let topics = pulsar.send("persistent://public/default/test", "hello world!").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn send<S: Into<String>, M: SerializeMessage + Sized>(
         &self,
         topic: S,
@@ -348,7 +403,7 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
         self
     }
 
-    /// add a custom certificate chain to authenticate the server in TLS connectioons
+    /// add a custom certificate chain to authenticate the server in TLS connections
     pub fn with_certificate_chain(mut self, certificate_chain: Vec<u8>) -> Self {
         self.tls_options = Some(TlsOptions {
             certificate_chain: Some(certificate_chain),
@@ -356,7 +411,7 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
         self
     }
 
-    /// add a custom certificate chain from a file to authenticate the server in TLS connectioons
+    /// add a custom certificate chain from a file to authenticate the server in TLS connections
     pub fn with_certificate_chain_file<P: AsRef<std::path::Path>>(
         self,
         path: P,

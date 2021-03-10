@@ -44,6 +44,7 @@ pub(crate) enum Register {
     },
 }
 
+/// identifier for a message
 #[derive(Debug, Clone, PartialEq, Ord, PartialOrd, Eq)]
 pub enum RequestKey {
     RequestId(u64),
@@ -54,7 +55,9 @@ pub enum RequestKey {
 /// Authentication parameters
 #[derive(Clone)]
 pub struct Authentication {
+    /// Authentication kid. Use "token" for JWT
     pub name: String,
+    /// Authentication data
     pub data: Vec<u8>,
 }
 

@@ -1,23 +1,35 @@
+//! executor abstraction
+//!
+//! this crate is compatible with Tokio and async-std, by assembling  them
+//! under the [Executor] trait
 use futures::{Future, Stream};
 use std::{ops::Deref, pin::Pin, sync::Arc};
 
+/// indicates which executor is used
 pub enum ExecutorKind {
+    /// Tokio executor
     Tokio,
+    /// async-std executor
     AsyncStd,
 }
 
 /// Wrapper trait abstracting the Tokio and async-std executors
 pub trait Executor: Clone + Send + Sync + 'static {
+    /// spawns a new task
     #[allow(clippy::clippy::result_unit_err)]
     fn spawn(&self, f: Pin<Box<dyn Future<Output = ()> + Send>>) -> Result<(), ()>;
+    /// spawns a new blocking task
     fn spawn_blocking<F, Res>(&self, f: F) -> JoinHandle<Res>
     where
         F: FnOnce() -> Res + Send + 'static,
         Res: Send + 'static;
 
+    /// returns a Stream that will produce at regular intervals
     fn interval(&self, duration: std::time::Duration) -> Interval;
+    /// waits for a configurable time
     fn delay(&self, duration: std::time::Duration) -> Delay;
 
+    /// returns which executor is currently used
     // test at runtime and manually choose the implementation
     // because we cannot (yet) have async trait methods,
     // so we cannot move the TCP connection here
@@ -117,9 +129,12 @@ impl<Exe: Executor> Executor for Arc<Exe> {
     }
 }
 
+/// future returned by [Executor::spawn_blocking] to await on the task's result
 pub enum JoinHandle<T> {
+    /// wrapper for tokio's `JoinHandle`
     #[cfg(feature = "tokio-runtime")]
     Tokio(tokio::task::JoinHandle<T>),
+    /// wrapper for async-std's `JoinHandle`
     #[cfg(feature = "async-std-runtime")]
     AsyncStd(async_std::task::JoinHandle<T>),
     // here to avoid a compilation error since T is not used
@@ -151,9 +166,12 @@ impl<T> Future for JoinHandle<T> {
     }
 }
 
+/// a `Stream` producing a `()` at rgular time intervals
 pub enum Interval {
+    /// wrapper for tokio's interval
     #[cfg(feature = "tokio-runtime")]
     Tokio(tokio::time::Interval),
+    /// wrapper for async-std's interval
     #[cfg(feature = "async-std-runtime")]
     AsyncStd(async_std::stream::Interval),
     #[cfg(all(not(feature = "tokio-runtime"), not(feature = "async-std-runtime")))]
@@ -188,9 +206,12 @@ impl Stream for Interval {
     }
 }
 
+/// a future producing a `()` after some time
 pub enum Delay {
+    /// wrapper around tokio's `Sleep`
     #[cfg(feature = "tokio-runtime")]
     Tokio(tokio::time::Sleep),
+    /// wrapper around async-std's `Delay`
     #[cfg(feature = "async-std-runtime")]
     AsyncStd(Pin<Box<dyn Future<Output = ()> + Send>>),
 }

@@ -13,13 +13,20 @@ pub use self::proto::MessageMetadata as Metadata;
 
 use self::proto::*;
 
+/// Pulsar binary message
+///
+/// this structure holds any command sent to pulsar, like looking up a topic or
+/// subscribing on a topic
 #[derive(Debug, Clone)]
 pub struct Message {
+    /// Basic pulsar command, as defined in Pulsar's protobuf file
     pub command: BaseCommand,
+    /// payload for topic messages
     pub payload: Option<Payload>,
 }
 
 impl Message {
+    /// returns the message's RequestKey if present
     pub fn request_key(&self) -> Option<RequestKey> {
         match &self.command {
             BaseCommand {
@@ -195,6 +202,7 @@ impl Message {
     }
 }
 
+/// tokio and async-std codec for Pulsar messages
 pub struct Codec;
 
 #[cfg(feature = "tokio-runtime")]
@@ -404,9 +412,12 @@ impl asynchronous_codec::Decoder for Codec {
     }
 }
 
+/// message payload
 #[derive(Debug, Clone)]
 pub struct Payload {
+    /// message metadata added by Pulsar
     pub metadata: Metadata,
+    /// raw message data
     pub data: Vec<u8>,
 }
 
