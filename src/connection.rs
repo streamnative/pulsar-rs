@@ -50,6 +50,7 @@ pub enum RequestKey {
     RequestId(u64),
     ProducerSend { producer_id: u64, sequence_id: u64 },
     Consumer { consumer_id: u64 },
+    CloseConsumer { consumer_id: u64, request_id: u64 },
 }
 
 /// Authentication parameters
@@ -169,6 +170,23 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> 
                                 .get_mut(&consumer_id)
                                 .map(move |consumer| consumer.unbounded_send(msg));
                         }
+                        Some(RequestKey::CloseConsumer { consumer_id, request_id }) => {
+                            // FIXME: could the registration still be in queue while we get the
+                            // CloseConsumer message?
+                            if let Some(resolver) = self.pending_requests.remove(&RequestKey::RequestId(request_id)) {
+                                // We don't care if the receiver has dropped their future
+                                let _ = resolver.send(msg);
+                            } else {
+                                let res = self
+                                    .consumers
+                                    .get_mut(&consumer_id)
+                                    .map(move |consumer| consumer.unbounded_send(msg));
+
+                                if !res.as_ref().map(|r| r.is_ok()).unwrap_or(false) {
+                                    error!("ConnectionReceiver: error transmitting message to consumer: {:?}", res);
+                                }
+                            }
+                        },
                         None => {
                             warn!(
                                 "Received unexpected message; dropping. Message {:?}",

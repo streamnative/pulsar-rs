@@ -71,10 +71,6 @@ impl Message {
                 ..
             }
             | BaseCommand {
-                close_consumer: Some(CommandCloseConsumer { request_id, .. }),
-                ..
-            }
-            | BaseCommand {
                 success: Some(CommandSuccess { request_id, .. }),
                 ..
             }
@@ -172,6 +168,13 @@ impl Message {
                 ..
             } => Some(RequestKey::Consumer {
                 consumer_id: *consumer_id,
+            }),
+            BaseCommand {
+                close_consumer: Some(CommandCloseConsumer { consumer_id, request_id }),
+                ..
+            } => Some(RequestKey::CloseConsumer {
+                consumer_id: *consumer_id,
+                request_id: *request_id
             }),
             BaseCommand {
                 connect: Some(_), ..
