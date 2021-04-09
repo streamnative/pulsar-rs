@@ -170,10 +170,16 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> 
                                 .get_mut(&consumer_id)
                                 .map(move |consumer| consumer.unbounded_send(msg));
                         }
-                        Some(RequestKey::CloseConsumer { consumer_id, request_id }) => {
+                        Some(RequestKey::CloseConsumer {
+                            consumer_id,
+                            request_id,
+                        }) => {
                             // FIXME: could the registration still be in queue while we get the
                             // CloseConsumer message?
-                            if let Some(resolver) = self.pending_requests.remove(&RequestKey::RequestId(request_id)) {
+                            if let Some(resolver) = self
+                                .pending_requests
+                                .remove(&RequestKey::RequestId(request_id))
+                            {
                                 // We don't care if the receiver has dropped their future
                                 let _ = resolver.send(msg);
                             } else {
@@ -186,7 +192,7 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> 
                                     error!("ConnectionReceiver: error transmitting message to consumer: {:?}", res);
                                 }
                             }
-                        },
+                        }
                         None => {
                             warn!(
                                 "Received unexpected message; dropping. Message {:?}",
