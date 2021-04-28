@@ -3,6 +3,7 @@ use futures::channel::oneshot;
 use futures::future::try_join_all;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::Write;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use crate::client::SerializeMessage;
@@ -14,7 +15,6 @@ use crate::message::BatchedMessage;
 use crate::{Error, Pulsar};
 use futures::task::{Context, Poll};
 use futures::Future;
-use tokio::macros::support::Pin;
 
 type ProducerId = u64;
 type ProducerName = String;
