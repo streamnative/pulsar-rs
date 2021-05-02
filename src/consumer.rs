@@ -1147,8 +1147,8 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct MessageData {
-    id: proto::MessageIdData,
+pub struct MessageData {
+    pub id: proto::MessageIdData,
     batch_size: Option<i32>,
 }
 
@@ -1686,7 +1686,8 @@ pub struct Message<T> {
     pub topic: String,
     /// contains the message's data and other metadata
     pub payload: Payload,
-    message_id: MessageData,
+    /// contains the message's id and batch size data
+    pub message_id: MessageData,
     _phantom: PhantomData<T>,
 }
 
@@ -1694,6 +1695,11 @@ impl<T> Message<T> {
     /// Pulsar metadata for the message
     pub fn metadata(&self) -> &MessageMetadata {
         &self.payload.metadata
+    }
+
+    /// Get Pulsar message id for the message
+    pub fn message_id(&self) -> &proto::MessageIdData {
+        &self.message_id.id
     }
 }
 impl<T: DeserializeMessage> Message<T> {

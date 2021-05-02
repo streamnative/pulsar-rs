@@ -56,6 +56,7 @@ async fn main() -> Result<(), pulsar::Error> {
     while let Some(msg) = consumer.try_next().await? {
         consumer.ack(&msg).await?;
         log::info!("metadata: {:?}", msg.metadata());
+        log::info!("id: {:?}", msg.message_id());
         let data = match msg.deserialize() {
             Ok(data) => data,
             Err(e) => {
