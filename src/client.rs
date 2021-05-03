@@ -7,7 +7,7 @@ use crate::connection::Authentication;
 use crate::connection_manager::{
     BrokerAddress, ConnectionManager, ConnectionRetryOptions, OperationRetryOptions, TlsOptions,
 };
-use crate::consumer::ConsumerBuilder;
+use crate::consumer::{ConsumerBuilder, ConsumerOptions, InitialPosition};
 use crate::error::Error;
 use crate::executor::Executor;
 use crate::message::proto::{self, CommandSendReceipt};
@@ -277,6 +277,30 @@ impl<Exe: Executor> Pulsar<Exe> {
     /// ```
     pub fn producer(&self) -> ProducerBuilder<Exe> {
         ProducerBuilder::new(self)
+    }
+
+    /// creates a reader builder
+    /// ```rust, no_run
+    /// use pulsar::reader::Reader;
+    ///
+    /// # async fn run(pulsar: pulsar::Pulsar<pulsar::TokioExecutor>) -> Result<(), pulsar::Error> {
+    /// # type TestData = String;
+    /// let mut reader: Reader<TestData, _> = pulsar
+    ///     .reader()
+    ///     .with_topic("non-persistent://public/default/test")
+    ///     .with_consumer_name("my_reader")
+    ///     .into_reader()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn reader(&self) -> ConsumerBuilder<Exe> {
+        // this makes it exactly the same like the consumer() method though
+        ConsumerBuilder::new(self).with_options(
+            ConsumerOptions::default()
+                .durable(false)
+                .with_initial_position(InitialPosition::Latest),
+        )
     }
 
     /// gets the address of a broker handling the topic

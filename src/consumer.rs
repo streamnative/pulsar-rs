@@ -26,6 +26,7 @@ use crate::message::{
     BatchedMessage, Message as RawMessage, Metadata, Payload,
 };
 use crate::proto::{BaseCommand, CommandCloseConsumer};
+use crate::reader::{Reader, State};
 use crate::{BrokerAddress, DeserializeMessage, Pulsar};
 use core::iter;
 use rand::distributions::Alphanumeric;
@@ -59,6 +60,44 @@ pub struct ConsumerOptions {
     /// }
     /// ```
     pub initial_position: InitialPosition,
+}
+
+impl ConsumerOptions {
+    /// within options, sets the priority level
+    pub fn with_priority_level(mut self, priority_level: i32) -> Self {
+        self.priority_level = Some(priority_level);
+        self
+    }
+
+    pub fn durable(mut self, durable: bool) -> Self {
+        self.durable = Some(durable);
+        self
+    }
+
+    pub fn starting_on_message(mut self, message_id_data: MessageIdData) -> Self {
+        self.start_message_id = Some(message_id_data);
+        self
+    }
+
+    pub fn with_metadata(mut self, metadata: BTreeMap<String, String>) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
+    pub fn read_compacted(mut self, read_compacted: bool) -> Self {
+        self.read_compacted = Some(read_compacted);
+        self
+    }
+
+    pub fn with_schema(mut self, schema: Schema) -> Self {
+        self.schema = Some(schema);
+        self
+    }
+
+    pub fn with_initial_position(mut self, initial_position: InitialPosition) -> Self {
+        self.initial_position = initial_position;
+        self
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -240,7 +279,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
     /// returns the list of topics this consumer is subscribed on
     pub fn topics(&self) -> Vec<String> {
         match &self.inner {
-            InnerConsumer::Single(c) => vec![c.topic.clone()],
+            InnerConsumer::Single(c) => vec![c.topic()],
             InnerConsumer::Multi(c) => c.topics(),
         }
     }
@@ -372,15 +411,16 @@ enum InnerConsumer<T: DeserializeMessage, Exe: Executor> {
 
 type MessageIdDataReceiver = mpsc::Receiver<Result<(proto::MessageIdData, Payload), Error>>;
 
+// this is entirely public for use in reader.rs
 pub(crate) struct TopicConsumer<T: DeserializeMessage, Exe: Executor> {
-    consumer_id: u64,
-    config: ConsumerConfig,
+    pub(crate) consumer_id: u64,
+    pub(crate) config: ConsumerConfig,
     topic: String,
     messages: Pin<Box<MessageIdDataReceiver>>,
     engine_tx: mpsc::UnboundedSender<EngineMessage<Exe>>,
     #[allow(unused)]
     data_type: PhantomData<fn(Payload) -> T::Output>,
-    dead_letter_policy: Option<DeadLetterPolicy>,
+    pub(crate) dead_letter_policy: Option<DeadLetterPolicy>,
     last_message_received: Option<DateTime<Utc>>,
     messages_received: u64,
 }
@@ -570,11 +610,11 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         })
     }
 
-    fn topic(&self) -> &str {
-        &self.topic
+    pub fn topic(&self) -> String {
+        self.topic.clone()
     }
 
-    async fn connection(&mut self) -> Result<Arc<Connection<Exe>>, Error> {
+    pub async fn connection(&mut self) -> Result<Arc<Connection<Exe>>, Error> {
         let (resolver, response) = oneshot::channel();
         self.engine_tx
             .send(EngineMessage::GetConnection(resolver))
@@ -587,18 +627,22 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         })
     }
 
-    async fn check_connection(&mut self) -> Result<(), Error> {
+    pub async fn check_connection(&mut self) -> Result<(), Error> {
         let conn = self.connection().await?;
         info!("check connection for id {}", conn.id());
         conn.sender().send_ping().await?;
         Ok(())
     }
 
-    async fn ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
+    pub async fn ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         self.engine_tx
             .send(EngineMessage::Ack(msg.message_id.clone(), false))
             .await?;
         Ok(())
+    }
+
+    pub(crate) fn acker(&self) -> mpsc::UnboundedSender<EngineMessage<Exe>> {
+        self.engine_tx.clone()
     }
 
     async fn cumulative_ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
@@ -615,7 +659,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         Ok(())
     }
 
-    async fn seek(
+    pub async fn seek(
         &mut self,
         message_id: Option<MessageIdData>,
         timestamp: Option<u64>,
@@ -629,11 +673,11 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         Ok(())
     }
 
-    fn last_message_received(&self) -> Option<DateTime<Utc>> {
+    pub fn last_message_received(&self) -> Option<DateTime<Utc>> {
         self.last_message_received
     }
 
-    fn messages_received(&self) -> u64 {
+    pub fn messages_received(&self) -> u64 {
         self.messages_received
     }
 
@@ -691,7 +735,7 @@ struct ConsumerEngine<Exe: Executor> {
     _drop_signal: oneshot::Sender<()>,
 }
 
-enum EngineMessage<Exe: Executor> {
+pub(crate) enum EngineMessage<Exe: Executor> {
     Ack(MessageData, bool),
     Nack(MessageData),
     UnackedRedelivery,
@@ -1299,7 +1343,7 @@ impl Iterator for BatchedMessageIterator {
 
 /// Builder structure for consumers
 ///
-/// This is the main way to create a [Consumer]
+/// This is the main way to create a [Consumer] or a [Reader]
 #[derive(Clone)]
 pub struct ConsumerBuilder<Exe: Executor> {
     pulsar: Pulsar<Exe>,
@@ -1439,8 +1483,11 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
         self
     }
 
-    /// creates a [Consumer] from this builder
-    pub async fn build<T: DeserializeMessage>(self) -> Result<Consumer<T, Exe>, Error> {
+    // Checks the builder for inconsistencies
+    // returns a config and a list of topics with associated brokers
+    async fn validate<T: DeserializeMessage>(
+        self,
+    ) -> Result<(ConsumerConfig, Vec<(String, BrokerAddress)>), Error> {
         let ConsumerBuilder {
             pulsar,
             topics,
@@ -1451,10 +1498,10 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
             mut consumer_name,
             batch_size,
             unacked_message_resend_delay,
-            namespace,
-            topic_refresh,
             consumer_options,
             dead_letter_policy,
+            namespace: _,
+            topic_refresh: _,
         } = self;
 
         if consumer_name.is_none() {
@@ -1523,12 +1570,18 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
             options: consumer_options.unwrap_or_default(),
             dead_letter_policy,
         };
+        Ok((config, topics))
+    }
 
-        let consumers =
-            try_join_all(topics.into_iter().map(|(topic, addr)| {
-                TopicConsumer::new(pulsar.clone(), topic, addr, config.clone())
-            }))
-            .await?;
+    /// creates a [Consumer] from this builder
+    pub async fn build<T: DeserializeMessage>(self) -> Result<Consumer<T, Exe>, Error> {
+        // would this clone() consume too much memory?
+        let (config, joined_topics) = self.clone().validate::<T>().await?;
+
+        let consumers = try_join_all(joined_topics.into_iter().map(|(topic, addr)| {
+            TopicConsumer::new(self.pulsar.clone(), topic, addr, config.clone())
+        }))
+        .await?;
 
         let consumer = if consumers.len() == 1 {
             let consumer = consumers.into_iter().next().unwrap();
@@ -1539,12 +1592,16 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
                 .map(|c| (c.topic().to_owned(), Box::pin(c)))
                 .collect();
             let topics = consumers.keys().cloned().collect();
-            let topic_refresh = topic_refresh.unwrap_or_else(|| Duration::from_secs(30));
-            let refresh = Box::pin(pulsar.executor.interval(topic_refresh).map(drop));
+            let topic_refresh = self
+                .topic_refresh
+                .unwrap_or_else(|| Duration::from_secs(30));
+            let refresh = Box::pin(self.pulsar.executor.interval(topic_refresh).map(drop));
             let mut consumer = MultiTopicConsumer {
-                namespace: namespace.unwrap_or_else(|| "public/default".to_string()),
-                topic_regex,
-                pulsar,
+                namespace: self
+                    .namespace
+                    .unwrap_or_else(|| "public/default".to_string()),
+                topic_regex: self.topic_regex,
+                pulsar: self.pulsar,
                 consumers,
                 topics,
                 new_consumers: None,
@@ -1562,29 +1619,54 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
         };
         Ok(Consumer { inner: consumer })
     }
+
+    /// creates a [Reader] from this builder
+    pub async fn into_reader<T: DeserializeMessage>(self) -> Result<Reader<T, Exe>, Error> {
+        // would this clone() consume too much memory?
+        let (mut config, mut joined_topics) = self.clone().validate::<T>().await?;
+
+        // the validate() function defaults sub_type to SubType::Shared,
+        // but a reader's subscription is exclusive
+        warn!("Subscription Type for a reader is `Exclusive`. Resetting.");
+        config.sub_type = SubType::Exclusive;
+
+        if self.topics.unwrap().len() > 1 {
+            return Err(Error::Custom(
+                "Unable to create a reader - one topic max".to_string(),
+            ));
+        }
+
+        let (topic, addr) = joined_topics.pop().unwrap();
+        let consumer = TopicConsumer::new(self.pulsar.clone(), topic, addr, config.clone()).await?;
+
+        Ok(Reader {
+            consumer,
+            state: Some(State::PollingConsumer),
+        })
+    }
 }
 
 /// the complete configuration of a consumer
 #[derive(Debug, Clone, Default)]
-struct ConsumerConfig {
+pub(crate) struct ConsumerConfig {
     /// subscription name
-    subscription: String,
+    pub(crate) subscription: String,
     /// subscription type
     ///
     /// default: Shared
-    sub_type: SubType,
+    pub(crate) sub_type: SubType,
     /// maximum size for batched messages
     ///
     /// default: 1000
-    batch_size: Option<u32>,
+    pub(crate) batch_size: Option<u32>,
     /// name of the consumer
-    consumer_name: Option<String>,
+    pub(crate) consumer_name: Option<String>,
     /// numerical id of the consumer
     consumer_id: Option<u64>,
     /// time after which unacked messages will be sent again
     unacked_message_redelivery_delay: Option<Duration>,
     /// consumer options
-    options: ConsumerOptions,
+    pub(crate) options: ConsumerOptions,
     /// dead letter policy
     dead_letter_policy: Option<DeadLetterPolicy>,
 }

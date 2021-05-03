@@ -132,6 +132,7 @@ pub enum ConsumerError {
     Io(io::Error),
     ChannelFull,
     Closed,
+    BuildError,
 }
 
 impl From<ConnectionError> for ConsumerError {
@@ -170,6 +171,10 @@ impl fmt::Display for ConsumerError {
                 f,
                 "cannot send message to the consumer engine: the channel is closed"
             ),
+            ConsumerError::BuildError => write!(
+                f,
+                "Error while building the consumer."
+            )
         }
     }
 }
