@@ -174,6 +174,7 @@ pub mod error;
 pub mod executor;
 pub mod message;
 pub mod producer;
+pub mod reader;
 mod service_discovery;
 
 #[cfg(test)]
