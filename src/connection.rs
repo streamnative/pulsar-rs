@@ -300,10 +300,16 @@ impl<Exe: Executor> ConnectionSender<Exe> {
                     Either::Left((res, _)) => res
                         .map_err(|oneshot::Canceled| ConnectionError::Disconnected)
                         .map(move |_| trace!("received pong")),
-                    Either::Right(_) => Err(ConnectionError::Io(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "timeout when sending ping to the Pulsar server",
-                    ))),
+                    Either::Right(_) => {
+                        self.error.set(ConnectionError::Io(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "timeout when sending ping to the Pulsar server",
+                        )));
+                        Err(ConnectionError::Io(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "timeout when sending ping to the Pulsar server",
+                        )))
+                    }
                 }
             }
             _ => Err(ConnectionError::Disconnected),
