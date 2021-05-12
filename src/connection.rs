@@ -285,10 +285,20 @@ impl<Exe: Executor> ConnectionSender<Exe> {
                 .unbounded_send(Register::Ping { resolver }),
             self.tx.unbounded_send(messages::ping()),
         ) {
-            (Ok(_), Ok(_)) => response
-                .await
-                .map_err(|oneshot::Canceled| ConnectionError::Disconnected)
-                .map(move |_| trace!("received pong")),
+            (Ok(_), Ok(_)) => {
+                let delay_f = self.executor.delay(self.operation_timeout);
+                pin_mut!(response);
+                pin_mut!(delay_f);
+
+                match select(response, delay_f).await {
+                    Either::Left((res, _)) => res.map_err(|oneshot::Canceled| ConnectionError::Disconnected)
+                        .map(move |_| trace!("received pong")),
+                    Either::Right(_) => Err(ConnectionError::Io(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "timeout when sending ping to the Pulsar server",
+                    ))),
+                }
+            },
             _ => Err(ConnectionError::Disconnected),
         }
     }
