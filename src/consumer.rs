@@ -10,10 +10,9 @@ use chrono::{DateTime, Utc};
 use futures::channel::mpsc::unbounded;
 use futures::task::{Context, Poll};
 use futures::{
-    pin_mut,
     channel::{mpsc, oneshot},
     future::{select, try_join_all, Either},
-    Future, FutureExt, SinkExt, Stream, StreamExt,
+    pin_mut, Future, FutureExt, SinkExt, Stream, StreamExt,
 };
 use regex::Regex;
 
@@ -723,7 +722,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                     let messages_f = self.messages_rx.take().unwrap().into_future();
                     let ack_f = self.ack_rx.take().unwrap().into_future();
                     select(messages_f, ack_f)
-                },
+                }
                 Some(f) => f,
             };
 
@@ -739,8 +738,8 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 Either::Left((res, _)) => res,
                 Either::Right((_, _f)) => {
                     messages_or_ack_f = Some(f);
-                    continue
-                },
+                    continue;
+                }
             };
 
             match f {

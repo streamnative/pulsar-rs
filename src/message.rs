@@ -170,11 +170,15 @@ impl Message {
                 consumer_id: *consumer_id,
             }),
             BaseCommand {
-                close_consumer: Some(CommandCloseConsumer { consumer_id, request_id }),
+                close_consumer:
+                    Some(CommandCloseConsumer {
+                        consumer_id,
+                        request_id,
+                    }),
                 ..
             } => Some(RequestKey::CloseConsumer {
                 consumer_id: *consumer_id,
-                request_id: *request_id
+                request_id: *request_id,
             }),
             BaseCommand {
                 connect: Some(_), ..

@@ -316,19 +316,21 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                 url,
                 broker.url,
                 (std::time::Instant::now() - start).as_millis()
-                );
+            );
         } else {
             info!(
                 "Connected to {} in {}ms",
                 broker.url,
                 (std::time::Instant::now() - start).as_millis()
-                );
+            );
         }
         let c = Arc::new(conn);
 
         // set up client heartbeats for the connection
         let weak_conn = Arc::downgrade(&c);
-        let mut interval = self.executor.interval(self.connection_retry_options.keep_alive);
+        let mut interval = self
+            .executor
+            .interval(self.connection_retry_options.keep_alive);
         let broker_url = broker.url.clone();
         let proxy_to_broker_url = proxy_url.clone();
         let res = self.executor.spawn(Box::pin(async move {

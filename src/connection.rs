@@ -170,10 +170,16 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> 
                                 .get_mut(&consumer_id)
                                 .map(move |consumer| consumer.unbounded_send(msg));
                         }
-                        Some(RequestKey::CloseConsumer { consumer_id, request_id }) => {
+                        Some(RequestKey::CloseConsumer {
+                            consumer_id,
+                            request_id,
+                        }) => {
                             // FIXME: could the registration still be in queue while we get the
                             // CloseConsumer message?
-                            if let Some(resolver) = self.pending_requests.remove(&RequestKey::RequestId(request_id)) {
+                            if let Some(resolver) = self
+                                .pending_requests
+                                .remove(&RequestKey::RequestId(request_id))
+                            {
                                 // We don't care if the receiver has dropped their future
                                 let _ = resolver.send(msg);
                             } else {
@@ -186,7 +192,7 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> 
                                     error!("ConnectionReceiver: error transmitting message to consumer: {:?}", res);
                                 }
                             }
-                        },
+                        }
                         None => {
                             warn!(
                                 "Received unexpected message; dropping. Message {:?}",
@@ -291,14 +297,15 @@ impl<Exe: Executor> ConnectionSender<Exe> {
                 pin_mut!(delay_f);
 
                 match select(response, delay_f).await {
-                    Either::Left((res, _)) => res.map_err(|oneshot::Canceled| ConnectionError::Disconnected)
+                    Either::Left((res, _)) => res
+                        .map_err(|oneshot::Canceled| ConnectionError::Disconnected)
                         .map(move |_| trace!("received pong")),
                     Either::Right(_) => Err(ConnectionError::Io(std::io::Error::new(
                         std::io::ErrorKind::TimedOut,
                         "timeout when sending ping to the Pulsar server",
                     ))),
                 }
-            },
+            }
             _ => Err(ConnectionError::Disconnected),
         }
     }

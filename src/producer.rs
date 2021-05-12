@@ -514,10 +514,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
         Ok(())
     }
 
-    async fn send<T: SerializeMessage + Sized>(
-        &mut self,
-        message: T,
-    ) -> Result<SendFuture, Error> {
+    async fn send<T: SerializeMessage + Sized>(&mut self, message: T) -> Result<SendFuture, Error> {
         match T::serialize_message(message) {
             Ok(message) => self.send_raw(message.into()).await,
             Err(e) => Err(e),
