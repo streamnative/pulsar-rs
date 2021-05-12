@@ -310,21 +310,35 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                 Err(e) => return Err(e),
             }
         };
-        info!(
-            "Connected to {} in {}ms",
-            broker.url,
-            (std::time::Instant::now() - start).as_millis()
-        );
+        if let Some(url) = proxy_url.as_ref() {
+            info!(
+                "Connected to {} via proxy {} in {}ms",
+                url,
+                broker.url,
+                (std::time::Instant::now() - start).as_millis()
+                );
+        } else {
+            info!(
+                "Connected to {} in {}ms",
+                broker.url,
+                (std::time::Instant::now() - start).as_millis()
+                );
+        }
         let c = Arc::new(conn);
 
         // set up client heartbeats for the connection
         let weak_conn = Arc::downgrade(&c);
         let mut interval = self.executor.interval(self.connection_retry_options.keep_alive);
         let broker_url = broker.url.clone();
+        let proxy_to_broker_url = proxy_url.clone();
         let res = self.executor.spawn(Box::pin(async move {
             use crate::futures::StreamExt;
             while let Some(()) = interval.next().await {
-                trace!("will ping connection at {}", broker_url);
+                if let Some(url) = proxy_to_broker_url.as_ref() {
+                    trace!("will ping connection to {} via proxy {}", url, broker_url);
+                } else {
+                    trace!("will ping connection to {}", broker_url);
+                }
                 if let Some(strong_conn) = weak_conn.upgrade() {
                     if let Err(e) = strong_conn.sender().send_ping().await {
                         error!("could not ping the server at {}: {}", broker_url, e);
