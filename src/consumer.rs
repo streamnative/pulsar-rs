@@ -8,10 +8,11 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use futures::channel::mpsc::unbounded;
-use futures::future::{try_join_all, Either};
 use futures::task::{Context, Poll};
 use futures::{
+    pin_mut,
     channel::{mpsc, oneshot},
+    future::{select, try_join_all, Either},
     Future, FutureExt, SinkExt, Stream, StreamExt,
 };
 use regex::Regex;
@@ -685,6 +686,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
 
     async fn engine(&mut self) -> Result<(), Error> {
         debug!("starting the consumer engine for topic {}", self.topic);
+        let mut messages_or_ack_f = None;
         loop {
             if !self.connection.is_valid() {
                 if let Some(err) = self.connection.error() {
@@ -711,14 +713,37 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 self.remaining_messages = self.batch_size;
             }
 
-            // we need these complicated steps to select on two streams of different types,
-            // while being able to store it in the ConsumerEngine object (biggest issue),
-            // and replacing messages_rx when we reconnect, and cnsidering that ack_rx is
-            // not clonable.
-            // Please, someone find a better solution
-            let messages_f = self.messages_rx.take().unwrap().into_future();
-            let ack_f = self.ack_rx.take().unwrap().into_future();
-            match futures::future::select(messages_f, ack_f).await {
+            let mut f = match messages_or_ack_f.take() {
+                None => {
+                    // we need these complicated steps to select on two streams of different types,
+                    // while being able to store it in the ConsumerEngine object (biggest issue),
+                    // and replacing messages_rx when we reconnect, and cnsidering that ack_rx is
+                    // not clonable.
+                    // Please, someone find a better solution
+                    let messages_f = self.messages_rx.take().unwrap().into_future();
+                    let ack_f = self.ack_rx.take().unwrap().into_future();
+                    select(messages_f, ack_f)
+                },
+                Some(f) => f,
+            };
+
+            // we want to wake up regularly to check if the connection is still valid:
+            // if the heartbeat failed, the connection.is_valid() call at the beginning
+            // of the loop should fail, but to get there we must stop waiting on
+            // messages_f and ack_f
+            let delay_f = self.client.executor.delay(Duration::from_secs(1));
+            let f_pin = std::pin::Pin::new(&mut f);
+            pin_mut!(delay_f);
+
+            let f = match select(f_pin, delay_f).await {
+                Either::Left((res, _)) => res,
+                Either::Right((_, _f)) => {
+                    messages_or_ack_f = Some(f);
+                    continue
+                },
+            };
+
+            match f {
                 Either::Left(((message_opt, messages_rx), ack_rx)) => {
                     self.messages_rx = Some(messages_rx);
                     self.ack_rx = ack_rx.into_inner();

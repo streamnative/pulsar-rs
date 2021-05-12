@@ -33,6 +33,8 @@ pub struct ConnectionRetryOptions {
     pub max_retries: u32,
     /// time limit to establish a connection
     pub connection_timeout: Duration,
+    /// keep-alive interval for each broker connection
+    pub keep_alive: Duration,
 }
 
 impl std::default::Default for ConnectionRetryOptions {
@@ -42,6 +44,7 @@ impl std::default::Default for ConnectionRetryOptions {
             max_backoff: Duration::from_secs(30),
             max_retries: 12u32,
             connection_timeout: Duration::from_secs(10),
+            keep_alive: Duration::from_secs(60),
         }
     }
 }
@@ -313,6 +316,32 @@ impl<Exe: Executor> ConnectionManager<Exe> {
             (std::time::Instant::now() - start).as_millis()
         );
         let c = Arc::new(conn);
+
+        // set up client heartbeats for the connection
+        let weak_conn = Arc::downgrade(&c);
+        let mut interval = self.executor.interval(self.connection_retry_options.keep_alive);
+        let broker_url = broker.url.clone();
+        let res = self.executor.spawn(Box::pin(async move {
+            use crate::futures::StreamExt;
+            while let Some(()) = interval.next().await {
+                trace!("will ping connection at {}", broker_url);
+                if let Some(strong_conn) = weak_conn.upgrade() {
+                    if let Err(e) = strong_conn.sender().send_ping().await {
+                        error!("could not ping the server at {}: {}", broker_url, e);
+                    }
+                } else {
+                    // if the strong pointers were dropped, we can stop the heartbeat for this
+                    // connection
+                    trace!("strong connection was dropped, stopping keepalive task");
+                    break;
+                }
+            }
+        }));
+        if res.is_err() {
+            error!("the executor could not spawn the heartbeat future");
+            return Err(ConnectionError::Shutdown);
+        }
+
         let old = self
             .connections
             .lock()
