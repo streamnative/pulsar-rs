@@ -41,7 +41,7 @@ pub struct ConsumerOptions {
     /// durable cursor or not
     pub durable: Option<bool>,
     /// If specified, the subscription will position the cursor
-    /// markd-delete position on the particular message id and
+    /// marked-delete position on the particular message id and
     /// will send messages from that point
     pub start_message_id: Option<MessageIdData>,
     /// Add optional metadata key=value to this consumer
@@ -49,7 +49,15 @@ pub struct ConsumerOptions {
     pub read_compacted: Option<bool>,
     pub schema: Option<Schema>,
     /// Signal whether the subscription will initialize on latest
-    /// or not -- earliest
+    /// or earliest message
+    ///
+    /// an enum can be used to initialize it:
+    ///
+    /// ```rust,ignore
+    /// ConsumerOptions {
+    ///     initial_position: InitialPosition::Earliest.into(),
+    /// }
+    /// ```
     pub initial_position: Option<i32>,
 }
 
@@ -59,6 +67,24 @@ pub struct DeadLetterPolicy {
     pub max_redeliver_count: usize,
     /// Name of the dead topic where the failing messages will be sent.
     pub dead_letter_topic: String,
+}
+
+/// position of the first message that will be consumed
+#[derive(Clone, Debug)]
+pub enum InitialPosition {
+    /// start at the oldest message
+    Earliest,
+    /// start at the most recent message
+    Latest,
+}
+
+impl From<InitialPosition> for Option<i32> {
+    fn from(i: InitialPosition) -> Self {
+        match i {
+            InitialPosition::Earliest => Some(1),
+            InitialPosition::Latest => Some(0),
+        }
+    }
 }
 
 /// the consumer is used to subscribe to a topic
@@ -689,7 +715,11 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         loop {
             if !self.connection.is_valid() {
                 if let Some(err) = self.connection.error() {
-                    error!("Consumer: connection {} is not valid: {:?}", self.connection.id(), err);
+                    error!(
+                        "Consumer: connection {} is not valid: {:?}",
+                        self.connection.id(),
+                        err
+                    );
                     self.reconnect().await?;
                 }
             }
