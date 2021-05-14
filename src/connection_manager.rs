@@ -2,10 +2,10 @@ use crate::connection::{Authentication, Connection};
 use crate::error::ConnectionError;
 use crate::executor::Executor;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
-use futures::channel::oneshot;
+use futures::{channel::oneshot, lock::Mutex};
 use native_tls::Certificate;
 use rand::Rng;
 use url::Url;
@@ -193,7 +193,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
         broker: &BrokerAddress,
     ) -> Result<Arc<Connection<Exe>>, ConnectionError> {
         let rx = {
-            let mut conns = self.connections.lock().unwrap();
+            let mut conns = self.connections.lock().await;
             match conns.get_mut(broker) {
                 None => None,
                 Some(ConnectionStatus::Connected(conn)) => {
@@ -230,7 +230,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
             match self
                 .connections
                 .lock()
-                .unwrap()
+                .await
                 .entry(broker.clone())
                 .or_insert_with(|| ConnectionStatus::Connecting(Vec::new()))
             {
@@ -362,7 +362,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
         let old = self
             .connections
             .lock()
-            .unwrap()
+            .await
             .insert(broker, ConnectionStatus::Connected(c.clone()));
         match old {
             Some(ConnectionStatus::Connecting(mut v)) => {
@@ -387,7 +387,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
         trace!("cleaning invalid or unused connections");
         self.connections
             .lock()
-            .unwrap()
+            .await
             .retain(|_, ref mut connection| match connection {
                 ConnectionStatus::Connecting(_) => true,
                 ConnectionStatus::Connected(conn) => {

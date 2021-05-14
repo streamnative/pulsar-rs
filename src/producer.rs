@@ -1,10 +1,9 @@
 //! Message publication
-use futures::channel::oneshot;
-use futures::future::try_join_all;
+use futures::{channel::oneshot, future::try_join_all, lock::Mutex};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::Write;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::client::SerializeMessage;
 use crate::connection::{Connection, SerialId};
@@ -530,8 +529,8 @@ impl<Exe: Executor> TopicProducer<Exe> {
                 let message_count;
 
                 {
-                    let batch = batch.lock().unwrap();
-                    let messages = batch.get_messages();
+                    let batch = batch.lock().await;
+                    let messages = batch.get_messages().await;
                     message_count = messages.len();
                     for (tx, message) in messages {
                         receipts.push(tx);
@@ -578,11 +577,11 @@ impl<Exe: Executor> TopicProducer<Exe> {
                 let mut counter = 0i32;
 
                 {
-                    let batch = batch.lock().unwrap();
-                    batch.push_back((tx, message));
+                    let batch = batch.lock().await;
+                    batch.push_back((tx, message)).await;
 
-                    if batch.is_full() {
-                        for (tx, message) in batch.get_messages() {
+                    if batch.is_full().await {
+                        for (tx, message) in batch.get_messages().await {
                             receipts.push(tx);
                             message.serialize(&mut payload);
                             counter += 1;
@@ -910,11 +909,11 @@ impl Batch {
         }
     }
 
-    pub fn is_full(&self) -> bool {
-        self.storage.lock().unwrap().len() >= self.length as usize
+    pub async fn is_full(&self) -> bool {
+        self.storage.lock().await.len() >= self.length as usize
     }
 
-    pub fn push_back(
+    pub async fn push_back(
         &self,
         msg: (
             oneshot::Sender<Result<proto::CommandSendReceipt, Error>>,
@@ -938,16 +937,16 @@ impl Batch {
             },
             payload: message.payload,
         };
-        self.storage.lock().unwrap().push_back((tx, batched))
+        self.storage.lock().await.push_back((tx, batched))
     }
 
-    pub fn get_messages(
+    pub async fn get_messages(
         &self,
     ) -> Vec<(
         oneshot::Sender<Result<proto::CommandSendReceipt, Error>>,
         BatchedMessage,
     )> {
-        self.storage.lock().unwrap().drain(..).collect()
+        self.storage.lock().await.drain(..).collect()
     }
 }
 
