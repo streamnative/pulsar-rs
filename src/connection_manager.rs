@@ -193,11 +193,12 @@ impl<Exe: Executor> ConnectionManager<Exe> {
         broker: &BrokerAddress,
     ) -> Result<Arc<Connection<Exe>>, ConnectionError> {
         let rx = {
-            match self.connections.lock().unwrap().get_mut(broker) {
+            let mut conns = self.connections.lock().unwrap();
+            match conns.get_mut(broker) {
                 None => None,
-                Some(ConnectionStatus::Connected(c)) => {
-                    if c.is_valid() {
-                        return Ok(c.clone());
+                Some(ConnectionStatus::Connected(conn)) => {
+                    if conn.is_valid() {
+                        return Ok(conn.clone());
                     } else {
                         None
                     }
@@ -383,12 +384,21 @@ impl<Exe: Executor> ConnectionManager<Exe> {
 
     /// tests that all connections are valid and still used
     pub(crate) async fn check_connections(&self) {
+        trace!("cleaning invalid or unused connections");
         self.connections
             .lock()
             .unwrap()
-            .retain(|ref k, ref mut conn| match conn {
+            .retain(|_, ref mut connection| match connection {
                 ConnectionStatus::Connecting(_) => true,
-                ConnectionStatus::Connected(c) => c.is_valid(),
+                ConnectionStatus::Connected(conn) => {
+                    // if the manager holds the only reference to that
+                    // connection, we can remove it from the manager
+                    // no need for special synchronization here: we're already
+                    // in a mutex, and a case appears where the Arc is cloned
+                    // somewhere at the same time, that just means the manager
+                    // will create a new connection the next time it is asked
+                    conn.is_valid() && Arc::strong_count(conn) > 1
+                }
             });
     }
 }
