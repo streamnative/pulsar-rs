@@ -169,6 +169,26 @@ impl<Exe: Executor> Pulsar<Exe> {
         )
         .await?;
         let manager = Arc::new(manager);
+
+        // set up a regular connection check
+        let weak_manager = Arc::downgrade(&manager);
+        let mut interval = executor.interval(std::time::Duration::from_secs(60));
+        let res = executor.spawn(Box::pin(async move {
+            while let Some(()) = interval.next().await {
+                if let Some(strong_manager) = weak_manager.upgrade() {
+                    strong_manager.check_connections().await;
+                } else {
+                    // if all the strong references to the manager were dropped,
+                    // we can stop the task
+                    break;
+                }
+            }
+        }));
+        if res.is_err() {
+            error!("the executor could not spawn the check connection task");
+            return Err(crate::error::ConnectionError::Shutdown.into());
+        }
+
         let service_discovery = Arc::new(ServiceDiscovery::with_manager(manager.clone()));
         let (producer, producer_rx) = mpsc::unbounded();
 

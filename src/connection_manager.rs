@@ -380,4 +380,15 @@ impl<Exe: Executor> ConnectionManager<Exe> {
 
         Ok(c)
     }
+
+    /// tests that all connections are valid and still used
+    pub(crate) async fn check_connections(&self) {
+        self.connections
+            .lock()
+            .unwrap()
+            .retain(|ref k, ref mut conn| match conn {
+                ConnectionStatus::Connecting(_) => true,
+                ConnectionStatus::Connected(c) => c.is_valid(),
+            });
+    }
 }

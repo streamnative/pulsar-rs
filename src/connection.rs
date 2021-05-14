@@ -832,6 +832,7 @@ impl<Exe: Executor> Connection<Exe> {
 
 impl<Exe: Executor> Drop for Connection<Exe> {
     fn drop(&mut self) {
+        trace!("dropping connection {} for {}", self.id, self.url);
         if let Some(shutdown) = self.sender.receiver_shutdown.take() {
             let _ = shutdown.send(());
         }
