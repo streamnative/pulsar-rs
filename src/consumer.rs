@@ -131,8 +131,8 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
     }
 
     /// test that the connections to the Pulsar brokers are still valid
-    pub async fn check_connection(&self) -> Result<(), Error> {
-        match &self.inner {
+    pub async fn check_connection(&mut self) -> Result<(), Error> {
+        match &mut self.inner {
             InnerConsumer::Single(c) => c.check_connection().await,
             InnerConsumer::Multi(c) => c.check_connections().await,
         }
@@ -241,16 +241,24 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
     }
 
     /// returns a list of broker URLs this consumer is connnected to
-    pub fn connections(&self) -> Vec<&Url> {
-        match &self.inner {
-            InnerConsumer::Single(c) => vec![c.connection.url()],
-            InnerConsumer::Multi(c) => c
-                .consumers
-                .values()
-                .map(|c| c.connection.url())
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect(),
+    pub async fn connections(&mut self) -> Result<Vec<Url>, Error> {
+        match &mut self.inner {
+            InnerConsumer::Single(c) => Ok(vec![c.connection().await?.url().clone()]),
+            InnerConsumer::Multi(c) => {
+                let v = c
+                    .consumers
+                    .values_mut()
+                    .map(|c| c.connection())
+                    .collect::<Vec<_>>();
+
+                let mut connections = try_join_all(v).await?;
+                Ok(connections
+                    .drain(..)
+                    .map(|conn| conn.url().clone())
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect())
+            }
         }
     }
 
@@ -362,10 +370,9 @@ type MessageIdDataReceiver = mpsc::Receiver<Result<(proto::MessageIdData, Payloa
 pub(crate) struct TopicConsumer<T: DeserializeMessage, Exe: Executor> {
     consumer_id: u64,
     config: ConsumerConfig,
-    connection: Arc<Connection<Exe>>,
     topic: String,
     messages: Pin<Box<MessageIdDataReceiver>>,
-    ack_tx: mpsc::UnboundedSender<AckMessage>,
+    engine_tx: mpsc::UnboundedSender<EngineMessage<Exe>>,
     #[allow(unused)]
     data_type: PhantomData<fn(Payload) -> T::Output>,
     dead_letter_policy: Option<DeadLetterPolicy>,
@@ -477,7 +484,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
             })
             .map_err(|e| Error::Consumer(ConsumerError::Connection(e)))?;
 
-        let (ack_tx, ack_rx) = unbounded();
+        let (engine_tx, engine_rx) = unbounded();
         // drop_signal will be dropped when Consumer is dropped, then
         // drop_receiver will return, and we can close the consumer
         let (_drop_signal, drop_receiver) = oneshot::channel::<()>();
@@ -498,12 +505,12 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         }));
 
         if unacked_message_redelivery_delay.is_some() {
-            let mut redelivery_tx = ack_tx.clone();
+            let mut redelivery_tx = engine_tx.clone();
             let mut interval = client.executor.interval(Duration::from_millis(500));
             let res = client.executor.spawn(Box::pin(async move {
                 while interval.next().await.is_some() {
                     if redelivery_tx
-                        .send(AckMessage::UnackedRedelivery)
+                        .send(EngineMessage::UnackedRedelivery)
                         .await
                         .is_err()
                     {
@@ -527,7 +534,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
             name,
             tx,
             messages,
-            ack_rx,
+            engine_rx,
             batch_size,
             unacked_message_redelivery_delay,
             dead_letter_policy.clone(),
@@ -548,10 +555,9 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         Ok(TopicConsumer {
             consumer_id,
             config,
-            connection,
             topic,
             messages: Box::pin(rx),
-            ack_tx,
+            engine_tx,
             data_type: PhantomData,
             dead_letter_policy,
             last_message_received: None,
@@ -563,28 +569,43 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         &self.topic
     }
 
-    async fn check_connection(&self) -> Result<(), Error> {
-        self.connection.sender().send_ping().await?;
+    async fn connection(&mut self) -> Result<Arc<Connection<Exe>>, Error> {
+        let (resolver, response) = oneshot::channel();
+        self.engine_tx
+            .send(EngineMessage::GetConnection(resolver))
+            .await
+            .map_err(|_| ConsumerError::Connection(ConnectionError::Disconnected))?;
+
+        response.await.map_err(|oneshot::Canceled| {
+            error!("the consumer engine dropped the request");
+            ConnectionError::Disconnected.into()
+        })
+    }
+
+    async fn check_connection(&mut self) -> Result<(), Error> {
+        let conn = self.connection().await?;
+        info!("check connection for id {}", conn.id());
+        conn.sender().send_ping().await?;
         Ok(())
     }
 
     async fn ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
-        self.ack_tx
-            .send(AckMessage::Ack(msg.message_id.clone(), false))
+        self.engine_tx
+            .send(EngineMessage::Ack(msg.message_id.clone(), false))
             .await?;
         Ok(())
     }
 
     async fn cumulative_ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
-        self.ack_tx
-            .send(AckMessage::Ack(msg.message_id.clone(), true))
+        self.engine_tx
+            .send(EngineMessage::Ack(msg.message_id.clone(), true))
             .await?;
         Ok(())
     }
 
     async fn nack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
-        self.ack_tx
-            .send(AckMessage::Nack(msg.message_id.clone()))
+        self.engine_tx
+            .send(EngineMessage::Nack(msg.message_id.clone()))
             .await?;
         Ok(())
     }
@@ -593,9 +614,10 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         &mut self,
         message_id: Option<MessageIdData>,
         timestamp: Option<u64>,
-    ) -> Result<(), ConsumerError> {
+    ) -> Result<(), Error> {
         let consumer_id = self.consumer_id;
-        self.connection
+        self.connection()
+            .await?
             .sender()
             .seek(consumer_id, message_id, timestamp)
             .await?;
@@ -654,7 +676,7 @@ struct ConsumerEngine<Exe: Executor> {
     name: Option<String>,
     tx: mpsc::Sender<Result<(proto::MessageIdData, Payload), Error>>,
     messages_rx: Option<mpsc::UnboundedReceiver<RawMessage>>,
-    ack_rx: Option<mpsc::UnboundedReceiver<AckMessage>>,
+    engine_rx: Option<mpsc::UnboundedReceiver<EngineMessage<Exe>>>,
     batch_size: u32,
     remaining_messages: u32,
     unacked_message_redelivery_delay: Option<Duration>,
@@ -664,10 +686,11 @@ struct ConsumerEngine<Exe: Executor> {
     _drop_signal: oneshot::Sender<()>,
 }
 
-enum AckMessage {
+enum EngineMessage<Exe: Executor> {
     Ack(MessageData, bool),
     Nack(MessageData),
     UnackedRedelivery,
+    GetConnection(oneshot::Sender<Arc<Connection<Exe>>>),
 }
 
 impl<Exe: Executor> ConsumerEngine<Exe> {
@@ -681,7 +704,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         name: Option<String>,
         tx: mpsc::Sender<Result<(proto::MessageIdData, Payload), Error>>,
         messages_rx: mpsc::UnboundedReceiver<RawMessage>,
-        ack_rx: mpsc::UnboundedReceiver<AckMessage>,
+        engine_rx: mpsc::UnboundedReceiver<EngineMessage<Exe>>,
         batch_size: u32,
         unacked_message_redelivery_delay: Option<Duration>,
         dead_letter_policy: Option<DeadLetterPolicy>,
@@ -698,7 +721,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             name,
             tx,
             messages_rx: Some(messages_rx),
-            ack_rx: Some(ack_rx),
+            engine_rx: Some(engine_rx),
             batch_size,
             remaining_messages: batch_size,
             unacked_message_redelivery_delay,
@@ -746,11 +769,11 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 None => {
                     // we need these complicated steps to select on two streams of different types,
                     // while being able to store it in the ConsumerEngine object (biggest issue),
-                    // and replacing messages_rx when we reconnect, and cnsidering that ack_rx is
+                    // and replacing messages_rx when we reconnect, and considering that engine_rx is
                     // not clonable.
                     // Please, someone find a better solution
                     let messages_f = self.messages_rx.take().unwrap().into_future();
-                    let ack_f = self.ack_rx.take().unwrap().into_future();
+                    let ack_f = self.engine_rx.take().unwrap().into_future();
                     select(messages_f, ack_f)
                 }
                 Some(f) => f,
@@ -773,9 +796,9 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             };
 
             match f {
-                Either::Left(((message_opt, messages_rx), ack_rx)) => {
+                Either::Left(((message_opt, messages_rx), engine_rx)) => {
                     self.messages_rx = Some(messages_rx);
-                    self.ack_rx = ack_rx.into_inner();
+                    self.engine_rx = engine_rx.into_inner();
                     match message_opt {
                         None => {
                             error!("Consumer: messages::next: returning Disconnected");
@@ -808,19 +831,19 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                         }
                     }
                 }
-                Either::Right(((ack_opt, ack_rx), messages_rx)) => {
+                Either::Right(((ack_opt, engine_rx), messages_rx)) => {
                     self.messages_rx = messages_rx.into_inner();
-                    self.ack_rx = Some(ack_rx);
+                    self.engine_rx = Some(engine_rx);
 
                     match ack_opt {
                         None => {
                             trace!("ack channel was closed");
                             return Ok(());
                         }
-                        Some(AckMessage::Ack(message_id, cumulative)) => {
+                        Some(EngineMessage::Ack(message_id, cumulative)) => {
                             self.ack(message_id, cumulative);
                         }
-                        Some(AckMessage::Nack(message_id)) => {
+                        Some(EngineMessage::Nack(message_id)) => {
                             if let Err(e) = self
                                 .connection
                                 .sender()
@@ -835,7 +858,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                                 );
                             }
                         }
-                        Some(AckMessage::UnackedRedelivery) => {
+                        Some(EngineMessage::UnackedRedelivery) => {
                             let mut h = HashSet::new();
                             let now = Instant::now();
                             //info!("unacked messages length: {}", self.unacked_messages.len());
@@ -860,6 +883,11 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                                     }
                                 }
                             }
+                        }
+                        Some(EngineMessage::GetConnection(sender)) => {
+                            let _ = sender.send(self.connection.clone()).map_err(|_| {
+                                error!("consumer requested the engine's connection but dropped the channel before receiving");
+                            });
                         }
                     }
                 }
@@ -1551,7 +1579,7 @@ pub struct ConsumerConfig {
     dead_letter_policy: Option<DeadLetterPolicy>,
 }
 
-/// A consumer that can subscribe on multiple topics, from a rege matching topic names
+/// A consumer that can subscribe on multiple topics, from a regex matching topic names
 struct MultiTopicConsumer<T: DeserializeMessage, Exe: Executor> {
     namespace: String,
     topic_regex: Option<Regex>,
@@ -1589,14 +1617,19 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
             .sum()
     }
 
-    async fn check_connections(&self) -> Result<(), Error> {
-        let base_conn = self.pulsar.manager.get_base_connection().await?;
-        let connections: BTreeMap<_, _> = iter::once(base_conn)
-            .chain(self.consumers.values().map(|c| c.connection.clone()))
-            .map(|c| (c.id(), c))
-            .collect();
+    async fn check_connections(&mut self) -> Result<(), Error> {
+        self.pulsar
+            .manager
+            .get_base_connection()
+            .await?
+            .sender()
+            .send_ping()
+            .await?;
 
-        try_join_all(connections.values().map(|c| c.sender().send_ping())).await?;
+        for consumer in self.consumers.values_mut() {
+            consumer.connection().await?.sender().send_ping().await?;
+        }
+
         Ok(())
     }
 
@@ -1697,7 +1730,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
         consumer_ids: Option<Vec<String>>,
         message_id: Option<MessageIdData>,
         timestamp: Option<u64>,
-    ) -> Result<(), ConsumerError> {
+    ) -> Result<(), Error> {
         // 0. null or empty vector
         match consumer_ids {
             Some(consumer_ids) => {
