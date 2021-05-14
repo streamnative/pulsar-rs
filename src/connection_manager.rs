@@ -311,16 +311,19 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                 Err(e) => return Err(e),
             }
         };
+        let connection_id = conn.id();
         if let Some(url) = proxy_url.as_ref() {
             info!(
-                "Connected to {} via proxy {} in {}ms",
+                "Connected n°{} to {} via proxy {} in {}ms",
+                connection_id,
                 url,
                 broker.url,
                 (std::time::Instant::now() - start).as_millis()
             );
         } else {
             info!(
-                "Connected to {} in {}ms",
+                "Connected n°{} to {} in {}ms",
+                connection_id,
                 broker.url,
                 (std::time::Instant::now() - start).as_millis()
             );
@@ -338,13 +341,21 @@ impl<Exe: Executor> ConnectionManager<Exe> {
             use crate::futures::StreamExt;
             while let Some(()) = interval.next().await {
                 if let Some(url) = proxy_to_broker_url.as_ref() {
-                    trace!("will ping connection to {} via proxy {}", url, broker_url);
+                    trace!(
+                        "will ping connection {} to {} via proxy {}",
+                        connection_id,
+                        url,
+                        broker_url
+                    );
                 } else {
-                    trace!("will ping connection to {}", broker_url);
+                    trace!("will ping connection {} to {}", connection_id, broker_url);
                 }
                 if let Some(strong_conn) = weak_conn.upgrade() {
                     if let Err(e) = strong_conn.sender().send_ping().await {
-                        error!("could not ping the server at {}: {}", broker_url, e);
+                        error!(
+                            "could not ping connection {} to the server at {}: {}",
+                            connection_id, broker_url, e
+                        );
                     }
                 } else {
                     // if the strong pointers were dropped, we can stop the heartbeat for this

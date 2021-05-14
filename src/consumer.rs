@@ -689,7 +689,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         loop {
             if !self.connection.is_valid() {
                 if let Some(err) = self.connection.error() {
-                    error!("Consumer: connection is not valid: {:?}", err);
+                    error!("Consumer: connection {} is not valid: {:?}", self.connection.id(), err);
                     self.reconnect().await?;
                 }
             }

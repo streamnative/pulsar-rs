@@ -727,7 +727,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
             }
         };
 
-        error!("send_inner disconnected");
+        error!("send_inner: connection {} disconnected", self.connection.id());
         self.reconnect().await?;
 
         match self
