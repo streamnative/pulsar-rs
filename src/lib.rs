@@ -345,6 +345,7 @@ mod tests {
         let mut received = BTreeSet::new();
         while let Ok(Some(msg)) = timeout(Duration::from_secs(10), consumer.next()).await {
             let msg: Message<TestData> = msg.unwrap();
+            info!("id: {:?}", msg.message_id());
             received.insert(msg.deserialize().unwrap().id);
             consumer.ack(&msg).await.unwrap();
             if received.len() == message_ids.len() {
