@@ -1099,7 +1099,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
     }
 
     async fn reconnect(&mut self) -> Result<(), Error> {
-        debug!("reconnecting producer for topic: {}", self.topic);
+        debug!("reconnecting consumer for topic: {}", self.topic);
         let broker_address = self.client.lookup_topic(&self.topic).await?;
         let conn = self.client.manager.get_connection(&broker_address).await?;
 
