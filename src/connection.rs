@@ -1090,7 +1090,7 @@ pub(crate) mod messages {
                         })
                         .collect(),
                     read_compacted: options.read_compacted,
-                    initial_position: options.initial_position,
+                    initial_position: Some(options.initial_position.into()),
                     schema: options.schema,
                     start_message_id: options.start_message_id,
                     ..Default::default()

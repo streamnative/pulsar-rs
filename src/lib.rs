@@ -190,7 +190,7 @@ mod tests {
     use crate::executor::TokioExecutor;
 
     use crate::client::SerializeMessage;
-    use crate::consumer::Message;
+    use crate::consumer::{InitialPosition, Message};
     use crate::message::proto::command_subscribe::SubType;
     use crate::message::Payload;
     use crate::Error as PulsarError;
@@ -328,7 +328,7 @@ mod tests {
             .with_subscription_type(SubType::Exclusive)
             .with_subscription("test_subscription")
             .with_options(ConsumerOptions {
-                initial_position: Some(1),
+                initial_position: InitialPosition::Earliest,
                 ..Default::default()
             })
             .build()
@@ -384,7 +384,7 @@ mod tests {
                 .with_subscription_type(SubType::Exclusive)
                 .with_subscription("test_subscription")
                 .with_options(ConsumerOptions {
-                    initial_position: Some(1),
+                    initial_position: InitialPosition::Earliest,
                     ..Default::default()
                 })
                 .build::<String>()
@@ -422,7 +422,7 @@ mod tests {
                 .with_subscription_type(SubType::Exclusive)
                 .with_subscription("test_subscription")
                 .with_options(ConsumerOptions {
-                    initial_position: Some(1),
+                    initial_position: InitialPosition::Earliest,
                     ..Default::default()
                 })
                 .build::<Vec<u8>>()
@@ -464,7 +464,7 @@ mod tests {
             .with_topic(topic)
             .with_unacked_message_resend_delay(Some(Duration::from_millis(100)))
             .with_options(ConsumerOptions {
-                initial_position: Some(1),
+                initial_position: InitialPosition::Earliest,
                 ..Default::default()
             })
             .build()

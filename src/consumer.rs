@@ -49,16 +49,16 @@ pub struct ConsumerOptions {
     pub read_compacted: Option<bool>,
     pub schema: Option<Schema>,
     /// Signal whether the subscription will initialize on latest
-    /// or earliest message
+    /// or earliest message (default on latest)
     ///
     /// an enum can be used to initialize it:
     ///
     /// ```rust,ignore
     /// ConsumerOptions {
-    ///     initial_position: InitialPosition::Earliest.into(),
+    ///     initial_position: InitialPosition::Earliest,
     /// }
     /// ```
-    pub initial_position: Option<i32>,
+    pub initial_position: InitialPosition,
 }
 
 #[derive(Debug, Clone)]
@@ -78,11 +78,16 @@ pub enum InitialPosition {
     Latest,
 }
 
-impl From<InitialPosition> for Option<i32> {
+impl Default for InitialPosition {
+    fn default() -> Self {
+        InitialPosition::Latest
+    }
+}
+impl From<InitialPosition> for i32 {
     fn from(i: InitialPosition) -> Self {
         match i {
-            InitialPosition::Earliest => Some(1),
-            InitialPosition::Latest => Some(0),
+            InitialPosition::Earliest => 1,
+            InitialPosition::Latest => 0,
         }
     }
 }
@@ -1960,7 +1965,7 @@ mod tests {
             .with_subscription_type(SubType::Shared)
             // get earliest messages
             .with_options(ConsumerOptions {
-                initial_position: Some(1),
+                initial_position: InitialPosition::Earliest,
                 ..Default::default()
             });
 
@@ -2043,7 +2048,7 @@ mod tests {
                 .with_subscription_type(SubType::Shared)
                 // get earliest messages
                 .with_options(ConsumerOptions {
-                    initial_position: Some(1),
+                    initial_position: InitialPosition::Earliest,
                     ..Default::default()
                 })
                 .build()
@@ -2075,7 +2080,7 @@ mod tests {
                 .with_subscription("dropped_ack")
                 .with_subscription_type(SubType::Shared)
                 .with_options(ConsumerOptions {
-                    initial_position: Some(1),
+                    initial_position: InitialPosition::Earliest,
                     ..Default::default()
                 })
                 .build()
@@ -2196,7 +2201,7 @@ mod tests {
             .with_subscription_type(SubType::Failover)
             // get earliest messages
             .with_options(ConsumerOptions {
-                initial_position: Some(1),
+                initial_position: InitialPosition::Earliest,
                 ..Default::default()
             });
 
