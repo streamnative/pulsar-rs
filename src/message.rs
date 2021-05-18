@@ -217,47 +217,96 @@ impl tokio_util::codec::Encoder<Message> for Codec {
     type Error = ConnectionError;
 
     fn encode(&mut self, item: Message, dst: &mut BytesMut) -> Result<(), ConnectionError> {
-        let command_size = item.command.encoded_len();
-        let metadata_size = item
-            .payload
-            .as_ref()
-            .map(|p| p.metadata.encoded_len())
-            .unwrap_or(0);
-        let payload_size = item.payload.as_ref().map(|p| p.data.len()).unwrap_or(0);
-        let header_size = if item.payload.is_some() { 18 } else { 8 };
-        // Total size does not include the size of the 'totalSize' field, so we subtract 4
-        let total_size = command_size + metadata_size + payload_size + header_size - 4;
-        let mut buf = Vec::with_capacity(total_size + 4);
-
-        // Simple command frame
-        buf.put_u32(total_size as u32);
-        buf.put_u32(command_size as u32);
-        item.command.encode(&mut buf)?;
-
-        // Payload command frame
-        if let Some(payload) = &item.payload {
-            buf.put_u16(0x0e01);
-
-            let crc_offset = buf.len();
-            buf.put_u32(0); // NOTE: Checksum (CRC32c). Overrwritten later to avoid copying.
-
-            let metdata_offset = buf.len();
-            buf.put_u32(metadata_size as u32);
-            payload.metadata.encode(&mut buf)?;
-            buf.put(&payload.data[..]);
-
-            let crc = crc32::checksum_castagnoli(&buf[metdata_offset..]);
-            let mut crc_buf: &mut [u8] = &mut buf[crc_offset..metdata_offset];
-            crc_buf.put_u32(crc);
-        }
-        if dst.remaining_mut() < buf.len() {
-            dst.reserve(buf.len());
-        }
-        dst.put_slice(&buf);
-        trace!("Encoder sending {} bytes", buf.len());
-        //        println!("Wrote message {:?}", item);
-        Ok(())
+        encode(item, dst)
     }
+}
+
+fn encode(item: Message, dst: &mut BytesMut) -> Result<(), ConnectionError> {
+    let command_size = item.command.encoded_len();
+    let metadata_size = item
+        .payload
+        .as_ref()
+        .map(|p| p.metadata.encoded_len())
+        .unwrap_or(0);
+    let payload_size = item.payload.as_ref().map(|p| p.data.len()).unwrap_or(0);
+    let header_size = if item.payload.is_some() { 18 } else { 8 };
+    // Total size does not include the size of the 'totalSize' field, so we subtract 4
+    let total_size = command_size + metadata_size + payload_size + header_size - 4;
+    let mut buf = Vec::with_capacity(total_size + 4);
+
+    // Simple command frame
+    buf.put_u32(total_size as u32);
+    buf.put_u32(command_size as u32);
+    item.command.encode(&mut buf)?;
+
+    // Payload command frame
+    if let Some(payload) = &item.payload {
+        buf.put_u16(0x0e01);
+
+        let crc_offset = buf.len();
+        buf.put_u32(0); // NOTE: Checksum (CRC32c). Overrwritten later to avoid copying.
+
+        let metdata_offset = buf.len();
+        buf.put_u32(metadata_size as u32);
+        payload.metadata.encode(&mut buf)?;
+        buf.put(&payload.data[..]);
+
+        let crc = crc32::checksum_castagnoli(&buf[metdata_offset..]);
+        let mut crc_buf: &mut [u8] = &mut buf[crc_offset..metdata_offset];
+        crc_buf.put_u32(crc);
+    }
+    if dst.remaining_mut() < buf.len() {
+        dst.reserve(buf.len());
+    }
+    dst.put_slice(&buf);
+    trace!("Encoder sending {} bytes", buf.len());
+    //        println!("Wrote message {:?}", item);
+    Ok(())
+}
+
+fn decode(src: &mut BytesMut) -> Result<Option<Message>, ConnectionError> {
+    trace!("Decoder received {} bytes", src.len());
+    if src.len() >= 4 {
+        let mut buf = Cursor::new(src);
+        // `messageSize` refers only to _remaining_ message size, so we add 4 to get total frame size
+        let message_size = buf.get_u32() as usize + 4;
+        let src = buf.into_inner();
+        if src.len() >= message_size {
+            let msg = {
+                let (buf, command_frame) = command_frame(&src[..message_size]).map_err(|err| {
+                    ConnectionError::Decoding(format!("Error decoding command frame: {:?}", err))
+                })?;
+                let command = BaseCommand::decode(command_frame.command)?;
+
+                let payload = if !buf.is_empty() {
+                    let (buf, payload_frame) = payload_frame(buf).map_err(|err| {
+                        ConnectionError::Decoding(format!(
+                            "Error decoding payload frame: {:?}",
+                            err
+                        ))
+                    })?;
+
+                    // TODO: Check crc32 of payload data
+
+                    let metadata = Metadata::decode(payload_frame.metadata)?;
+                    Some(Payload {
+                        metadata,
+                        data: buf.to_vec(),
+                    })
+                } else {
+                    None
+                };
+
+                Message { command, payload }
+            };
+
+            //TODO advance as we read, rather than this weird post thing
+            src.advance(message_size);
+            //                println!("Read message {:?}", &msg);
+            return Ok(Some(msg));
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(feature = "tokio-runtime")]
@@ -266,52 +315,7 @@ impl tokio_util::codec::Decoder for Codec {
     type Error = ConnectionError;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Message>, ConnectionError> {
-        trace!("Decoder received {} bytes", src.len());
-        if src.len() >= 4 {
-            let mut buf = Cursor::new(src);
-            // `messageSize` refers only to _remaining_ message size, so we add 4 to get total frame size
-            let message_size = buf.get_u32() as usize + 4;
-            let src = buf.into_inner();
-            if src.len() >= message_size {
-                let msg = {
-                    let (buf, command_frame) =
-                        command_frame(&src[..message_size]).map_err(|err| {
-                            ConnectionError::Decoding(format!(
-                                "Error decoding command frame: {:?}",
-                                err
-                            ))
-                        })?;
-                    let command = BaseCommand::decode(command_frame.command)?;
-
-                    let payload = if !buf.is_empty() {
-                        let (buf, payload_frame) = payload_frame(buf).map_err(|err| {
-                            ConnectionError::Decoding(format!(
-                                "Error decoding payload frame: {:?}",
-                                err
-                            ))
-                        })?;
-
-                        // TODO: Check crc32 of payload data
-
-                        let metadata = Metadata::decode(payload_frame.metadata)?;
-                        Some(Payload {
-                            metadata,
-                            data: buf.to_vec(),
-                        })
-                    } else {
-                        None
-                    };
-
-                    Message { command, payload }
-                };
-
-                //TODO advance as we read, rather than this weird post thing
-                src.advance(message_size);
-                //                println!("Read message {:?}", &msg);
-                return Ok(Some(msg));
-            }
-        }
-        Ok(None)
+        decode(src)
     }
 }
 
@@ -321,46 +325,7 @@ impl asynchronous_codec::Encoder for Codec {
     type Error = ConnectionError;
 
     fn encode(&mut self, item: Message, dst: &mut BytesMut) -> Result<(), ConnectionError> {
-        let command_size = item.command.encoded_len();
-        let metadata_size = item
-            .payload
-            .as_ref()
-            .map(|p| p.metadata.encoded_len())
-            .unwrap_or(0);
-        let payload_size = item.payload.as_ref().map(|p| p.data.len()).unwrap_or(0);
-        let header_size = if item.payload.is_some() { 18 } else { 8 };
-        // Total size does not include the size of the 'totalSize' field, so we subtract 4
-        let total_size = command_size + metadata_size + payload_size + header_size - 4;
-        let mut buf = Vec::with_capacity(total_size + 4);
-
-        // Simple command frame
-        buf.put_u32(total_size as u32);
-        buf.put_u32(command_size as u32);
-        item.command.encode(&mut buf)?;
-
-        // Payload command frame
-        if let Some(payload) = &item.payload {
-            buf.put_u16(0x0e01);
-
-            let crc_offset = buf.len();
-            buf.put_u32(0); // NOTE: Checksum (CRC32c). Overrwritten later to avoid copying.
-
-            let metdata_offset = buf.len();
-            buf.put_u32(metadata_size as u32);
-            payload.metadata.encode(&mut buf)?;
-            buf.put(&payload.data[..]);
-
-            let crc = crc32::checksum_castagnoli(&buf[metdata_offset..]);
-            let mut crc_buf: &mut [u8] = &mut buf[crc_offset..metdata_offset];
-            crc_buf.put_u32(crc);
-        }
-        if dst.remaining_mut() < buf.len() {
-            dst.reserve(buf.len());
-        }
-        dst.put_slice(&buf);
-        trace!("Encoder sending {} bytes", buf.len());
-        //        println!("Wrote message {:?}", item);
-        Ok(())
+        encode(item, dst)
     }
 }
 
@@ -370,52 +335,7 @@ impl asynchronous_codec::Decoder for Codec {
     type Error = ConnectionError;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Message>, ConnectionError> {
-        trace!("Decoder received {} bytes", src.len());
-        if src.len() >= 4 {
-            let mut buf = Cursor::new(src);
-            // `messageSize` refers only to _remaining_ message size, so we add 4 to get total frame size
-            let message_size = buf.get_u32() as usize + 4;
-            let src = buf.into_inner();
-            if src.len() >= message_size {
-                let msg = {
-                    let (buf, command_frame) =
-                        command_frame(&src[..message_size]).map_err(|err| {
-                            ConnectionError::Decoding(format!(
-                                "Error decoding command frame: {:?}",
-                                err
-                            ))
-                        })?;
-                    let command = BaseCommand::decode(command_frame.command)?;
-
-                    let payload = if !buf.is_empty() {
-                        let (buf, payload_frame) = payload_frame(buf).map_err(|err| {
-                            ConnectionError::Decoding(format!(
-                                "Error decoding payload frame: {:?}",
-                                err
-                            ))
-                        })?;
-
-                        // TODO: Check crc32 of payload data
-
-                        let metadata = Metadata::decode(payload_frame.metadata)?;
-                        Some(Payload {
-                            metadata,
-                            data: buf.to_vec(),
-                        })
-                    } else {
-                        None
-                    };
-
-                    Message { command, payload }
-                };
-
-                //TODO advance as we read, rather than this weird post thing
-                src.advance(message_size);
-                //                println!("Read message {:?}", &msg);
-                return Ok(Some(msg));
-            }
-        }
-        Ok(None)
+        decode(src)
     }
 }
 
