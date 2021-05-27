@@ -2,11 +2,12 @@
 use crate::connection::RequestKey;
 use crate::error::ConnectionError;
 use bytes::{Buf, BufMut, BytesMut};
-use crc::crc32;
 use nom::number::streaming::{be_u16, be_u32};
 use prost::{self, Message as ImplProtobuf};
 use std::convert::TryFrom;
 use std::io::Cursor;
+
+const CRC_CASTAGNOLI: crc::Crc<u32> = crc::Crc::<u32>::new(&crc::CRC_32_ISCSI);
 
 pub use self::proto::BaseCommand;
 pub use self::proto::MessageMetadata as Metadata;
@@ -246,7 +247,7 @@ impl tokio_util::codec::Encoder<Message> for Codec {
             payload.metadata.encode(&mut buf)?;
             buf.put(&payload.data[..]);
 
-            let crc = crc32::checksum_castagnoli(&buf[metdata_offset..]);
+            let crc = CRC_CASTAGNOLI.checksum(&buf[metdata_offset..]);
             let mut crc_buf: &mut [u8] = &mut buf[crc_offset..metdata_offset];
             crc_buf.put_u32(crc);
         }
@@ -350,7 +351,7 @@ impl asynchronous_codec::Encoder for Codec {
             payload.metadata.encode(&mut buf)?;
             buf.put(&payload.data[..]);
 
-            let crc = crc32::checksum_castagnoli(&buf[metdata_offset..]);
+            let crc = CRC_CASTAGNOLI.checksum(&buf[metdata_offset..]);
             let mut crc_buf: &mut [u8] = &mut buf[crc_offset..metdata_offset];
             crc_buf.put_u32(crc);
         }
