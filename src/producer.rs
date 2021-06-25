@@ -625,16 +625,11 @@ impl<Exe: Executor> TopicProducer<Exe> {
 
                 #[cfg(feature = "lz4")]
                 {
-                    let v: Vec<u8> = Vec::new();
-                    let mut encoder = lz4::EncoderBuilder::new()
-                        .build(v)
+                    let compressed_payload: Vec<u8> =
+                        lz4::block::compress(&message.payload[..], None, false)
                         .map_err(ProducerError::Io)?;
-                    encoder
-                        .write(&message.payload[..])
-                        .map_err(ProducerError::Io)?;
-                    let (compressed_payload, result) = encoder.finish();
 
-                    result.map_err(ProducerError::Io)?;
+                    message.uncompressed_size = Some(message.payload.len() as u32);
                     message.payload = compressed_payload;
                     message.compression = Some(1);
                     message
