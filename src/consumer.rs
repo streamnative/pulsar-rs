@@ -1012,13 +1012,8 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
 
                 #[cfg(feature = "lz4")]
                 {
-                    use std::io::Read;
-
-                    let mut decompressed_payload = Vec::new();
-                    let mut decoder =
-                        lz4::Decoder::new(&payload.data[..]).map_err(ConsumerError::Io)?;
-                    decoder
-                        .read_to_end(&mut decompressed_payload)
+                    let decompressed_payload =
+                        lz4::block::decompress(&payload.data[..], payload.metadata.uncompressed_size.map(|i| i as i32))
                         .map_err(ConsumerError::Io)?;
 
                     payload.data = decompressed_payload;
