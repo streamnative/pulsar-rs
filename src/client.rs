@@ -446,6 +446,17 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
         self
     }
 
+    pub fn with_tls_hostname_verification_enabled(mut self, enabled: bool) -> Self {
+        match &mut self.tls_options {
+            Some(tls) => tls.tls_hostname_verification_enabled = enabled,
+            None => self.tls_options = Some(TlsOptions {
+                tls_hostname_verification_enabled: enabled,
+                ..Default::default()
+            })
+        }
+        self
+    }
+
     /// add a custom certificate chain from a file to authenticate the server in TLS connections
     pub fn with_certificate_chain_file<P: AsRef<std::path::Path>>(
         self,
