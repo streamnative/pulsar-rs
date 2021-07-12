@@ -771,7 +771,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
                     error!("TopicProducer::from_connection error[{}]: {:?}", line!(), e);
                     e
                 }) {
-                Ok(success) => {
+                Ok(_success) => {
                     if current_retries > 0 {
                         let dur = (std::time::Instant::now() - start).as_secs();
                         log::info!(
