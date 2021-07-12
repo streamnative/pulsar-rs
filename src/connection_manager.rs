@@ -220,9 +220,9 @@ impl<Exe: Executor> ConnectionManager<Exe> {
         }
     }
 
-    async fn connect(
+    async fn connect_inner(
         &self,
-        broker: BrokerAddress,
+        broker: &BrokerAddress,
     ) -> Result<Arc<Connection<Exe>>, ConnectionError> {
         debug!("ConnectionManager::connect({:?})", broker);
 
@@ -329,6 +329,43 @@ impl<Exe: Executor> ConnectionManager<Exe> {
             );
         }
         let c = Arc::new(conn);
+
+        Ok(c)
+    }
+
+    async fn connect(
+        &self,
+        broker: BrokerAddress,
+    ) -> Result<Arc<Connection<Exe>>, ConnectionError> {
+        let c = match self.connect_inner(&broker).await {
+            Err(e) => {
+                // the current ConnectionStatus is Connecting, containing
+                // notification channels for all the tasks waiting for the
+                // reconnection. If we delete this status, they will be
+                // notified that reconnection is canceled instead of getting
+                // stuck
+                match self.connections.lock().await.remove(&broker) {
+                    Some(ConnectionStatus::Connecting(mut v)) => {
+                        for tx in v.drain(..) {
+                            // we cannot clone ConnectionError so we tell other
+                            // tasks that reconnection is canceled
+                            let _ = tx.send(Err(ConnectionError::Canceled));
+                        }
+                    }
+                    _ => {}
+                }
+
+                return Err(e);
+            }
+            Ok(c) => c,
+        };
+
+        let connection_id = c.id();
+        let proxy_url = if broker.proxy {
+            Some(broker.broker_url.clone())
+        } else {
+            None
+        };
 
         // set up client heartbeats for the connection
         let weak_conn = Arc::downgrade(&c);
