@@ -1796,6 +1796,11 @@ impl<T> Message<T> {
     pub fn message_id(&self) -> &proto::MessageIdData {
         &self.message_id.id
     }
+
+    /// Get message key (partition key)
+    pub fn key(&self) -> Option<String> {
+        self.payload.metadata.partition_key.clone()
+    }
 }
 impl<T: DeserializeMessage> Message<T> {
     /// directly deserialize a message

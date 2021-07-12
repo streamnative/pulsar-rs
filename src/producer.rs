@@ -987,6 +987,15 @@ impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
         self
     }
 
+    /// sets the message's partition key
+    ///
+    /// this is the same as `with_partition_key`, this method is added for
+    /// more consistency with other clients
+    pub fn with_key<S: Into<String>>(mut self, partition_key: S) -> Self {
+        self.partition_key = Some(partition_key.into());
+        self
+    }
+
     /// sets a user defined property
     pub fn with_property<S1: Into<String>, S2: Into<String>>(mut self, key: S1, value: S2) -> Self {
         self.properties.insert(key.into(), value.into());
