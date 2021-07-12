@@ -21,6 +21,7 @@ use futures::{
 };
 use url::Url;
 
+use crate::connection::messages::connect;
 use crate::consumer::ConsumerOptions;
 use crate::error::{ConnectionError, SharedError};
 use crate::executor::{Executor, ExecutorKind};
@@ -534,6 +535,8 @@ impl<Exe: Executor> Connection<Exe> {
         auth_data: Option<Authentication>,
         proxy_to_broker_url: Option<String>,
         certificate_chain: &[Certificate],
+        allow_insecure_connection: bool,
+        tls_hostname_verification_enabled: bool,
         connection_timeout: Duration,
         operation_timeout: Duration,
         executor: Arc<Exe>,
@@ -592,6 +595,8 @@ impl<Exe: Executor> Connection<Exe> {
             auth_data,
             proxy_to_broker_url,
             certificate_chain,
+            allow_insecure_connection,
+            tls_hostname_verification_enabled,
             executor.clone(),
             operation_timeout,
         );
@@ -622,6 +627,8 @@ impl<Exe: Executor> Connection<Exe> {
         auth_data: Option<Authentication>,
         proxy_to_broker_url: Option<String>,
         certificate_chain: &[Certificate],
+        allow_insecure_connection: bool,
+        tls_hostname_verification_enabled: bool,
         executor: Arc<Exe>,
         operation_timeout: Duration,
     ) -> Result<ConnectionSender<Exe>, ConnectionError> {
@@ -635,6 +642,10 @@ impl<Exe: Executor> Connection<Exe> {
                     for certificate in certificate_chain {
                         builder.add_root_certificate(certificate.clone());
                     }
+                    builder.danger_accept_invalid_hostnames(
+                        allow_insecure_connection && !tls_hostname_verification_enabled,
+                    );
+                    builder.danger_accept_invalid_certs(allow_insecure_connection);
                     let cx = builder.build()?;
                     let cx = tokio_native_tls::TlsConnector::from(cx);
                     let stream = cx
@@ -677,6 +688,10 @@ impl<Exe: Executor> Connection<Exe> {
                     for certificate in certificate_chain {
                         connector = connector.add_root_certificate(certificate.clone());
                     }
+                    connector = connector.danger_accept_invalid_hostnames(
+                        allow_insecure_connection && !tls_hostname_verification_enabled,
+                    );
+                    connector = connector.danger_accept_invalid_certs(allow_insecure_connection);
                     let stream = connector
                         .connect(&hostname, stream)
                         .await

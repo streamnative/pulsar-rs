@@ -71,10 +71,30 @@ impl std::default::Default for OperationRetryOptions {
 }
 
 /// configuration for TLS connections
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct TlsOptions {
     /// contains a list of PEM encoded certificates
     pub certificate_chain: Option<Vec<u8>>,
+
+    /// allow insecure TLS connection if set to true
+    ///
+    /// defaults to *false*
+    pub allow_insecure_connection: bool,
+
+    /// whether hostname verification is enabled when insecure TLS connection is allowed
+    ///
+    /// defaults to *true*
+    pub tls_hostname_verification_enabled: bool,
+}
+
+impl Default for TlsOptions {
+    fn default() -> Self {
+        Self {
+            certificate_chain: None,
+            allow_insecure_connection: false,
+            tls_hostname_verification_enabled: true,
+        }
+    }
 }
 
 enum ConnectionStatus<Exe: Executor> {
@@ -269,6 +289,8 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                 self.auth.clone(),
                 proxy_url.clone(),
                 &self.certificate_chain,
+                self.tls_options.allow_insecure_connection,
+                self.tls_options.tls_hostname_verification_enabled,
                 self.connection_retry_options.connection_timeout,
                 self.operation_retry_options.operation_timeout,
                 self.executor.clone(),

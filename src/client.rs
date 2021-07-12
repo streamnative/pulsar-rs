@@ -425,9 +425,41 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
 
     /// add a custom certificate chain to authenticate the server in TLS connections
     pub fn with_certificate_chain(mut self, certificate_chain: Vec<u8>) -> Self {
-        self.tls_options = Some(TlsOptions {
-            certificate_chain: Some(certificate_chain),
-        });
+        match &mut self.tls_options {
+            Some(tls) => tls.certificate_chain = Some(certificate_chain),
+            None => {
+                self.tls_options = Some(TlsOptions {
+                    certificate_chain: Some(certificate_chain),
+                    ..Default::default()
+                })
+            }
+        }
+        self
+    }
+
+    pub fn with_allow_insecure_connection(mut self, allow: bool) -> Self {
+        match &mut self.tls_options {
+            Some(tls) => tls.allow_insecure_connection = allow,
+            None => {
+                self.tls_options = Some(TlsOptions {
+                    allow_insecure_connection: allow,
+                    ..Default::default()
+                })
+            }
+        }
+        self
+    }
+
+    pub fn with_tls_hostname_verification_enabled(mut self, enabled: bool) -> Self {
+        match &mut self.tls_options {
+            Some(tls) => tls.tls_hostname_verification_enabled = enabled,
+            None => {
+                self.tls_options = Some(TlsOptions {
+                    tls_hostname_verification_enabled: enabled,
+                    ..Default::default()
+                })
+            }
+        }
         self
     }
 
