@@ -1089,7 +1089,7 @@ pub(crate) mod messages {
                             value: v.clone(),
                         })
                         .collect(),
-                    read_compacted: options.read_compacted,
+                    read_compacted: Some(options.read_compacted.unwrap_or(false)),
                     initial_position: Some(options.initial_position.into()),
                     schema: options.schema,
                     start_message_id: options.start_message_id,

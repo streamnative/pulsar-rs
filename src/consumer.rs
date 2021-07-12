@@ -1446,7 +1446,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
             subscription,
             subscription_type,
             consumer_id,
-            consumer_name,
+            mut consumer_name,
             batch_size,
             unacked_message_resend_delay,
             namespace,
@@ -1454,6 +1454,14 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
             consumer_options,
             dead_letter_policy,
         } = self;
+
+        if consumer_name.is_none() {
+            let s: String = (0..8)
+                .map(|_| rand::thread_rng().sample(Alphanumeric))
+                .map(|c| c as char)
+                .collect();
+            consumer_name = Some(format!("consumer_{}", s));
+        }
 
         if topics.is_none() && topic_regex.is_none() {
             return Err(Error::Custom(
