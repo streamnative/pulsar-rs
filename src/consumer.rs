@@ -1564,7 +1564,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
 
 /// the complete configuration of a consumer
 #[derive(Debug, Clone, Default)]
-pub struct ConsumerConfig {
+struct ConsumerConfig {
     /// subscription name
     subscription: String,
     /// subscription type
