@@ -752,16 +752,71 @@ impl<Exe: Executor> TopicProducer<Exe> {
         let topic = self.topic.clone();
         let batch_size = self.options.batch_size;
 
-        let _ = self
-            .connection
-            .sender()
-            .create_producer(
-                topic.clone(),
-                self.id,
-                Some(self.name.clone()),
-                self.options.clone(),
-            )
-            .await?;
+        let mut current_retries = 0u32;
+        let start = std::time::Instant::now();
+        let operation_retry_options = self.client.operation_retry_options.clone();
+
+        loop {
+            match self
+                .connection
+                .sender()
+                .create_producer(
+                    topic.clone(),
+                    self.id,
+                    Some(self.name.clone()),
+                    self.options.clone(),
+                )
+                .await
+                .map_err(|e| {
+                    error!("TopicProducer::from_connection error[{}]: {:?}", line!(), e);
+                    e
+                }) {
+                Ok(success) => {
+                    if current_retries > 0 {
+                        let dur = (std::time::Instant::now() - start).as_secs();
+                        log::info!(
+                            "subscribe({}) success after {} retries over {} seconds",
+                            topic,
+                            current_retries + 1,
+                            dur
+                        );
+                    }
+                    break;
+                }
+                Err(ConnectionError::PulsarError(
+                    Some(proto::ServerError::ServiceNotReady),
+                    text,
+                )) => {
+                    if operation_retry_options.max_retries.is_none()
+                        || operation_retry_options.max_retries.unwrap() > current_retries
+                    {
+                        error!("create_producer({}) answered ServiceNotReady, retrying request after {}ms (max_retries = {:?}): {}",
+                        topic, operation_retry_options.retry_delay.as_millis(),
+                        operation_retry_options.max_retries, text.unwrap_or_else(String::new));
+
+                        current_retries += 1;
+                        self.client
+                            .executor
+                            .delay(operation_retry_options.retry_delay)
+                            .await;
+
+                        let addr = self.client.lookup_topic(&topic).await?;
+                        self.connection = self.client.manager.get_connection(&addr).await?;
+
+                        continue;
+                    } else {
+                        error!("create_producer({}) reached max retries", topic);
+
+                        return Err(ConnectionError::PulsarError(
+                            Some(proto::ServerError::ServiceNotReady),
+                            text,
+                        )
+                        .into());
+                    }
+                }
+                Err(e) => return Err(Error::Connection(e)),
+            }
+        }
 
         // drop_signal will be dropped when the TopicProducer is dropped, then
         // drop_receiver will return, and we can close the producer

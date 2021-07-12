@@ -21,7 +21,6 @@ use futures::{
 };
 use url::Url;
 
-use crate::connection::messages::connect;
 use crate::consumer::ConsumerOptions;
 use crate::error::{ConnectionError, SharedError};
 use crate::executor::{Executor, ExecutorKind};
