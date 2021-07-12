@@ -21,6 +21,7 @@ use futures::{
 };
 use url::Url;
 
+use crate::connection::messages::connect;
 use crate::consumer::ConsumerOptions;
 use crate::error::{ConnectionError, SharedError};
 use crate::executor::{Executor, ExecutorKind};
@@ -29,7 +30,6 @@ use crate::message::{
     BaseCommand, Codec, Message,
 };
 use crate::producer::{self, ProducerOptions};
-use crate::connection::messages::connect;
 
 pub(crate) enum Register {
     Request {
@@ -642,8 +642,9 @@ impl<Exe: Executor> Connection<Exe> {
                     for certificate in certificate_chain {
                         builder.add_root_certificate(certificate.clone());
                     }
-                    builder.danger_accept_invalid_hostnames(allow_insecure_connection &&
-                        !tls_hostname_verification_enabled);
+                    builder.danger_accept_invalid_hostnames(
+                        allow_insecure_connection && !tls_hostname_verification_enabled,
+                    );
                     builder.danger_accept_invalid_certs(allow_insecure_connection);
                     let cx = builder.build()?;
                     let cx = tokio_native_tls::TlsConnector::from(cx);
@@ -687,8 +688,9 @@ impl<Exe: Executor> Connection<Exe> {
                     for certificate in certificate_chain {
                         connector = connector.add_root_certificate(certificate.clone());
                     }
-                    connector = connector.danger_accept_invalid_hostnames(allow_insecure_connection &&
-                        !tls_hostname_verification_enabled);
+                    connector = connector.danger_accept_invalid_hostnames(
+                        allow_insecure_connection && !tls_hostname_verification_enabled,
+                    );
                     connector = connector.danger_accept_invalid_certs(allow_insecure_connection);
                     let stream = connector
                         .connect(&hostname, stream)

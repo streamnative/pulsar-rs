@@ -71,16 +71,30 @@ impl std::default::Default for OperationRetryOptions {
 }
 
 /// configuration for TLS connections
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct TlsOptions {
     /// contains a list of PEM encoded certificates
     pub certificate_chain: Option<Vec<u8>>,
 
     /// allow insecure TLS connection if set to true
+    ///
+    /// defaults to *false*
     pub allow_insecure_connection: bool,
 
     /// whether hostname verification is enabled when insecure TLS connection is allowed
+    ///
+    /// defaults to *true*
     pub tls_hostname_verification_enabled: bool,
+}
+
+impl Default for TlsOptions {
+    fn default() -> Self {
+        Self {
+            certificate_chain: None,
+            allow_insecure_connection: false,
+            tls_hostname_verification_enabled: true,
+        }
+    }
 }
 
 enum ConnectionStatus<Exe: Executor> {
