@@ -627,7 +627,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
                 {
                     let compressed_payload: Vec<u8> =
                         lz4::block::compress(&message.payload[..], None, false)
-                        .map_err(ProducerError::Io)?;
+                            .map_err(ProducerError::Io)?;
 
                     message.uncompressed_size = Some(message.payload.len() as u32);
                     message.payload = compressed_payload;

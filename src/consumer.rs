@@ -1012,9 +1012,11 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
 
                 #[cfg(feature = "lz4")]
                 {
-                    let decompressed_payload =
-                        lz4::block::decompress(&payload.data[..], payload.metadata.uncompressed_size.map(|i| i as i32))
-                        .map_err(ConsumerError::Io)?;
+                    let decompressed_payload = lz4::block::decompress(
+                        &payload.data[..],
+                        payload.metadata.uncompressed_size.map(|i| i as i32),
+                    )
+                    .map_err(ConsumerError::Io)?;
 
                     payload.data = decompressed_payload;
                     payload
