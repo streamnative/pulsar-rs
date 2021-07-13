@@ -128,10 +128,7 @@ impl<T: DeserializeMessage, Exe: Executor> Reader<T, Exe> {
 
     /// returns the reader's name
     pub fn reader_name(&self) -> Option<&str> {
-        self.consumer
-            .config
-            .consumer_name
-            .as_deref()
+        self.consumer.config.consumer_name.as_deref()
     }
 
     /// returns the reader's id

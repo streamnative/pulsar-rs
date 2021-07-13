@@ -171,10 +171,7 @@ impl fmt::Display for ConsumerError {
                 f,
                 "cannot send message to the consumer engine: the channel is closed"
             ),
-            ConsumerError::BuildError => write!(
-                f,
-                "Error while building the consumer."
-            )
+            ConsumerError::BuildError => write!(f, "Error while building the consumer."),
         }
     }
 }

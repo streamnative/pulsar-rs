@@ -366,7 +366,9 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                 // reconnection. If we delete this status, they will be
                 // notified that reconnection is canceled instead of getting
                 // stuck
-                if let Some(ConnectionStatus::Connecting(mut v)) = self.connections.lock().await.remove(&broker) {
+                if let Some(ConnectionStatus::Connecting(mut v)) =
+                    self.connections.lock().await.remove(&broker)
+                {
                     for tx in v.drain(..) {
                         // we cannot clone ConnectionError so we tell other
                         // tasks that reconnection is canceled

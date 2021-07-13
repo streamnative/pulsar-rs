@@ -235,11 +235,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
                     try_join_all(topics.into_iter().map(|topic| client.lookup_topic(topic)))
                         .await?;
 
-                let topic_addr_pair = c
-                    .topics
-                    .iter()
-                    .cloned()
-                    .zip(addrs.iter().cloned());
+                let topic_addr_pair = c.topics.iter().cloned().zip(addrs.iter().cloned());
 
                 let consumers = try_join_all(topic_addr_pair.map(|(topic, addr)| {
                     TopicConsumer::new(client.clone(), topic, addr, c.config().clone())
