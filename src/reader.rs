@@ -52,7 +52,7 @@ impl<T: DeserializeMessage + 'static, Exe: Executor> Stream for Reader<T, Exe> {
                             async move { acker.send(EngineMessage::Ack(message_id, false)).await },
                         ),
                     ));
-                    return Pin::new(this).poll_next(cx);
+                    Pin::new(this).poll_next(cx)
                 }
 
                 Poll::Ready(Some(Err(e))) => {
@@ -63,14 +63,14 @@ impl<T: DeserializeMessage + 'static, Exe: Executor> Stream for Reader<T, Exe> {
             State::PollingAck(msg, mut ack_fut) => match ack_fut.as_mut().poll(cx) {
                 Poll::Pending => {
                     this.state = Some(State::PollingAck(msg, ack_fut));
-                    return Poll::Pending;
+                    Poll::Pending
                 }
 
                 Poll::Ready(res) => {
                     this.state = Some(State::PollingConsumer);
-                    return Poll::Ready(Some(
+                    Poll::Ready(Some(
                         res.map_err(|err| Error::Consumer(err.into())).map(|()| msg),
-                    ));
+                    ))
                 }
             },
         }
@@ -131,8 +131,7 @@ impl<T: DeserializeMessage, Exe: Executor> Reader<T, Exe> {
         self.consumer
             .config
             .consumer_name
-            .as_ref()
-            .map(|s| s.as_str())
+            .as_deref()
     }
 
     /// returns the reader's id

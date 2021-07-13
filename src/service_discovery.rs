@@ -274,7 +274,7 @@ fn convert_lookup_response(
     })?;
 
     let broker_url_tls = match response.broker_service_url_tls.as_ref() {
-        Some(u) => Some(Url::parse(&u).map_err(|e| {
+        Some(u) => Some(Url::parse(u).map_err(|e| {
             error!("error parsing URL: {:?}", e);
             ServiceDiscoveryError::NotFound
         })?),

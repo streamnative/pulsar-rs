@@ -235,21 +235,20 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
                     try_join_all(topics.into_iter().map(|topic| client.lookup_topic(topic)))
                         .await?;
 
-                let topic_addr_pair: Vec<(String, BrokerAddress)> = c
+                let topic_addr_pair = c
                     .topics
                     .iter()
                     .cloned()
-                    .zip(addrs.iter().cloned())
-                    .collect();
+                    .zip(addrs.iter().cloned());
 
-                let consumers = try_join_all(topic_addr_pair.into_iter().map(|(topic, addr)| {
+                let consumers = try_join_all(topic_addr_pair.map(|(topic, addr)| {
                     TopicConsumer::new(client.clone(), topic, addr, c.config().clone())
                 }))
                 .await?;
 
                 let consumers: BTreeMap<_, _> = consumers
                     .into_iter()
-                    .map(|c| (c.topic().to_owned(), Box::pin(c)))
+                    .map(|c| (c.topic(), Box::pin(c)))
                     .collect();
                 let topics = consumers.keys().cloned().collect();
                 let topic_refresh = Duration::from_secs(30);
@@ -928,7 +927,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                                     error!("could not ask for redelivery: {:?}", e);
                                 } else {
                                     for i in h.iter() {
-                                        self.unacked_messages.remove(&i);
+                                        self.unacked_messages.remove(i);
                                     }
                                 }
                             }
@@ -1589,7 +1588,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
         } else {
             let consumers: BTreeMap<_, _> = consumers
                 .into_iter()
-                .map(|c| (c.topic().to_owned(), Box::pin(c)))
+                .map(|c| (c.topic(), Box::pin(c)))
                 .collect();
             let topics = consumers.keys().cloned().collect();
             let topic_refresh = self
@@ -1793,7 +1792,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
 
     async fn ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         if let Some(c) = self.consumers.get_mut(&msg.topic) {
-            c.ack(&msg).await
+            c.ack(msg).await
         } else {
             Err(ConnectionError::Unexpected(format!("no consumer for topic {}", msg.topic)).into())
         }
@@ -1801,7 +1800,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
 
     async fn cumulative_ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         if let Some(c) = self.consumers.get_mut(&msg.topic) {
-            c.cumulative_ack(&msg).await
+            c.cumulative_ack(msg).await
         } else {
             Err(ConnectionError::Unexpected(format!("no consumer for topic {}", msg.topic)).into())
         }
@@ -1809,7 +1808,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
 
     async fn nack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         if let Some(c) = self.consumers.get_mut(&msg.topic) {
-            c.nack(&msg).await?;
+            c.nack(msg).await?;
             Ok(())
         } else {
             Err(ConnectionError::Unexpected(format!("no consumer for topic {}", msg.topic)).into())

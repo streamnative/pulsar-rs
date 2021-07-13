@@ -225,7 +225,7 @@ pub struct Producer<Exe: Executor> {
 impl<Exe: Executor> Producer<Exe> {
     /// creates a producer builder from a client instance
     pub fn builder(pulsar: &Pulsar<Exe>) -> ProducerBuilder<Exe> {
-        ProducerBuilder::new(&pulsar)
+        ProducerBuilder::new(pulsar)
     }
 
     /// this producer's topic

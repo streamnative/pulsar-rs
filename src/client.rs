@@ -53,7 +53,7 @@ impl SerializeMessage for producer::Message {
 }
 
 impl<'a> SerializeMessage for () {
-    fn serialize_message(input: Self) -> Result<producer::Message, Error> {
+    fn serialize_message(_input: Self) -> Result<producer::Message, Error> {
         Ok(producer::Message {
             ..Default::default()
         })
