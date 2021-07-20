@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::Write;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::client::SerializeMessage;
 use crate::connection::{Connection, SerialId};
@@ -88,6 +89,9 @@ pub(crate) struct ProducerMessage {
     /// Additional parameters required by encryption
     pub encryption_param: ::std::option::Option<Vec<u8>>,
     pub schema_version: ::std::option::Option<Vec<u8>>,
+    /// UTC Unix timestamp in milliseconds, time at which the message should be
+    /// delivered to consumers
+    pub deliver_at_time: ::std::option::Option<i64>,
 }
 
 impl From<Message> for ProducerMessage {
@@ -1010,6 +1014,7 @@ pub struct MessageBuilder<'a, T, Exe: Executor> {
     producer: &'a mut Producer<Exe>,
     properties: HashMap<String, String>,
     partition_key: Option<String>,
+    deliver_at_time: Option<i64>,
     content: T,
 }
 
@@ -1020,6 +1025,7 @@ impl<'a, Exe: Executor> MessageBuilder<'a, (), Exe> {
             producer,
             properties: HashMap::new(),
             partition_key: None,
+            deliver_at_time: None,
             content: (),
         }
     }
@@ -1032,6 +1038,7 @@ impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
             producer: self.producer,
             properties: self.properties,
             partition_key: self.partition_key,
+            deliver_at_time: self.deliver_at_time,
             content,
         }
     }
@@ -1056,6 +1063,24 @@ impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
         self.properties.insert(key.into(), value.into());
         self
     }
+
+    /// delivers the message at this date
+    pub fn deliver_at(mut self, date: SystemTime) -> Result<Self, std::time::SystemTimeError> {
+        self.deliver_at_time = Some(date.duration_since(UNIX_EPOCH)?.as_millis() as i64);
+        Ok(self)
+    }
+
+    /// delays message deliver with this duration
+    pub fn delay(mut self, delay: Duration) -> Result<Self, std::time::SystemTimeError> {
+        let date = SystemTime::now() + delay;
+        println!(
+            "current date: {}, deliver_at: {}",
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
+            date.duration_since(UNIX_EPOCH)?.as_millis()
+        );
+        self.deliver_at_time = Some(date.duration_since(UNIX_EPOCH)?.as_millis() as i64);
+        Ok(self)
+    }
 }
 
 impl<'a, T: SerializeMessage + Sized, Exe: Executor> MessageBuilder<'a, T, Exe> {
@@ -1066,11 +1091,15 @@ impl<'a, T: SerializeMessage + Sized, Exe: Executor> MessageBuilder<'a, T, Exe> 
             properties,
             partition_key,
             content,
+            deliver_at_time,
         } = self;
 
         let mut message = T::serialize_message(content)?;
         message.properties = properties;
         message.partition_key = partition_key;
-        producer.send_raw(message.into()).await
+
+        let mut producer_message: ProducerMessage = message.into();
+        producer_message.deliver_at_time = deliver_at_time;
+        producer.send_raw(producer_message).await
     }
 }

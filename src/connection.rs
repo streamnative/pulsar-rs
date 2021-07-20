@@ -1022,6 +1022,7 @@ pub(crate) mod messages {
                     encryption_algo: message.encryption_algo,
                     encryption_param: message.encryption_param,
                     schema_version: message.schema_version,
+                    deliver_at_time: message.deliver_at_time,
                     ..Default::default()
                 },
                 data: message.payload,
