@@ -22,7 +22,7 @@ travis-ci = {repository = "wyyerd/pulsar-rs"}
 bytes = "1.0.0"
 crc = "2.0.0"
 futures = "0.3"
-nom = { version="7.0.0-alpha1", default-features=false, features=["alloc"] }
+nom = { version="=7.0.0-alpha1", default-features=false, features=["alloc"] }
 prost = "0.8.0"
 prost-derive = "0.8.0"
 rand = "0.8"
