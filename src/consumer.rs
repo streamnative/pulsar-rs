@@ -271,6 +271,13 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         Ok(())
     }
 
+    pub async fn unsubscribe(&mut self) -> Result<(), Error> {
+        match &mut self.inner {
+            InnerConsumer::Single(c) => c.unsubscribe().await,
+            InnerConsumer::Multi(c) => c.unsubscribe().await,
+        }
+    }
+
     /// returns the list of topics this consumer is subscribed on
     pub fn topics(&self) -> Vec<String> {
         match &self.inner {
@@ -664,6 +671,16 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
             .await?
             .sender()
             .seek(consumer_id, message_id, timestamp)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn unsubscribe(&mut self) -> Result<(), Error> {
+        let consumer_id = self.consumer_id;
+        self.connection()
+            .await?
+            .sender()
+            .unsubscribe(consumer_id)
             .await?;
         Ok(())
     }
@@ -1715,6 +1732,14 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
 
         for consumer in self.consumers.values_mut() {
             consumer.connection().await?.sender().send_ping().await?;
+        }
+
+        Ok(())
+    }
+
+    async fn unsubscribe(&mut self) -> Result<(), Error> {
+        for consumer in self.consumers.values_mut() {
+            consumer.unsubscribe().await?;
         }
 
         Ok(())

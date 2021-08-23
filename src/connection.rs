@@ -473,6 +473,18 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         .await
     }
 
+    pub async fn unsubscribe(
+        &self,
+        consumer_id: u64,
+    ) -> Result<proto::CommandSuccess, ConnectionError> {
+        let request_id = self.request_id.get();
+        let msg = messages::unsubscribe(consumer_id, request_id);
+        self.send_message(msg, RequestKey::RequestId(request_id), |resp| {
+            resp.command.success
+        })
+        .await
+    }
+
     async fn send_message<R: Debug, F>(
         &self,
         msg: Message,
@@ -1203,6 +1215,20 @@ pub(crate) mod messages {
                     request_id,
                     message_id,
                     message_publish_time,
+                }),
+                ..Default::default()
+            },
+            payload: None,
+        }
+    }
+
+    pub fn unsubscribe(consumer_id: u64, request_id: u64) -> Message {
+        Message {
+            command: proto::BaseCommand {
+                r#type: CommandType::Unsubscribe as i32,
+                unsubscribe: Some(proto::CommandUnsubscribe {
+                    consumer_id,
+                    request_id,
                 }),
                 ..Default::default()
             },
