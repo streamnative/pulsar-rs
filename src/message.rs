@@ -2,7 +2,12 @@
 use crate::connection::RequestKey;
 use crate::error::ConnectionError;
 use bytes::{Buf, BufMut, BytesMut};
-use nom::number::streaming::{be_u16, be_u32};
+use nom::{
+    bytes::streaming::take,
+    combinator::{map_res, verify},
+    number::streaming::{be_u16, be_u32},
+    IResult,
+};
 use prost::{self, Message as ImplProtobuf};
 use std::convert::TryFrom;
 use std::io::Cursor;
@@ -437,20 +442,20 @@ struct CommandFrame<'a> {
     command: &'a [u8],
 }
 
-#[rustfmt::skip::macros(named)]
-named!(command_frame<CommandFrame>,
-    do_parse!(
-        total_size: be_u32 >>
-        command_size: be_u32 >>
-        command: take!(command_size) >>
+fn command_frame(i: &[u8]) -> IResult<&[u8], CommandFrame> {
+    let (i, total_size) = be_u32(i)?;
+    let (i, command_size) = be_u32(i)?;
+    let (i, command) = take(command_size)(i)?;
 
-        (CommandFrame {
+    Ok((
+        i,
+        CommandFrame {
             total_size,
             command_size,
             command,
-        })
-    )
-);
+        },
+    ))
+}
 
 struct PayloadFrame<'a> {
     #[allow(dead_code)]
@@ -462,44 +467,46 @@ struct PayloadFrame<'a> {
     metadata: &'a [u8],
 }
 
-#[rustfmt::skip::macros(named)]
-named!(payload_frame<PayloadFrame>,
-    do_parse!(
-        magic_number: be_u16 >>
-        checksum: be_u32 >>
-        metadata_size: be_u32 >>
-        metadata: take!(metadata_size) >>
+fn payload_frame(i: &[u8]) -> IResult<&[u8], PayloadFrame> {
+    let (i, magic_number) = be_u16(i)?;
+    let (i, checksum) = be_u32(i)?;
+    let (i, metadata_size) = be_u32(i)?;
+    let (i, metadata) = take(metadata_size)(i)?;
 
-        (PayloadFrame {
+    Ok((
+        i,
+        PayloadFrame {
             magic_number,
             checksum,
             metadata_size,
             metadata,
-        })
-    )
-);
+        },
+    ))
+}
 
 pub(crate) struct BatchedMessage {
     pub metadata: proto::SingleMessageMetadata,
     pub payload: Vec<u8>,
 }
 
-#[rustfmt::skip::macros(named)]
-named!(batched_message<BatchedMessage>,
-    do_parse!(
-        metadata_size: be_u32 >>
-        metadata: map_res!(
-            take!(metadata_size),
-            proto::SingleMessageMetadata::decode
-        ) >>
-        payload: take!(metadata.payload_size) >>
+fn batched_message(i: &[u8]) -> IResult<&[u8], BatchedMessage> {
+    let (i, metadata_size) = be_u32(i)?;
+    let (i, metadata) = verify(
+        map_res(take(metadata_size), proto::SingleMessageMetadata::decode),
+        // payload_size is defined as i32 in protobuf
+        |metadata| metadata.payload_size >= 0,
+    )(i)?;
 
-        (BatchedMessage {
+    let (i, payload) = take(metadata.payload_size as u64)(i)?;
+
+    Ok((
+        i,
+        BatchedMessage {
             metadata,
             payload: payload.to_vec(),
-        })
-    )
-);
+        },
+    ))
+}
 
 pub(crate) fn parse_batched_message(
     count: u32,
