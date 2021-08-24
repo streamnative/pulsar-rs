@@ -497,7 +497,7 @@ fn batched_message(i: &[u8]) -> IResult<&[u8], BatchedMessage> {
         |metadata| metadata.payload_size >= 0,
     )(i)?;
 
-    let (i, payload) = take(metadata.payload_size as u64)(i)?;
+    let (i, payload) = take(metadata.payload_size as u32)(i)?;
 
     Ok((
         i,
