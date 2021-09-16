@@ -538,14 +538,15 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         let conn = connection.clone();
         //let ack_sender = nack_handler.clone();
         let name = consumer_name.clone();
+        let topic_name = topic.clone();
         let _ = client.executor.spawn(Box::pin(async move {
             let _res = drop_receiver.await;
             // if we receive a message, it indicates we want to stop this task
             if _res.is_err() {
                 if let Err(e) = conn.sender().close_consumer(consumer_id).await {
                     error!(
-                        "could not close consumer {:?}({}): {:?}",
-                        consumer_name, consumer_id, e
+                        "could not close consumer {:?}({}) for topic {}: {:?}",
+                        consumer_name, consumer_id, topic_name, e
                     );
                 }
             }
@@ -1251,12 +1252,13 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         let conn = self.connection.clone();
         let name = self.name.clone();
         let id = self.id;
+        let topic = self.topic.clone();
         let _ = self.client.executor.spawn(Box::pin(async move {
             let _res = drop_receiver.await;
             // if we receive a message, it indicates we want to stop this task
             if _res.is_err() {
                 if let Err(e) = conn.sender().close_consumer(id).await {
-                    error!("could not close consumer {:?}({}): {:?}", name, id, e);
+                    error!("could not close consumer {:?}({}) for topic {}: {:?}", name, id, topic, e);
                 }
             }
         }));
