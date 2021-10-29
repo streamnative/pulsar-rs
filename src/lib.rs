@@ -15,13 +15,25 @@
 //!
 //! ## Examples
 //!
+//! Copy this into your project's Cargo.toml:
+//!
+//! ```toml
+//! [dependencies]
+//! env_logger = "0.9"
+//! pulsar = "4.1.1"
+//! serde = { version = "1.0", features = ["derive"] }
+//! serde_json = "1.0"
+//! tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
+//! log = "0.4.6"
+//! futures = "0.3"
+//! ```
+//!
 //! ### Producing
 //! ```rust,no_run
-//! #[macro_use]
-//! extern crate serde;
 //! use pulsar::{
 //!     message::proto, producer, Error as PulsarError, Pulsar, SerializeMessage, TokioExecutor,
 //! };
+//! use serde::{Deserialize, Serialize};
 //!
 //! #[derive(Serialize, Deserialize)]
 //! struct TestData {
@@ -75,13 +87,12 @@
 //!
 //! ### Consuming
 //! ```rust,no_run
-//! #[macro_use]
-//! extern crate serde;
 //! use futures::TryStreamExt;
 //! use pulsar::{
 //!     message::proto::command_subscribe::SubType, message::Payload, Consumer, DeserializeMessage,
 //!     Pulsar, TokioExecutor,
 //! };
+//! use serde::{Deserialize, Serialize};
 //!
 //! #[derive(Serialize, Deserialize)]
 //! struct TestData {
