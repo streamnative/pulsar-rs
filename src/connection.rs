@@ -705,13 +705,14 @@ impl<Exe: Executor> Connection<Exe> {
         operation_timeout: Duration,
         executor: Arc<Exe>,
     ) -> Result<Connection<Exe>, ConnectionError> {
-        if url.scheme() != "pulsar" && url.scheme() != "pulsar+ssl" {
+        if url.scheme() != "http" && url.scheme() != "pulsar" && url.scheme() != "pulsar+ssl" {
             error!("invalid scheme: {}", url.scheme());
             return Err(ConnectionError::NotFound);
         }
         let hostname = url.host().map(|s| s.to_string());
 
         let tls = match url.scheme() {
+            "http" => false,
             "pulsar" => false,
             "pulsar+ssl" => true,
             s => {
@@ -724,6 +725,7 @@ impl<Exe: Executor> Connection<Exe> {
         let address: SocketAddr = match executor
             .spawn_blocking(move || {
                 u.socket_addrs(|| match u.scheme() {
+                    "http" => Some(80),
                     "pulsar" => Some(6650),
                     "pulsar+ssl" => Some(6651),
                     _ => None,
