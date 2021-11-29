@@ -232,7 +232,7 @@ impl<Exe: Executor> Pulsar<Exe> {
     pub fn builder<S: Into<String>>(url: S, executor: Exe) -> PulsarBuilder<Exe> {
         PulsarBuilder {
             url: url.into(),
-            auth: None,
+            auth_provider: None,
             connection_retry_options: None,
             operation_retry_options: None,
             tls_options: None,
@@ -423,7 +423,7 @@ impl<Exe: Executor> Pulsar<Exe> {
 /// Helper structure to generate a [Pulsar] client
 pub struct PulsarBuilder<Exe: Executor> {
     url: String,
-    auth: Option<Authentication>,
+    auth_provider: Option<Box<dyn crate::authentication::Authentication>>,
     connection_retry_options: Option<ConnectionRetryOptions>,
     operation_retry_options: Option<OperationRetryOptions>,
     tls_options: Option<TlsOptions>,
@@ -432,8 +432,12 @@ pub struct PulsarBuilder<Exe: Executor> {
 
 impl<Exe: Executor> PulsarBuilder<Exe> {
     /// Authentication parameters (JWT, Biscuit, etc)
-    pub fn with_auth(mut self, auth: Authentication) -> Self {
-        self.auth = Some(auth);
+    pub fn with_auth(self, auth: Authentication) -> Self {
+        self.with_auth_provider(Box::new(auth))
+    }
+
+    pub fn with_auth_provider(mut self, auth: Box<dyn crate::authentication::Authentication>) -> Self {
+        self.auth_provider = Some(auth);
         self
     }
 
@@ -513,15 +517,25 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
     pub async fn build(self) -> Result<Pulsar<Exe>, Error> {
         let PulsarBuilder {
             url,
-            auth,
+            mut auth_provider,
             connection_retry_options,
             operation_retry_options,
             tls_options,
             executor,
         } = self;
+        let auth_data = match auth_provider.as_mut() {
+            Some(auth) => Some(Authentication {
+                name: auth.auth_method_name(),
+                data: {
+                    auth.initialize().await?;
+                    auth.auth_data().await?
+                },
+            }),
+            None => None,
+        };
         Pulsar::new(
             url,
-            auth,
+            auth_data,
             connection_retry_options,
             operation_retry_options,
             tls_options,

@@ -29,6 +29,8 @@ use crate::message::{
     BaseCommand, Codec, Message,
 };
 use crate::producer::{self, ProducerOptions};
+use crate::Error;
+use async_trait::async_trait;
 
 pub(crate) enum Register {
     Request {
@@ -60,6 +62,21 @@ pub struct Authentication {
     pub name: String,
     /// Authentication data
     pub data: Vec<u8>,
+}
+
+#[async_trait]
+impl crate::authentication::Authentication for Authentication {
+    fn auth_method_name(&self) -> String {
+        self.name.clone()
+    }
+
+    async fn initialize(&mut self) -> Result<(), Error> {
+        Ok(())
+    }
+
+    async fn auth_data(&mut self) -> Result<Vec<u8>, Error> {
+        Ok(self.data.clone())
+    }
 }
 
 pub(crate) struct Receiver<S: Stream<Item = Result<Message, ConnectionError>>> {
