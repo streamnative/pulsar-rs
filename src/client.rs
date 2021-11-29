@@ -15,6 +15,7 @@ use crate::message::Payload;
 use crate::producer::{self, ProducerBuilder, SendFuture};
 use crate::service_discovery::ServiceDiscovery;
 use futures::StreamExt;
+use futures::lock::Mutex;
 
 /// Helper trait for consumer deserialization
 pub trait DeserializeMessage {
@@ -158,7 +159,7 @@ impl<Exe: Executor> Pulsar<Exe> {
     /// creates a new client
     pub(crate) async fn new<S: Into<String>>(
         url: S,
-        auth: Option<Authentication>,
+        auth: Option<Arc<Mutex<Box<dyn crate::authentication::Authentication>>>>,
         connection_retry_parameters: Option<ConnectionRetryOptions>,
         operation_retry_parameters: Option<OperationRetryOptions>,
         tls_options: Option<TlsOptions>,
@@ -517,25 +518,16 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
     pub async fn build(self) -> Result<Pulsar<Exe>, Error> {
         let PulsarBuilder {
             url,
-            mut auth_provider,
+            auth_provider,
             connection_retry_options,
             operation_retry_options,
             tls_options,
             executor,
         } = self;
-        let auth_data = match auth_provider.as_mut() {
-            Some(auth) => Some(Authentication {
-                name: auth.auth_method_name(),
-                data: {
-                    auth.initialize().await?;
-                    auth.auth_data().await?
-                },
-            }),
-            None => None,
-        };
+
         Pulsar::new(
             url,
-            auth_data,
+            auth_provider.map(|p| Arc::new(Mutex::new(p))),
             connection_retry_options,
             operation_retry_options,
             tls_options,

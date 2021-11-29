@@ -31,6 +31,7 @@ use crate::message::{
 use crate::producer::{self, ProducerOptions};
 use crate::Error;
 use async_trait::async_trait;
+use futures::lock::Mutex;
 
 pub(crate) enum Register {
     Request {
@@ -560,7 +561,7 @@ pub struct Connection<Exe: Executor> {
 impl<Exe: Executor> Connection<Exe> {
     pub async fn new(
         url: Url,
-        auth_data: Option<Authentication>,
+        auth_data: Option<Arc<Mutex<Box<dyn crate::authentication::Authentication>>>>,
         proxy_to_broker_url: Option<String>,
         certificate_chain: &[Certificate],
         allow_insecure_connection: bool,
@@ -648,11 +649,25 @@ impl<Exe: Executor> Connection<Exe> {
         Ok(Connection { id, url, sender })
     }
 
+    async fn prepare_auth_data(auth: Option<Arc<Mutex<Box<dyn crate::authentication::Authentication>>>>)
+        -> Result<Option<Authentication>, ConnectionError> {
+        match auth {
+            Some(m_auth) => {
+                let mut auth_guard = m_auth.lock().await;
+                Ok(Some(Authentication {
+                    name: auth_guard.auth_method_name(),
+                    data: auth_guard.auth_data().await.unwrap(),
+                }))
+            }
+            None => Ok(None)
+        }
+    }
+
     async fn prepare_stream(
         address: SocketAddr,
         hostname: String,
         tls: bool,
-        auth_data: Option<Authentication>,
+        auth: Option<Arc<Mutex<Box<dyn crate::authentication::Authentication>>>>,
         proxy_to_broker_url: Option<String>,
         certificate_chain: &[Certificate],
         allow_insecure_connection: bool,
@@ -683,7 +698,7 @@ impl<Exe: Executor> Connection<Exe> {
 
                     Connection::connect(
                         stream,
-                        auth_data,
+                        Self::prepare_auth_data(auth).await?,
                         proxy_to_broker_url,
                         executor,
                         operation_timeout,
@@ -696,7 +711,7 @@ impl<Exe: Executor> Connection<Exe> {
 
                     Connection::connect(
                         stream,
-                        auth_data,
+                        Self::prepare_auth_data(auth).await?,
                         proxy_to_broker_url,
                         executor,
                         operation_timeout,
@@ -727,7 +742,7 @@ impl<Exe: Executor> Connection<Exe> {
 
                     Connection::connect(
                         stream,
-                        auth_data,
+                        Self::prepare_auth_data(auth).await?,
                         proxy_to_broker_url,
                         executor,
                         operation_timeout,
@@ -740,7 +755,7 @@ impl<Exe: Executor> Connection<Exe> {
 
                     Connection::connect(
                         stream,
-                        auth_data,
+                        Self::prepare_auth_data(auth).await?,
                         proxy_to_broker_url,
                         executor,
                         operation_timeout,

@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use crate::Error;
 
 #[async_trait]
-pub trait Authentication {
+pub trait Authentication: Send + Sync + 'static {
     fn auth_method_name(&self) -> String;
 
     async fn initialize(&mut self) -> Result<(), Error>;

@@ -1,4 +1,4 @@
-use crate::connection::{Authentication, Connection};
+use crate::connection::{Connection};
 use crate::error::ConnectionError;
 use crate::executor::Executor;
 use std::collections::HashMap;
@@ -110,7 +110,7 @@ enum ConnectionStatus<Exe: Executor> {
 #[derive(Clone)]
 pub struct ConnectionManager<Exe: Executor> {
     pub url: Url,
-    auth: Option<Authentication>,
+    auth: Option<Arc<Mutex<Box<dyn crate::authentication::Authentication>>>>,
     pub(crate) executor: Arc<Exe>,
     connections: Arc<Mutex<HashMap<BrokerAddress, ConnectionStatus<Exe>>>>,
     connection_retry_options: ConnectionRetryOptions,
@@ -122,7 +122,7 @@ pub struct ConnectionManager<Exe: Executor> {
 impl<Exe: Executor> ConnectionManager<Exe> {
     pub async fn new(
         url: String,
-        auth: Option<Authentication>,
+        auth: Option<Arc<Mutex<Box<dyn crate::authentication::Authentication>>>>,
         connection_retry: Option<ConnectionRetryOptions>,
         operation_retry_options: OperationRetryOptions,
         tls: Option<TlsOptions>,
@@ -156,6 +156,10 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                 v
             }
         };
+
+        if let Some(auth) = auth.clone() {
+            auth.lock().await.initialize().await.unwrap();
+        }
 
         let manager = ConnectionManager {
             url: url.clone(),
