@@ -64,6 +64,8 @@ pub mod oauth2 {
     use crate::authentication::Authentication;
     use crate::Error;
     use crate::error::AuthenticationError;
+    use std::time::Instant;
+    use nom::lib::std::ops::Add;
 
     #[derive(Deserialize, Debug)]
     struct OAuth2PrivateParams {
@@ -81,11 +83,35 @@ pub mod oauth2 {
         scope: Option<String>,
     }
 
+    pub struct CachedToken {
+        token_secret: Vec<u8>,
+        expiring_at: Option<Instant>,
+    }
+
+    impl From<BasicTokenResponse> for CachedToken {
+        fn from(resp: BasicTokenResponse) -> Self {
+            let now = Instant::now();
+            CachedToken {
+                expiring_at: resp.expires_in().map(|d| now.add(d.mul_f32(0.9))),
+                token_secret: resp.access_token().secret().clone().into_bytes(),
+            }
+        }
+    }
+
+    impl CachedToken {
+        fn is_expiring(&self) -> bool {
+            match &self.expiring_at {
+                Some(expiring_at) => Instant::now().ge(expiring_at),
+                None => false,
+            }
+        }
+    }
+
     pub struct OAuth2Authentication {
         params: OAuth2Params,
         private_params: Option<OAuth2PrivateParams>,
         token_url: Option<TokenUrl>,
-        token: Option<BasicTokenResponse>,
+        token: Option<CachedToken>,
     }
 
     impl OAuth2Authentication {
@@ -127,20 +153,22 @@ pub mod oauth2 {
             if self.private_params.is_none() {
                 return Err(Error::Authentication(AuthenticationError::Custom("not initialized".to_string())));
             }
-            match self.token.as_ref() {
-                Some(token) => Ok(token.access_token().secret().clone().into_bytes()),
-                None => {
-                    match self.fetch_token().await {
-                        Ok(token) => {
-                            self.token = Some(token);
-                            Ok(self.token.as_ref().unwrap().access_token().secret().clone().into_bytes())
-                        }
-                        Err(e) => {
-                            Err(Error::Authentication(AuthenticationError::Custom(e.to_string())))
-                        }
+            if let Some(token) = self.token.as_ref() {
+                if token.is_expiring() {
+                    self.token = None
+                }
+            }
+            if self.token.is_none() {
+                match self.fetch_token().await {
+                    Ok(token) => {
+                        self.token = Some(token.into());
+                    }
+                    Err(e) => {
+                        return Err(Error::Authentication(AuthenticationError::Custom(e.to_string())));
                     }
                 }
             }
+            Ok(self.token.as_ref().unwrap().token_secret.clone())
         }
     }
 
@@ -183,7 +211,7 @@ pub mod oauth2 {
 
             let token = request
                 .request_async(async_http_client).await?;
-            info!("Got a new token: {:?}\n{}", token, token.access_token().secret());
+            debug!("Got a new oauth2 token for [{:?}]", self.params);
             Ok(token)
         }
     }
