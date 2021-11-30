@@ -66,6 +66,7 @@ pub mod oauth2 {
     use crate::error::AuthenticationError;
     use std::time::Instant;
     use nom::lib::std::ops::Add;
+    use std::fmt::{Display, Formatter};
 
     #[derive(Deserialize, Debug)]
     struct OAuth2PrivateParams {
@@ -83,9 +84,16 @@ pub mod oauth2 {
         scope: Option<String>,
     }
 
+    impl Display for OAuth2Params {
+        fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+            write!(f, "OAuth2Params({}, {}, {}, {:?})", self.issuer_url, self.credentials_url, self.audience, self.scope)
+        }
+    }
+
     pub struct CachedToken {
         token_secret: Vec<u8>,
         expiring_at: Option<Instant>,
+        expired_at: Option<Instant>,
     }
 
     impl From<BasicTokenResponse> for CachedToken {
@@ -93,6 +101,7 @@ pub mod oauth2 {
             let now = Instant::now();
             CachedToken {
                 expiring_at: resp.expires_in().map(|d| now.add(d.mul_f32(0.9))),
+                expired_at: resp.expires_in().map(|d| now.add(d)),
                 token_secret: resp.access_token().secret().clone().into_bytes(),
             }
         }
@@ -102,6 +111,13 @@ pub mod oauth2 {
         fn is_expiring(&self) -> bool {
             match &self.expiring_at {
                 Some(expiring_at) => Instant::now().ge(expiring_at),
+                None => false,
+            }
+        }
+
+        fn is_expired(&self) -> bool {
+            match &self.expired_at {
+                Some(expired_at) => Instant::now().ge(expired_at),
                 None => false,
             }
         }
@@ -153,18 +169,27 @@ pub mod oauth2 {
             if self.private_params.is_none() {
                 return Err(Error::Authentication(AuthenticationError::Custom("not initialized".to_string())));
             }
+            let mut need_token = false;
+            let mut none_or_expired = true;
             if let Some(token) = self.token.as_ref() {
-                if token.is_expiring() {
-                    self.token = None
+                none_or_expired = token.is_expired();
+                if none_or_expired || token.is_expiring() {
+                    need_token = true;
                 }
+            } else {
+                need_token = true;
             }
-            if self.token.is_none() {
+            if need_token {
                 match self.fetch_token().await {
                     Ok(token) => {
                         self.token = Some(token.into());
                     }
                     Err(e) => {
-                        return Err(Error::Authentication(AuthenticationError::Custom(e.to_string())));
+                        if none_or_expired {
+                            return Err(Error::Authentication(AuthenticationError::Custom(e.to_string())));
+                        } else {
+                            warn!("failed to get a new token for [{}], use the existing one for now", self.params);
+                        }
                     }
                 }
             }
@@ -211,7 +236,7 @@ pub mod oauth2 {
 
             let token = request
                 .request_async(async_http_client).await?;
-            debug!("Got a new oauth2 token for [{:?}]", self.params);
+            debug!("Got a new oauth2 token for [{}]", self.params);
             Ok(token)
         }
     }
