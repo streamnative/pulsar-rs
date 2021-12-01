@@ -22,14 +22,13 @@ use futures::{
 use url::Url;
 
 use crate::consumer::ConsumerOptions;
-use crate::error::{ConnectionError, SharedError};
+use crate::error::{ConnectionError, SharedError, AuthenticationError};
 use crate::executor::{Executor, ExecutorKind};
 use crate::message::{
     proto::{self, command_subscribe::SubType},
     BaseCommand, Codec, Message,
 };
 use crate::producer::{self, ProducerOptions};
-use crate::Error;
 use async_trait::async_trait;
 use futures::lock::Mutex;
 
@@ -71,11 +70,11 @@ impl crate::authentication::Authentication for Authentication {
         self.name.clone()
     }
 
-    async fn initialize(&mut self) -> Result<(), Error> {
+    async fn initialize(&mut self) -> Result<(), AuthenticationError> {
         Ok(())
     }
 
-    async fn auth_data(&mut self) -> Result<Vec<u8>, Error> {
+    async fn auth_data(&mut self) -> Result<Vec<u8>, AuthenticationError> {
         Ok(self.data.clone())
     }
 }
@@ -656,7 +655,7 @@ impl<Exe: Executor> Connection<Exe> {
                 let mut auth_guard = m_auth.lock().await;
                 Ok(Some(Authentication {
                     name: auth_guard.auth_method_name(),
-                    data: auth_guard.auth_data().await.unwrap(),
+                    data: auth_guard.auth_data().await?,
                 }))
             }
             None => Ok(None)

@@ -1,14 +1,14 @@
 use async_trait::async_trait;
 
-use crate::Error;
+use crate::error::AuthenticationError;
 
 #[async_trait]
 pub trait Authentication: Send + Sync + 'static {
     fn auth_method_name(&self) -> String;
 
-    async fn initialize(&mut self) -> Result<(), Error>;
+    async fn initialize(&mut self) -> Result<(), AuthenticationError>;
 
-    async fn auth_data(&mut self) -> Result<Vec<u8>, Error>;
+    async fn auth_data(&mut self) -> Result<Vec<u8>, AuthenticationError>;
 }
 
 pub mod token {
@@ -17,7 +17,7 @@ pub mod token {
     use async_trait::async_trait;
 
     use crate::authentication::Authentication;
-    use crate::Error;
+    use crate::error::AuthenticationError;
 
     pub struct TokenAuthentication {
         token: Vec<u8>,
@@ -37,11 +37,11 @@ pub mod token {
             String::from("token")
         }
 
-        async fn initialize(&mut self) -> Result<(), Error> {
+        async fn initialize(&mut self) -> Result<(), AuthenticationError> {
             Ok(())
         }
 
-        async fn auth_data(&mut self) -> Result<Vec<u8>, Error> {
+        async fn auth_data(&mut self) -> Result<Vec<u8>, AuthenticationError> {
             Ok(self.token.clone())
         }
     }
@@ -62,7 +62,6 @@ pub mod oauth2 {
     use url::Url;
 
     use crate::authentication::Authentication;
-    use crate::Error;
     use crate::error::AuthenticationError;
     use std::time::Instant;
     use nom::lib::std::ops::Add;
@@ -142,12 +141,12 @@ pub mod oauth2 {
     }
 
     impl OAuth2Params {
-        fn read_private_params(&self) -> Result<OAuth2PrivateParams, Error> {
+        fn read_private_params(&self) -> Result<OAuth2PrivateParams, Box<dyn std::error::Error>> {
             if self.credentials_url.scheme() != "file" {
-                return Err(Error::Authentication(AuthenticationError::Custom(format!("invalid credential url [{}]", self.credentials_url.as_str()))));
+                return Err(Box::from(format!("invalid credential url [{}]", self.credentials_url.as_str())));
             }
             let path = self.credentials_url.path();
-            Ok(serde_json::from_str(fs::read_to_string(path).unwrap().as_str()).unwrap())
+            Ok(serde_json::from_str(fs::read_to_string(path)?.as_str())?)
         }
     }
 
@@ -157,17 +156,20 @@ pub mod oauth2 {
             String::from("token")
         }
 
-        async fn initialize(&mut self) -> Result<(), Error> {
-            self.private_params = Some(self.params.read_private_params()?);
+        async fn initialize(&mut self) -> Result<(), AuthenticationError> {
+            match self.params.read_private_params() {
+                Ok(private_params) => self.private_params = Some(private_params),
+                Err(e) => return Err(AuthenticationError::Custom(e.to_string())),
+            }
             if let Err(e) = self.token_url().await {
-                return Err(Error::Authentication(AuthenticationError::Custom(e.to_string())));
+                return Err(AuthenticationError::Custom(e.to_string()));
             }
             Ok(())
         }
 
-        async fn auth_data(&mut self) -> Result<Vec<u8>, Error> {
+        async fn auth_data(&mut self) -> Result<Vec<u8>, AuthenticationError> {
             if self.private_params.is_none() {
-                return Err(Error::Authentication(AuthenticationError::Custom("not initialized".to_string())));
+                return Err(AuthenticationError::Custom("not initialized".to_string()));
             }
             let mut need_token = false;
             let mut none_or_expired = true;
@@ -186,7 +188,7 @@ pub mod oauth2 {
                     }
                     Err(e) => {
                         if none_or_expired {
-                            return Err(Error::Authentication(AuthenticationError::Custom(e.to_string())));
+                            return Err(AuthenticationError::Custom(e.to_string()));
                         } else {
                             warn!("failed to get a new token for [{}], use the existing one for now", self.params);
                         }
@@ -204,12 +206,17 @@ pub mod oauth2 {
                 None => {
                     let metadata = CoreProviderMetadata::discover_async(
                         IssuerUrl::from_url(self.params.issuer_url.clone()), async_http_client).await?;
-                    self.token_url = Some(metadata.token_endpoint().unwrap().clone());
+                    if let Some(token_endpoint) = metadata.token_endpoint() {
+                        self.token_url = Some(token_endpoint.clone());
+                    } else {
+                        return Err(Box::from("token url not exists"));
+                    }
+
                     match metadata.token_endpoint() {
                         Some(endpoint) => {
                             Ok(Some(endpoint.clone()))
                         }
-                        None => Err(Box::new(Error::Authentication(AuthenticationError::Custom("token endpoint is unavailable".to_string()))))
+                        None => Err(Box::from("token endpoint is unavailable"))
                     }
                 }
             }

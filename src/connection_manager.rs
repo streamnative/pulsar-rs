@@ -158,7 +158,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
         };
 
         if let Some(auth) = auth.clone() {
-            auth.lock().await.initialize().await.unwrap();
+            auth.lock().await.initialize().await?;
         }
 
         let manager = ConnectionManager {
