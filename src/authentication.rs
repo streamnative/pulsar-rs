@@ -188,6 +188,8 @@ pub mod oauth2 {
                     }
                     Err(e) => {
                         if none_or_expired {
+                            // invalidate the expired token
+                            self.token = None;
                             return Err(AuthenticationError::Custom(e.to_string()));
                         } else {
                             warn!("failed to get a new token for [{}], use the existing one for now", self.params);
