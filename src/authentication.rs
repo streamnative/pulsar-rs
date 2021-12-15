@@ -77,10 +77,10 @@ pub mod oauth2 {
 
     #[derive(Deserialize, Debug)]
     pub struct OAuth2Params {
-        issuer_url: Url,
-        credentials_url: Url,
-        audience: String,
-        scope: Option<String>,
+        pub issuer_url: String,
+        pub credentials_url: String,
+        pub audience: String,
+        pub scope: Option<String>,
     }
 
     impl Display for OAuth2Params {
@@ -142,10 +142,11 @@ pub mod oauth2 {
 
     impl OAuth2Params {
         fn read_private_params(&self) -> Result<OAuth2PrivateParams, Box<dyn std::error::Error>> {
-            if self.credentials_url.scheme() != "file" {
+            let credentials_url = Url::parse(self.credentials_url.as_str())?;
+            if credentials_url.scheme() != "file" {
                 return Err(Box::from(format!("invalid credential url [{}]", self.credentials_url.as_str())));
             }
-            let path = self.credentials_url.path();
+            let path = credentials_url.path();
             Ok(serde_json::from_str(fs::read_to_string(path)?.as_str())?)
         }
     }
@@ -207,7 +208,7 @@ pub mod oauth2 {
                 Some(url) => Ok(Some(url.clone())),
                 None => {
                     let metadata = CoreProviderMetadata::discover_async(
-                        IssuerUrl::from_url(self.params.issuer_url.clone()), async_http_client).await?;
+                        IssuerUrl::from_url(Url::parse(self.params.issuer_url.as_str())?), async_http_client).await?;
                     if let Some(token_endpoint) = metadata.token_endpoint() {
                         self.token_url = Some(token_endpoint.clone());
                     } else {
@@ -231,7 +232,7 @@ pub mod oauth2 {
             let client = BasicClient::new(
                 ClientId::new(private_params.client_id.clone()),
                 Some(ClientSecret::new(private_params.client_secret.clone())),
-                AuthUrl::from_url(self.params.issuer_url.clone()),
+                AuthUrl::from_url(Url::parse(self.params.issuer_url.as_str())?),
                 self.token_url().await?)
                 .set_auth_type(RequestBody);
 
