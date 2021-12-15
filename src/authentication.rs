@@ -49,9 +49,13 @@ pub mod token {
 
 #[cfg(feature = "auth-oauth2")]
 pub mod oauth2 {
+    use std::fmt::{Display, Formatter};
     use std::fs;
+    use std::time::Instant;
 
     use async_trait::async_trait;
+    use data_url::{DataUrl};
+    use nom::lib::std::ops::Add;
     use oauth2::{AuthUrl, ClientId, ClientSecret, Scope, TokenResponse, TokenUrl};
     use oauth2::AuthType::RequestBody;
     use oauth2::basic::{BasicClient, BasicTokenResponse};
@@ -63,9 +67,6 @@ pub mod oauth2 {
 
     use crate::authentication::Authentication;
     use crate::error::AuthenticationError;
-    use std::time::Instant;
-    use nom::lib::std::ops::Add;
-    use std::fmt::{Display, Formatter};
 
     #[derive(Deserialize, Debug)]
     struct OAuth2PrivateParams {
@@ -143,11 +144,31 @@ pub mod oauth2 {
     impl OAuth2Params {
         fn read_private_params(&self) -> Result<OAuth2PrivateParams, Box<dyn std::error::Error>> {
             let credentials_url = Url::parse(self.credentials_url.as_str())?;
-            if credentials_url.scheme() != "file" {
-                return Err(Box::from(format!("invalid credential url [{}]", self.credentials_url.as_str())));
+            match credentials_url.scheme() {
+                "file" => {
+                    let path = credentials_url.path();
+                    Ok(serde_json::from_str(fs::read_to_string(path)?.as_str())?)
+                }
+                "data" => {
+                    let data_url = match DataUrl::process(self.credentials_url.as_str()) {
+                        Ok(data_url) => data_url,
+                        Err(err) => {
+                            return Err(Box::from(format!("invalid data url [{}]: {:?}", self.credentials_url.as_str(), err)));
+                        }
+                    };
+                    let body = match data_url.decode_to_vec() {
+                        Ok((body, _)) => body,
+                        Err(err) => {
+                            return Err(Box::from(format!("invalid data url [{}]: {:?}", self.credentials_url.as_str(), err)));
+                        }
+                    };
+
+                    Ok(serde_json::from_slice(&body)?)
+                }
+                _ => {
+                    Err(Box::from(format!("invalid credential url [{}]", self.credentials_url.as_str())))
+                }
             }
-            let path = credentials_url.path();
-            Ok(serde_json::from_str(fs::read_to_string(path)?.as_str())?)
         }
     }
 
@@ -248,6 +269,26 @@ pub mod oauth2 {
                 .request_async(async_http_client).await?;
             debug!("Got a new oauth2 token for [{}]", self.params);
             Ok(token)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use crate::authentication::oauth2::OAuth2Params;
+
+        #[test]
+        fn parse_data_url() {
+            let params = OAuth2Params {
+                issuer_url: "".to_string(),
+                credentials_url: "data:application/json;base64,eyJjbGllbnRfaWQiOiJjbGllbnQtaWQiLCJjbGllbnRfc2VjcmV0IjoiY2xpZW50LXNlY3JldCJ9Cg==".to_string(),
+                audience: "".to_string(),
+                scope: None,
+            };
+            let private_params = params.read_private_params().unwrap();
+            assert_eq!(private_params.client_id, "client-id");
+            assert_eq!(private_params.client_secret, "client-secret");
+            assert_eq!(private_params.client_email, None);
+            assert_eq!(private_params.issuer_url, None);
         }
     }
 }
