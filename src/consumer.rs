@@ -25,7 +25,7 @@ use crate::message::{
     proto::{self, command_subscribe::SubType, MessageIdData, MessageMetadata, Schema},
     BatchedMessage, Message as RawMessage, Metadata, Payload,
 };
-use crate::proto::{BaseCommand, CommandCloseConsumer};
+use crate::proto::{BaseCommand, CommandCloseConsumer, CommandConsumerStatsResponse};
 use crate::reader::{Reader, State};
 use crate::{BrokerAddress, DeserializeMessage, Pulsar};
 use core::iter;
@@ -179,6 +179,14 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         match &mut self.inner {
             InnerConsumer::Single(c) => c.check_connection().await,
             InnerConsumer::Multi(c) => c.check_connections().await,
+        }
+    }
+
+    /// get consumer stats
+    pub async fn get_stats(&mut self) -> Result<Vec<CommandConsumerStatsResponse>, Error> {
+        match &mut self.inner {
+            InnerConsumer::Single(c) => Ok(vec![c.get_stats().await?]),
+            InnerConsumer::Multi(c) => c.get_stats().await,
         }
     }
 
@@ -628,6 +636,13 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
             error!("the consumer engine dropped the request");
             ConnectionError::Disconnected.into()
         })
+    }
+
+    pub async fn get_stats(&mut self) -> Result<CommandConsumerStatsResponse, Error> {
+        let consumer_id = self.consumer_id;
+        let conn = self.connection().await?;
+        let consumer_stats_response = conn.sender().get_consumer_stats(consumer_id).await?;
+        Ok(consumer_stats_response)
     }
 
     pub async fn check_connection(&mut self) -> Result<(), Error> {
@@ -1258,7 +1273,10 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             // if we receive a message, it indicates we want to stop this task
             if _res.is_err() {
                 if let Err(e) = conn.sender().close_consumer(id).await {
-                    error!("could not close consumer {:?}({}) for topic {}: {:?}", name, id, topic, e);
+                    error!(
+                        "could not close consumer {:?}({}) for topic {}: {:?}",
+                        name, id, topic, e
+                    );
                 }
             }
         }));
@@ -1705,6 +1723,11 @@ struct MultiTopicConsumer<T: DeserializeMessage, Exe: Executor> {
 impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
     fn topics(&self) -> Vec<String> {
         self.topics.iter().map(|s| s.to_string()).collect()
+    }
+
+    async fn get_stats(&mut self) -> Result<Vec<CommandConsumerStatsResponse>, Error> {
+        let resposnes = try_join_all(self.consumers.values_mut().map(|c| c.get_stats())).await?;
+        Ok(resposnes)
     }
 
     fn last_message_received(&self) -> Option<DateTime<Utc>> {
