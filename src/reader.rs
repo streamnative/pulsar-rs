@@ -1,5 +1,5 @@
 use crate::client::DeserializeMessage;
-use crate::consumer::{ConsumerOptions, DeadLetterPolicy, EngineMessage, Message, MessageData, TopicConsumer};
+use crate::consumer::{ConsumerOptions, DeadLetterPolicy, EngineMessage, Message, TopicConsumer};
 use crate::error::Error;
 use crate::executor::Executor;
 use crate::message::proto::{command_subscribe::SubType, MessageIdData};
@@ -149,7 +149,7 @@ impl<T: DeserializeMessage, Exe: Executor> Reader<T, Exe> {
         self.consumer.last_message_received()
     }
 
-    pub async fn get_last_message_id(&mut self) -> Result<MessageData, Error> {
+    pub async fn get_last_message_id(&mut self) -> Result<MessageIdData, Error> {
         self.consumer.get_last_message_id().await
     }
 
