@@ -341,6 +341,17 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         .await
     }
 
+    pub async fn get_last_message_id(
+        &self,
+        consumer_id: u64,
+    ) -> Result<proto::CommandGetLastMessageIdResponse, ConnectionError> {
+        let request_id = self.request_id.get();
+        let msg = messages::get_last_message_id(consumer_id, request_id);
+        self.send_message(msg, RequestKey::RequestId(request_id), |resp| {
+            resp.command.get_last_message_id_response
+        }).await
+    }
+
     pub async fn create_producer(
         &self,
         topic: String,
@@ -1066,6 +1077,20 @@ pub(crate) mod messages {
                     topic,
                     request_id,
                     ..Default::default()
+                }),
+                ..Default::default()
+            },
+            payload: None,
+        }
+    }
+
+    pub fn get_last_message_id(consumer_id: u64, request_id: u64) -> Message {
+        Message {
+            command: proto::BaseCommand {
+                r#type: CommandType::GetLastMessageId as i32,
+                get_last_message_id: Some(proto::CommandGetLastMessageId {
+                    consumer_id,
+                    request_id,
                 }),
                 ..Default::default()
             },

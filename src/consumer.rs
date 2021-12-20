@@ -25,7 +25,7 @@ use crate::message::{
     proto::{self, command_subscribe::SubType, MessageIdData, MessageMetadata, Schema},
     BatchedMessage, Message as RawMessage, Metadata, Payload,
 };
-use crate::proto::{BaseCommand, CommandCloseConsumer};
+use crate::proto::{BaseCommand, CommandCloseConsumer, CommandGetLastMessageIdResponse};
 use crate::reader::{Reader, State};
 use crate::{BrokerAddress, DeserializeMessage, Pulsar};
 use core::iter;
@@ -275,6 +275,13 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         match &mut self.inner {
             InnerConsumer::Single(c) => c.unsubscribe().await,
             InnerConsumer::Multi(c) => c.unsubscribe().await,
+        }
+    }
+
+    pub async fn get_last_message_id(&mut self) -> Result<Vec<CommandGetLastMessageIdResponse>, Error> {
+        match &mut self.inner {
+            InnerConsumer::Single(c) => Ok(vec![c.get_last_message_id().await?]),
+            InnerConsumer::Multi(c) => c.get_last_message_id().await,
         }
     }
 
@@ -684,6 +691,13 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
             .unsubscribe(consumer_id)
             .await?;
         Ok(())
+    }
+
+    pub async fn get_last_message_id(&mut self) -> Result<CommandGetLastMessageIdResponse, Error> {
+        let consumer_id = self.consumer_id;
+        let conn = self.connection().await?;
+        let get_last_message_id_response = conn.sender().get_last_message_id(consumer_id).await?;
+        Ok(get_last_message_id_response)
     }
 
     pub fn last_message_received(&self) -> Option<DateTime<Utc>> {
@@ -1737,6 +1751,11 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
         }
 
         Ok(())
+    }
+
+    async fn get_last_message_id(&mut self) -> Result<Vec<CommandGetLastMessageIdResponse>, Error> {
+        let responses = try_join_all(self.consumers.values_mut().map(|c| c.get_last_message_id())).await?;
+        Ok(responses)
     }
 
     async fn unsubscribe(&mut self) -> Result<(), Error> {
