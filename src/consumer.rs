@@ -879,6 +879,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                     match message_opt {
                         None => {
                             error!("Consumer: messages::next: returning Disconnected");
+                            panic!("ConsumerEngine got Disconnected");
                             self.reconnect().await?;
                             continue;
                             //return Err(Error::Consumer(ConsumerError::Connection(ConnectionError::Disconnected)).into());
