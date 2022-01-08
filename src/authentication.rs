@@ -80,13 +80,13 @@ pub mod oauth2 {
     pub struct OAuth2Params {
         pub issuer_url: String,
         pub credentials_url: String,
-        pub audience: String,
+        pub audience: Option<String>,
         pub scope: Option<String>,
     }
 
     impl Display for OAuth2Params {
         fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-            write!(f, "OAuth2Params({}, {}, {}, {:?})", self.issuer_url, self.credentials_url, self.audience, self.scope)
+            write!(f, "OAuth2Params({}, {}, {:?}, {:?})", self.issuer_url, self.credentials_url, self.audience, self.scope)
         }
     }
 
@@ -250,16 +250,25 @@ pub mod oauth2 {
             let private_params = self.private_params.as_ref()
                 .expect("oauth2 provider is uninitialized");
 
+            let issuer_url = if let Some(url) = private_params.issuer_url.as_ref() {
+                url.as_str()
+            } else {
+                self.params.issuer_url.as_str()
+            };
+
             let client = BasicClient::new(
                 ClientId::new(private_params.client_id.clone()),
                 Some(ClientSecret::new(private_params.client_secret.clone())),
-                AuthUrl::from_url(Url::parse(self.params.issuer_url.as_str())?),
+                AuthUrl::from_url(Url::parse(issuer_url)?),
                 self.token_url().await?)
                 .set_auth_type(RequestBody);
 
             let mut request = client
-                .exchange_client_credentials()
-                .add_extra_param("audience", self.params.audience.clone());
+                .exchange_client_credentials();
+
+            if let Some(audience) = &self.params.audience {
+                request = request.add_extra_param("audience", audience.clone());
+            }
 
             if let Some(scope) = &self.params.scope {
                 request = request.add_scope(Scope::new(scope.clone()));
@@ -281,7 +290,7 @@ pub mod oauth2 {
             let params = OAuth2Params {
                 issuer_url: "".to_string(),
                 credentials_url: "data:application/json;base64,eyJjbGllbnRfaWQiOiJjbGllbnQtaWQiLCJjbGllbnRfc2VjcmV0IjoiY2xpZW50LXNlY3JldCJ9Cg==".to_string(),
-                audience: "".to_string(),
+                audience: None,
                 scope: None,
             };
             let private_params = params.read_private_params().unwrap();
