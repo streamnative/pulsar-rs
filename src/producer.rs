@@ -1086,9 +1086,9 @@ impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
     }
 
     /// delivers the message at this date
-    pub fn event_time(mut self, event_time: u64) -> Result<Self, std::time::SystemTimeError> {
+    pub fn event_time(mut self, event_time: u64) -> Self {
         self.event_time = Some(event_time);
-        Ok(self)
+        self
     }
 }
 
