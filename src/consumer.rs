@@ -1258,7 +1258,10 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             // if we receive a message, it indicates we want to stop this task
             if _res.is_err() {
                 if let Err(e) = conn.sender().close_consumer(id).await {
-                    error!("could not close consumer {:?}({}) for topic {}: {:?}", name, id, topic, e);
+                    error!(
+                        "could not close consumer {:?}({}) for topic {}: {:?}",
+                        name, id, topic, e
+                    );
                 }
             }
         }));

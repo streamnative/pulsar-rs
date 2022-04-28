@@ -20,11 +20,11 @@ travis-ci = {repository = "wyyerd/pulsar-rs"}
 
 [dependencies]
 bytes = "1.0.0"
-crc = "2.0.0"
+crc = "3.0.0"
 futures = "0.3"
 nom = { version="7.0.0", default-features=false, features=["alloc"] }
-prost = "0.9.0"
-prost-derive = "0.9.0"
+prost = "0.10.0"
+prost-derive = "0.10.0"
 rand = "0.8"
 chrono = "0.4"
 futures-timer = "3.0"
@@ -34,9 +34,9 @@ regex = "1.1.7"
 bit-vec = "0.6"
 futures-io = "0.3"
 native-tls = "0.2"
-pem = "0.8"
+pem = "1.0.0"
 tokio = { version = "1.0", features = ["rt", "net", "time"], optional = true }
-tokio-util = { version = "0.6", features = ["codec"], optional = true }
+tokio-util = { version = "0.7", features = ["codec"], optional = true }
 tokio-native-tls = { version = "0.3", optional = true }
 async-std = {version = "1.9", features = [ "attributes", "unstable" ], optional = true }
 asynchronous-codec = { version = "0.6", optional = true }
@@ -53,7 +53,7 @@ env_logger = "0.9"
 tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
 
 [build-dependencies]
-prost-build = "0.9.0"
+prost-build = "0.10.0"
 
 [features]
 default = [ "compression", "tokio-runtime", "async-std-runtime" ]
