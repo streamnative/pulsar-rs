@@ -1015,6 +1015,7 @@ pub struct MessageBuilder<'a, T, Exe: Executor> {
     properties: HashMap<String, String>,
     partition_key: Option<String>,
     deliver_at_time: Option<i64>,
+    event_time: Option<u64>,
     content: T,
 }
 
@@ -1026,6 +1027,7 @@ impl<'a, Exe: Executor> MessageBuilder<'a, (), Exe> {
             properties: HashMap::new(),
             partition_key: None,
             deliver_at_time: None,
+            event_time: None,
             content: (),
         }
     }
@@ -1039,6 +1041,7 @@ impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
             properties: self.properties,
             partition_key: self.partition_key,
             deliver_at_time: self.deliver_at_time,
+            event_time: self.event_time,
             content,
         }
     }
@@ -1081,6 +1084,12 @@ impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
         self.deliver_at_time = Some(date.duration_since(UNIX_EPOCH)?.as_millis() as i64);
         Ok(self)
     }
+
+    /// delivers the message at this date
+    pub fn event_time(mut self, event_time: u64) -> Self {
+        self.event_time = Some(event_time);
+        self
+    }
 }
 
 impl<'a, T: SerializeMessage + Sized, Exe: Executor> MessageBuilder<'a, T, Exe> {
@@ -1092,11 +1101,13 @@ impl<'a, T: SerializeMessage + Sized, Exe: Executor> MessageBuilder<'a, T, Exe> 
             partition_key,
             content,
             deliver_at_time,
+            event_time,
         } = self;
 
         let mut message = T::serialize_message(content)?;
         message.properties = properties;
         message.partition_key = partition_key;
+        message.event_time = event_time;
 
         let mut producer_message: ProducerMessage = message.into();
         producer_message.deliver_at_time = deliver_at_time;
