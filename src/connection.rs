@@ -22,13 +22,15 @@ use futures::{
 use url::Url;
 
 use crate::consumer::ConsumerOptions;
-use crate::error::{ConnectionError, SharedError};
+use crate::error::{ConnectionError, SharedError, AuthenticationError};
 use crate::executor::{Executor, ExecutorKind};
 use crate::message::{
     proto::{self, command_subscribe::SubType},
     BaseCommand, Codec, Message,
 };
 use crate::producer::{self, ProducerOptions};
+use async_trait::async_trait;
+use futures::lock::Mutex;
 
 pub(crate) enum Register {
     Request {
@@ -60,6 +62,21 @@ pub struct Authentication {
     pub name: String,
     /// Authentication data
     pub data: Vec<u8>,
+}
+
+#[async_trait]
+impl crate::authentication::Authentication for Authentication {
+    fn auth_method_name(&self) -> String {
+        self.name.clone()
+    }
+
+    async fn initialize(&mut self) -> Result<(), AuthenticationError> {
+        Ok(())
+    }
+
+    async fn auth_data(&mut self) -> Result<Vec<u8>, AuthenticationError> {
+        Ok(self.data.clone())
+    }
 }
 
 pub(crate) struct Receiver<S: Stream<Item = Result<Message, ConnectionError>>> {
@@ -543,7 +560,7 @@ pub struct Connection<Exe: Executor> {
 impl<Exe: Executor> Connection<Exe> {
     pub async fn new(
         url: Url,
-        auth_data: Option<Authentication>,
+        auth_data: Option<Arc<Mutex<Box<dyn crate::authentication::Authentication>>>>,
         proxy_to_broker_url: Option<String>,
         certificate_chain: &[Certificate],
         allow_insecure_connection: bool,
@@ -631,11 +648,25 @@ impl<Exe: Executor> Connection<Exe> {
         Ok(Connection { id, url, sender })
     }
 
+    async fn prepare_auth_data(auth: Option<Arc<Mutex<Box<dyn crate::authentication::Authentication>>>>)
+        -> Result<Option<Authentication>, ConnectionError> {
+        match auth {
+            Some(m_auth) => {
+                let mut auth_guard = m_auth.lock().await;
+                Ok(Some(Authentication {
+                    name: auth_guard.auth_method_name(),
+                    data: auth_guard.auth_data().await?,
+                }))
+            }
+            None => Ok(None)
+        }
+    }
+
     async fn prepare_stream(
         address: SocketAddr,
         hostname: String,
         tls: bool,
-        auth_data: Option<Authentication>,
+        auth: Option<Arc<Mutex<Box<dyn crate::authentication::Authentication>>>>,
         proxy_to_broker_url: Option<String>,
         certificate_chain: &[Certificate],
         allow_insecure_connection: bool,
@@ -666,7 +697,7 @@ impl<Exe: Executor> Connection<Exe> {
 
                     Connection::connect(
                         stream,
-                        auth_data,
+                        Self::prepare_auth_data(auth).await?,
                         proxy_to_broker_url,
                         executor,
                         operation_timeout,
@@ -679,7 +710,7 @@ impl<Exe: Executor> Connection<Exe> {
 
                     Connection::connect(
                         stream,
-                        auth_data,
+                        Self::prepare_auth_data(auth).await?,
                         proxy_to_broker_url,
                         executor,
                         operation_timeout,
@@ -710,7 +741,7 @@ impl<Exe: Executor> Connection<Exe> {
 
                     Connection::connect(
                         stream,
-                        auth_data,
+                        Self::prepare_auth_data(auth).await?,
                         proxy_to_broker_url,
                         executor,
                         operation_timeout,
@@ -723,7 +754,7 @@ impl<Exe: Executor> Connection<Exe> {
 
                     Connection::connect(
                         stream,
-                        auth_data,
+                        Self::prepare_auth_data(auth).await?,
                         proxy_to_broker_url,
                         executor,
                         operation_timeout,

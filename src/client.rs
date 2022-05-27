@@ -15,6 +15,7 @@ use crate::message::Payload;
 use crate::producer::{self, ProducerBuilder, SendFuture};
 use crate::service_discovery::ServiceDiscovery;
 use futures::StreamExt;
+use futures::lock::Mutex;
 
 /// Helper trait for consumer deserialization
 pub trait DeserializeMessage {
@@ -158,7 +159,7 @@ impl<Exe: Executor> Pulsar<Exe> {
     /// creates a new client
     pub(crate) async fn new<S: Into<String>>(
         url: S,
-        auth: Option<Authentication>,
+        auth: Option<Arc<Mutex<Box<dyn crate::authentication::Authentication>>>>,
         connection_retry_parameters: Option<ConnectionRetryOptions>,
         operation_retry_parameters: Option<OperationRetryOptions>,
         tls_options: Option<TlsOptions>,
@@ -232,7 +233,7 @@ impl<Exe: Executor> Pulsar<Exe> {
     pub fn builder<S: Into<String>>(url: S, executor: Exe) -> PulsarBuilder<Exe> {
         PulsarBuilder {
             url: url.into(),
-            auth: None,
+            auth_provider: None,
             connection_retry_options: None,
             operation_retry_options: None,
             tls_options: None,
@@ -423,7 +424,7 @@ impl<Exe: Executor> Pulsar<Exe> {
 /// Helper structure to generate a [Pulsar] client
 pub struct PulsarBuilder<Exe: Executor> {
     url: String,
-    auth: Option<Authentication>,
+    auth_provider: Option<Box<dyn crate::authentication::Authentication>>,
     connection_retry_options: Option<ConnectionRetryOptions>,
     operation_retry_options: Option<OperationRetryOptions>,
     tls_options: Option<TlsOptions>,
@@ -432,8 +433,12 @@ pub struct PulsarBuilder<Exe: Executor> {
 
 impl<Exe: Executor> PulsarBuilder<Exe> {
     /// Authentication parameters (JWT, Biscuit, etc)
-    pub fn with_auth(mut self, auth: Authentication) -> Self {
-        self.auth = Some(auth);
+    pub fn with_auth(self, auth: Authentication) -> Self {
+        self.with_auth_provider(Box::new(auth))
+    }
+
+    pub fn with_auth_provider(mut self, auth: Box<dyn crate::authentication::Authentication>) -> Self {
+        self.auth_provider = Some(auth);
         self
     }
 
@@ -513,15 +518,16 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
     pub async fn build(self) -> Result<Pulsar<Exe>, Error> {
         let PulsarBuilder {
             url,
-            auth,
+            auth_provider,
             connection_retry_options,
             operation_retry_options,
             tls_options,
             executor,
         } = self;
+
         Pulsar::new(
             url,
-            auth,
+            auth_provider.map(|p| Arc::new(Mutex::new(p))),
             connection_retry_options,
             operation_retry_options,
             tls_options,

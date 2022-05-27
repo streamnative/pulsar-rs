@@ -11,6 +11,7 @@ pub enum Error {
     Consumer(ConsumerError),
     Producer(ProducerError),
     ServiceDiscovery(ServiceDiscoveryError),
+    Authentication(AuthenticationError),
     Custom(String),
     Executor,
 }
@@ -46,6 +47,7 @@ impl fmt::Display for Error {
             Error::Consumer(e) => write!(f, "consumer error: {}", e),
             Error::Producer(e) => write!(f, "producer error: {}", e),
             Error::ServiceDiscovery(e) => write!(f, "service discovery error: {}", e),
+            Error::Authentication(e) => write!(f, "authentication error: {}", e),
             Error::Custom(e) => write!(f, "error: {}", e),
             Error::Executor => write!(f, "could not spawn task"),
         }
@@ -59,6 +61,7 @@ impl std::error::Error for Error {
             Error::Consumer(e) => e.source(),
             Error::Producer(e) => e.source(),
             Error::ServiceDiscovery(e) => e.source(),
+            Error::Authentication(e) => e.source(),
             Error::Custom(_) => None,
             Error::Executor => None,
         }
@@ -76,6 +79,7 @@ pub enum ConnectionError {
     SocketAddr(String),
     UnexpectedResponse(String),
     Tls(native_tls::Error),
+    Authentication(AuthenticationError),
     NotFound,
     Canceled,
     Shutdown,
@@ -93,6 +97,12 @@ impl From<native_tls::Error> for ConnectionError {
     }
 }
 
+impl From<AuthenticationError> for ConnectionError {
+    fn from(err: AuthenticationError) -> Self {
+        ConnectionError::Authentication(err)
+    }
+}
+
 impl fmt::Display for ConnectionError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
@@ -106,6 +116,7 @@ impl fmt::Display for ConnectionError {
             ConnectionError::Encoding(e) => write!(f, "Error encoding message: {}", e),
             ConnectionError::SocketAddr(e) => write!(f, "Error obtaining socket address: {}", e),
             ConnectionError::Tls(e) => write!(f, "Error connecting TLS stream: {}", e),
+            ConnectionError::Authentication(e) => write!(f, "Error authentication: {}", e),
             ConnectionError::UnexpectedResponse(e) => {
                 write!(f, "Unexpected response from pulsar: {}", e)
             }
@@ -319,6 +330,23 @@ impl std::error::Error for ServiceDiscoveryError {
             _ => None,
         }
     }
+}
+
+#[derive(Debug)]
+pub enum AuthenticationError {
+    Custom(String)
+}
+
+impl fmt::Display for AuthenticationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AuthenticationError::Custom(m) => write!(f, "authentication error [{}]", m)
+        }
+    }
+}
+
+impl std::error::Error for AuthenticationError {
+
 }
 
 #[derive(Clone)]
