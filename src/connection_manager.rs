@@ -413,6 +413,11 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                     trace!("will ping connection {} to {}", connection_id, broker_url);
                 }
                 if let Some(strong_conn) = weak_conn.upgrade() {
+                    if !strong_conn.is_valid() {
+                        trace!("connection {} is not valid anymore, skip heart beat task",
+                             connection_id);
+                        break;
+                    }
                     if let Err(e) = strong_conn.sender().send_ping().await {
                         error!(
                             "could not ping connection {} to the server at {}: {}",
