@@ -8,6 +8,7 @@ use crate::message::proto::{
 use futures::{future::try_join_all, FutureExt};
 use std::sync::Arc;
 use url::Url;
+use crate::error::ServiceDiscoveryError::NotFound;
 
 /// Look up broker addresses for topics and partitioned topics
 ///
@@ -102,7 +103,13 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
             is_authoritative = authoritative;
 
             // use the TLS connection if available
-            let connection_url = broker_url_tls.clone().unwrap_or_else(|| broker_url.clone());
+            let connection_url = if let Some(u) = &broker_url_tls {
+                u.clone()
+            } else if let Some(u) = &broker_url {
+                u.clone()
+            } else {
+                return Err(ServiceDiscoveryError::NotFound);
+            };
 
             // if going through a proxy, we use the base URL
             let url = if proxied_query || proxy {
@@ -111,13 +118,12 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
                 connection_url.clone()
             };
 
-            let broker_url = match broker_url_tls {
-                Some(u) => format!("{}:{}", u.host_str().unwrap(), u.port().unwrap_or(6651)),
-                None => format!(
-                    "{}:{}",
-                    broker_url.host_str().unwrap(),
-                    broker_url.port().unwrap_or(6650)
-                ),
+            let broker_url = if let Some(u) = broker_url_tls {
+                format!("{}:{}", u.host_str().unwrap(), u.port().unwrap_or(6651))
+            } else if let Some(u) = broker_url {
+                format!("{}:{}", u.host_str().unwrap(), u.port().unwrap_or(6650))
+            } else {
+                return Err(ServiceDiscoveryError::NotFound);
             };
 
             broker_address = BrokerAddress {
@@ -248,7 +254,7 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
 }
 
 struct LookupResponse {
-    pub broker_url: Url,
+    pub broker_url: Option<Url>,
     pub broker_url_tls: Option<Url>,
     pub proxy: bool,
     pub redirect: bool,
@@ -264,14 +270,13 @@ fn convert_lookup_response(
     let redirect =
         response.response == Some(command_lookup_topic_response::LookupType::Redirect as i32);
 
-    if response.broker_service_url.is_none() {
-        return Err(ServiceDiscoveryError::NotFound);
-    }
-
-    let broker_url = Url::parse(&response.broker_service_url.clone().unwrap()).map_err(|e| {
-        error!("error parsing URL: {:?}", e);
-        ServiceDiscoveryError::NotFound
-    })?;
+    let broker_url = match response.broker_service_url.as_ref() {
+        Some(u) => Some(Url::parse(&response.broker_service_url.clone().unwrap()).map_err(|e| {
+            error!("error parsing URL: {:?}", e);
+            ServiceDiscoveryError::NotFound
+        })?),
+        None => None,
+    };
 
     let broker_url_tls = match response.broker_service_url_tls.as_ref() {
         Some(u) => Some(Url::parse(u).map_err(|e| {

@@ -149,6 +149,10 @@ impl<T: DeserializeMessage, Exe: Executor> Reader<T, Exe> {
         self.consumer.last_message_received()
     }
 
+    pub async fn get_last_message_id(&mut self) -> Result<MessageIdData, Error> {
+        self.consumer.get_last_message_id().await
+    }
+
     /// returns the current number of messages received
     pub fn messages_received(&self) -> u64 {
         self.consumer.messages_received()

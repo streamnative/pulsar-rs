@@ -1,4 +1,4 @@
-use crate::connection::{Authentication, Connection};
+use crate::connection::{Connection};
 use crate::error::ConnectionError;
 use crate::executor::Executor;
 use std::collections::HashMap;
@@ -110,7 +110,7 @@ enum ConnectionStatus<Exe: Executor> {
 #[derive(Clone)]
 pub struct ConnectionManager<Exe: Executor> {
     pub url: Url,
-    auth: Option<Authentication>,
+    auth: Option<Arc<Mutex<Box<dyn crate::authentication::Authentication>>>>,
     pub(crate) executor: Arc<Exe>,
     connections: Arc<Mutex<HashMap<BrokerAddress, ConnectionStatus<Exe>>>>,
     connection_retry_options: ConnectionRetryOptions,
@@ -122,7 +122,7 @@ pub struct ConnectionManager<Exe: Executor> {
 impl<Exe: Executor> ConnectionManager<Exe> {
     pub async fn new(
         url: String,
-        auth: Option<Authentication>,
+        auth: Option<Arc<Mutex<Box<dyn crate::authentication::Authentication>>>>,
         connection_retry: Option<ConnectionRetryOptions>,
         operation_retry_options: OperationRetryOptions,
         tls: Option<TlsOptions>,
@@ -147,7 +147,11 @@ impl<Exe: Executor> ConnectionManager<Exe> {
             None => vec![],
             Some(certificate_chain) => {
                 let mut v = vec![];
-                for cert in pem::parse_many(&certificate_chain).iter().rev() {
+                for cert in pem::parse_many(&certificate_chain)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+                    .iter()
+                    .rev()
+                {
                     v.push(
                         Certificate::from_der(&cert.contents[..])
                             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?,
@@ -156,6 +160,10 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                 v
             }
         };
+
+        if let Some(auth) = auth.clone() {
+            auth.lock().await.initialize().await?;
+        }
 
         let manager = ConnectionManager {
             url: url.clone(),
@@ -409,6 +417,11 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                     trace!("will ping connection {} to {}", connection_id, broker_url);
                 }
                 if let Some(strong_conn) = weak_conn.upgrade() {
+                    if !strong_conn.is_valid() {
+                        trace!("connection {} is not valid anymore, skip heart beat task",
+                             connection_id);
+                        break;
+                    }
                     if let Err(e) = strong_conn.sender().send_ping().await {
                         error!(
                             "could not ping connection {} to the server at {}: {}",

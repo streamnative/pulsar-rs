@@ -143,6 +143,24 @@ async fn main() -> Result<(), pulsar::Error> {
 }
 ```
 
+### Project Maintainers
+
+- [Colin Stearns](https://github.com/stearnsc)
+- [Geoffroy Couprie](https://github.com/Geal)
+- [Rui Fu](https://github.com/freeznet)
+- [Yang Yang](https://github.com/fantapsody)
+- [Donghun Louis Lee](https://github.com/pandawithcat)
+
+### Contribution
+
+This project welcomes your PR and issues. For example, refactoring, adding features, correcting English, etc.
+
+Thanks to all the people who already contributed!
+
+<a href="https://github.com/streamnative/pulsar-rs/graphs/contributors">
+  <img src="https://contributors-img.web.app/image?repo=streamnative/pulsar-rs" />
+</a>
+
 ### License
 This library is licensed under the terms of both the MIT license and the Apache License (Version 2.0), and may include packages written by third parties which carry their own copyright notices and license terms.
 

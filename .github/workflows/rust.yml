@@ -10,36 +10,33 @@ jobs:
   build:
 
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        pulsar-version: [ 2.8.3.3, 2.9.2.18, 2.10.0.4 ]
 
     steps:
-      #- name: Start Pulsar
-      #run: docker exec ${{ job.services.pulsar.id }} sh -c 'bin/pulsar standalone'
-    - uses: actions/checkout@v2
-    - name: Build
-      run: cargo build --verbose
+      - name: Start Pulsar Standalone Container
+        run: docker run --name pulsar -p 6650:6650 -p 8080:8080 -d -e GITHUB_ACTIONS=true -e CI=true streamnative/pulsar:${{ matrix.pulsar-version }} /pulsar/bin/pulsar standalone
 
-    - name: Cache cargo registry
-      uses: actions/cache@v1
-      with:
-        path: ~/.cargo/registry
-        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-    - name: Cache cargo index
-      uses: actions/cache@v1
-      with:
-        path: ~/.cargo/git
-        key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-    - name: Cache cargo build
-      uses: actions/cache@v1
-      with:
-        path: target
-        key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+      - uses: actions/checkout@v2
+      - name: Build
+        run: cargo build --verbose
 
-    - name: Run tests
-      run: cargo test -- --nocapture
+      - name: Cache cargo registry
+        uses: actions/cache@v1
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+      - name: Cache cargo index
+        uses: actions/cache@v1
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+      - name: Cache cargo build
+        uses: actions/cache@v1
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
-    services:
-      pulsar:
-        image: geal/pulsar-standalone:2.5.1
-        ports:
-        - 6650:6650
-        - 8080:8080
+      - name: Run tests
+        run: cargo test -- --nocapture

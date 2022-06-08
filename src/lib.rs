@@ -185,6 +185,7 @@ pub mod executor;
 pub mod message;
 pub mod producer;
 pub mod reader;
+pub mod authentication;
 mod service_discovery;
 
 #[cfg(test)]
