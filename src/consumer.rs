@@ -278,6 +278,13 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         }
     }
 
+    pub async fn get_last_message_id(&mut self) -> Result<Vec<MessageIdData>, Error> {
+        match &mut self.inner {
+            InnerConsumer::Single(c) => Ok(vec![c.get_last_message_id().await?]),
+            InnerConsumer::Multi(c) => c.get_last_message_id().await,
+        }
+    }
+
     /// returns the list of topics this consumer is subscribed on
     pub fn topics(&self) -> Vec<String> {
         match &self.inner {
@@ -684,6 +691,13 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
             .unsubscribe(consumer_id)
             .await?;
         Ok(())
+    }
+
+    pub async fn get_last_message_id(&mut self) -> Result<MessageIdData, Error> {
+        let consumer_id = self.consumer_id;
+        let conn = self.connection().await?;
+        let get_last_message_id_response = conn.sender().get_last_message_id(consumer_id).await?;
+        Ok(get_last_message_id_response.last_message_id)
     }
 
     pub fn last_message_received(&self) -> Option<DateTime<Utc>> {
@@ -1740,6 +1754,11 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
         }
 
         Ok(())
+    }
+
+    async fn get_last_message_id(&mut self) -> Result<Vec<MessageIdData>, Error> {
+        let responses = try_join_all(self.consumers.values_mut().map(|c| c.get_last_message_id())).await?;
+        Ok(responses)
     }
 
     async fn unsubscribe(&mut self) -> Result<(), Error> {
