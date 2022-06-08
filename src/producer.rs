@@ -990,6 +990,7 @@ impl Batch {
                 properties,
                 partition_key: message.partition_key,
                 payload_size: message.payload.len() as i32,
+                event_time: message.event_time,
                 ..Default::default()
             },
             payload: message.payload,
