@@ -22,7 +22,7 @@ pub enum State<T: DeserializeMessage> {
     PollingConsumer,
     PollingAck(
         Message<T>,
-        Pin<Box<dyn Future<Output = Result<(), SendError>>>>,
+        Pin<Box<dyn Future<Output = Result<(), SendError>> + Send + Sync>>,
     ),
 }
 
@@ -147,6 +147,10 @@ impl<T: DeserializeMessage, Exe: Executor> Reader<T, Exe> {
     /// returns the date of the last message reception
     pub fn last_message_received(&self) -> Option<DateTime<Utc>> {
         self.consumer.last_message_received()
+    }
+
+    pub async fn get_last_message_id(&mut self) -> Result<MessageIdData, Error> {
+        self.consumer.get_last_message_id().await
     }
 
     /// returns the current number of messages received

@@ -147,7 +147,11 @@ impl<Exe: Executor> ConnectionManager<Exe> {
             None => vec![],
             Some(certificate_chain) => {
                 let mut v = vec![];
-                for cert in pem::parse_many(&certificate_chain).iter().rev() {
+                for cert in pem::parse_many(&certificate_chain)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+                    .iter()
+                    .rev()
+                {
                     v.push(
                         Certificate::from_der(&cert.contents[..])
                             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?,
@@ -423,6 +427,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                             "could not ping connection {} to the server at {}: {}",
                             connection_id, broker_url, e
                         );
+                        break;
                     }
                 } else {
                     // if the strong pointers were dropped, we can stop the heartbeat for this
