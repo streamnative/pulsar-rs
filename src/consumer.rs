@@ -25,7 +25,7 @@ use crate::message::{
     proto::{self, command_subscribe::SubType, MessageIdData, MessageMetadata, Schema},
     BatchedMessage, Message as RawMessage, Metadata, Payload,
 };
-use crate::proto::{BaseCommand, CommandCloseConsumer};
+use crate::proto::{BaseCommand, CommandCloseConsumer, CommandConsumerStatsResponse};
 use crate::reader::{Reader, State};
 use crate::{BrokerAddress, DeserializeMessage, Pulsar};
 use core::iter;
@@ -179,6 +179,14 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         match &mut self.inner {
             InnerConsumer::Single(c) => c.check_connection().await,
             InnerConsumer::Multi(c) => c.check_connections().await,
+        }
+    }
+
+    /// get consumer stats
+    pub async fn get_stats(&mut self) -> Result<Vec<CommandConsumerStatsResponse>, Error> {
+        match &mut self.inner {
+            InnerConsumer::Single(c) => Ok(vec![c.get_stats().await?]),
+            InnerConsumer::Multi(c) => c.get_stats().await,
         }
     }
 
@@ -637,6 +645,13 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         })
     }
 
+    pub async fn get_stats(&mut self) -> Result<CommandConsumerStatsResponse, Error> {
+        let consumer_id = self.consumer_id;
+        let conn = self.connection().await?;
+        let consumer_stats_response = conn.sender().get_consumer_stats(consumer_id).await?;
+        Ok(consumer_stats_response)
+    }
+
     pub async fn check_connection(&mut self) -> Result<(), Error> {
         let conn = self.connection().await?;
         info!("check connection for id {}", conn.id());
@@ -878,6 +893,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                     match message_opt {
                         None => {
                             error!("Consumer: messages::next: returning Disconnected");
+                            panic!("ConsumerEngine got Disconnected");
                             self.reconnect().await?;
                             continue;
                             //return Err(Error::Consumer(ConsumerError::Connection(ConnectionError::Disconnected)).into());
@@ -1722,6 +1738,11 @@ struct MultiTopicConsumer<T: DeserializeMessage, Exe: Executor> {
 impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
     fn topics(&self) -> Vec<String> {
         self.topics.iter().map(|s| s.to_string()).collect()
+    }
+
+    async fn get_stats(&mut self) -> Result<Vec<CommandConsumerStatsResponse>, Error> {
+        let resposnes = try_join_all(self.consumers.values_mut().map(|c| c.get_stats())).await?;
+        Ok(resposnes)
     }
 
     fn last_message_received(&self) -> Option<DateTime<Utc>> {

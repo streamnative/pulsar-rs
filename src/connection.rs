@@ -361,6 +361,18 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         .await
     }
 
+    pub async fn get_consumer_stats(
+        &self,
+        consumer_id: u64,
+    ) -> Result<proto::CommandConsumerStatsResponse, ConnectionError> {
+        let request_id = self.request_id.get();
+        let msg = messages::consumer_stats(request_id, consumer_id);
+        self.send_message(msg, RequestKey::RequestId(request_id), |resp| {
+            resp.command.consumer_stats_response
+        })
+        .await
+    }
+  
     pub async fn get_last_message_id(
         &self,
         consumer_id: u64,
@@ -1118,6 +1130,21 @@ pub(crate) mod messages {
         }
     }
 
+    pub fn consumer_stats(request_id: u64, consumer_id: u64) -> Message {
+        Message {
+            command: proto::BaseCommand {
+                r#type: CommandType::ConsumerStats as i32,
+                consumer_stats: Some(proto::CommandConsumerStats {
+                    request_id,
+                    consumer_id,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            payload: None,
+        }
+    }
+  
     pub fn get_last_message_id(consumer_id: u64, request_id: u64) -> Message {
         Message {
             command: proto::BaseCommand {
