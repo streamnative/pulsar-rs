@@ -22,7 +22,7 @@ pub enum State<T: DeserializeMessage> {
     PollingConsumer,
     PollingAck(
         Message<T>,
-        Pin<Box<dyn Future<Output = Result<(), SendError>>>>,
+        Pin<Box<dyn Future<Output = Result<(), SendError>> + Send + Sync>>,
     ),
 }
 
