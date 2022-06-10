@@ -55,6 +55,8 @@ pub struct Message {
     pub properties: HashMap<String, String>,
     /// key to decide partition for the message
     pub partition_key: ::std::option::Option<String>,
+    /// key to decide partition for the message
+    pub ordering_key: ::std::option::Option<Vec<u8>>,
     /// Override namespace's replication
     pub replicate_to: ::std::vec::Vec<String>,
     /// the timestamp that this event occurs. it is typically set by applications.
@@ -72,6 +74,8 @@ pub(crate) struct ProducerMessage {
     pub properties: HashMap<String, String>,
     ///key to decide partition for the msg
     pub partition_key: ::std::option::Option<String>,
+    ///key to decide partition for the msg
+    pub ordering_key: ::std::option::Option<Vec<u8>>,
     /// Override namespace's replication
     pub replicate_to: ::std::vec::Vec<String>,
     pub compression: ::std::option::Option<i32>,
@@ -100,6 +104,7 @@ impl From<Message> for ProducerMessage {
             payload: m.payload,
             properties: m.properties,
             partition_key: m.partition_key,
+            ordering_key: m.ordering_key,
             replicate_to: m.replicate_to,
             event_time: m.event_time,
             schema_version: m.schema_version,
@@ -989,6 +994,7 @@ impl Batch {
             metadata: proto::SingleMessageMetadata {
                 properties,
                 partition_key: message.partition_key,
+                ordering_key: message.ordering_key,
                 payload_size: message.payload.len() as i32,
                 event_time: message.event_time,
                 ..Default::default()
@@ -1015,6 +1021,7 @@ pub struct MessageBuilder<'a, T, Exe: Executor> {
     producer: &'a mut Producer<Exe>,
     properties: HashMap<String, String>,
     partition_key: Option<String>,
+    ordering_key: Option<Vec<u8>>,
     deliver_at_time: Option<i64>,
     event_time: Option<u64>,
     content: T,
@@ -1027,6 +1034,7 @@ impl<'a, Exe: Executor> MessageBuilder<'a, (), Exe> {
             producer,
             properties: HashMap::new(),
             partition_key: None,
+            ordering_key: None,
             deliver_at_time: None,
             event_time: None,
             content: (),
@@ -1041,6 +1049,7 @@ impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
             producer: self.producer,
             properties: self.properties,
             partition_key: self.partition_key,
+            ordering_key: self.ordering_key,
             deliver_at_time: self.deliver_at_time,
             event_time: self.event_time,
             content,
@@ -1049,6 +1058,11 @@ impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
 
     /// sets the message's partition key
     pub fn with_partition_key<S: Into<String>>(mut self, partition_key: S) -> Self {
+        self.partition_key = Some(partition_key.into());
+        self
+    }
+    /// sets the message's ordering key for key_shared subscription
+    pub fn with_ordering_key<S: Into<String>>(mut self, partition_key: S) -> Self {
         self.partition_key = Some(partition_key.into());
         self
     }
@@ -1100,6 +1114,7 @@ impl<'a, T: SerializeMessage + Sized, Exe: Executor> MessageBuilder<'a, T, Exe> 
             producer,
             properties,
             partition_key,
+            ordering_key,
             content,
             deliver_at_time,
             event_time,
@@ -1108,6 +1123,7 @@ impl<'a, T: SerializeMessage + Sized, Exe: Executor> MessageBuilder<'a, T, Exe> 
         let mut message = T::serialize_message(content)?;
         message.properties = properties;
         message.partition_key = partition_key;
+        message.ordering_key = ordering_key;
         message.event_time = event_time;
 
         let mut producer_message: ProducerMessage = message.into();
