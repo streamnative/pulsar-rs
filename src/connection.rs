@@ -22,7 +22,7 @@ use futures::{
 use url::Url;
 
 use crate::consumer::ConsumerOptions;
-use crate::error::{ConnectionError, SharedError, AuthenticationError};
+use crate::error::{AuthenticationError, ConnectionError, SharedError};
 use crate::executor::{Executor, ExecutorKind};
 use crate::message::{
     proto::{self, command_subscribe::SubType},
@@ -372,7 +372,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         })
         .await
     }
-  
+
     pub async fn get_last_message_id(
         &self,
         consumer_id: u64,
@@ -381,7 +381,8 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         let msg = messages::get_last_message_id(consumer_id, request_id);
         self.send_message(msg, RequestKey::RequestId(request_id), |resp| {
             resp.command.get_last_message_id_response
-        }).await
+        })
+        .await
     }
 
     pub async fn create_producer(
@@ -674,8 +675,9 @@ impl<Exe: Executor> Connection<Exe> {
         Ok(Connection { id, url, sender })
     }
 
-    async fn prepare_auth_data(auth: Option<Arc<Mutex<Box<dyn crate::authentication::Authentication>>>>)
-        -> Result<Option<Authentication>, ConnectionError> {
+    async fn prepare_auth_data(
+        auth: Option<Arc<Mutex<Box<dyn crate::authentication::Authentication>>>>,
+    ) -> Result<Option<Authentication>, ConnectionError> {
         match auth {
             Some(m_auth) => {
                 let mut auth_guard = m_auth.lock().await;
@@ -684,7 +686,7 @@ impl<Exe: Executor> Connection<Exe> {
                     data: auth_guard.auth_data().await?,
                 }))
             }
-            None => Ok(None)
+            None => Ok(None),
         }
     }
 
@@ -1044,6 +1046,7 @@ pub(crate) mod messages {
                     request_id,
                     namespace,
                     mode: Some(mode as i32),
+                    ..Default::default()
                 }),
                 ..Default::default()
             },
@@ -1144,7 +1147,7 @@ pub(crate) mod messages {
             payload: None,
         }
     }
-  
+
     pub fn get_last_message_id(consumer_id: u64, request_id: u64) -> Message {
         Message {
             command: proto::BaseCommand {
@@ -1265,6 +1268,7 @@ pub(crate) mod messages {
                     proto::CommandRedeliverUnacknowledgedMessages {
                         consumer_id,
                         message_ids,
+                        ..Default::default()
                     },
                 ),
                 ..Default::default()
