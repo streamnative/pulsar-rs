@@ -126,6 +126,8 @@ pub struct ProducerOptions {
     pub batch_size: Option<u32>,
     /// algorithm used to compress the messages
     pub compression: Option<proto::CompressionType>,
+    /// producer access mode: shared = 0, exclusive = 1, waitforexclusive =2, exclusivewithoutfencing =3
+    pub access_mode : Option<i32>, 
 }
 
 /// Wrapper structure that manges multiple producers at once, creating them as needed
@@ -438,6 +440,10 @@ impl<Exe: Executor> TopicProducer<Exe> {
                     e
                 }) {
                 Ok(success) => {
+                    //todo should check producer_ready field
+                    // If producer is not "ready", the client will avoid to timeout the request
+                    // for creating the producer. Instead it will wait indefinitely until it gets
+                    // a subsequent  `CommandProducerSuccess` with `producer_ready==true`.
                     producer_name = success.producer_name;
 
                     if current_retries > 0 {

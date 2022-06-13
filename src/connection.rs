@@ -1026,6 +1026,7 @@ pub(crate) mod messages {
                         })
                         .collect(),
                     schema: options.schema,
+                    producer_access_mode: options.access_mode, 
                     ..Default::default()
                 }),
                 ..Default::default()

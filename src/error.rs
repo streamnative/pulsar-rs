@@ -203,6 +203,8 @@ pub enum ProducerError {
     PartialSend(Vec<Result<SendFuture, Error>>),
     /// Indiciates the error was part of sending a batch, and thus shared across the batch
     Batch(Arc<Error>),
+    /// Indicates this producer has lost exclusive access to the topic. Client can decided whether to recreate or not
+    Fenced,
 }
 
 impl From<ConnectionError> for ProducerError {
@@ -247,6 +249,7 @@ impl fmt::Display for ProducerError {
                 }
                 Ok(())
             }
+            ProducerError::Fenced => write!(f, "Producer is fenced"),
         }
     }
 }
@@ -270,7 +273,8 @@ impl fmt::Debug for ProducerError {
                     }
                 }
                 write!(f, ")")
-            }
+            }, 
+            ProducerError::Fenced => write!(f, "Producer is fenced"),
         }
     }
 }
@@ -286,6 +290,7 @@ impl std::error::Error for ProducerError {
                 .find(|r| r.is_err())
                 .map(|r| r.as_ref().map(drop).unwrap_err() as _),
             ProducerError::Custom(_) => None,
+            ProducerError::Fenced => None,
         }
     }
 }
@@ -334,20 +339,18 @@ impl std::error::Error for ServiceDiscoveryError {
 
 #[derive(Debug)]
 pub enum AuthenticationError {
-    Custom(String)
+    Custom(String),
 }
 
 impl fmt::Display for AuthenticationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            AuthenticationError::Custom(m) => write!(f, "authentication error [{}]", m)
+            AuthenticationError::Custom(m) => write!(f, "authentication error [{}]", m),
         }
     }
 }
 
-impl std::error::Error for AuthenticationError {
-
-}
+impl std::error::Error for AuthenticationError {}
 
 #[derive(Clone)]
 pub(crate) struct SharedError {
@@ -404,12 +407,14 @@ pub(crate) fn server_error(i: i32) -> Option<ServerError> {
         15 => Some(ServerError::TopicTerminatedError),
         16 => Some(ServerError::ProducerBusy),
         17 => Some(ServerError::InvalidTopicName),
-        /* FIXME: why aren't they found by the compiler? Max enum size?
         18 => Some(ServerError::IncompatibleSchema),
         19 => Some(ServerError::ConsumerAssignError),
         20 => Some(ServerError::TransactionCoordinatorNotFound),
         21 => Some(ServerError::InvalidTxnStatus),
-        */
+        22 => Some(ServerError::NotAllowedError),
+        23 => Some(ServerError::TransactionConflict),
+        24 => Some(ServerError::TransactionNotFound),
+        25 => Some(ServerError::ProducerFenced),
         _ => None,
     }
 }
