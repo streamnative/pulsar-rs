@@ -149,7 +149,7 @@ async fn main() -> Result<(), pulsar::Error> {
 - [Geoffroy Couprie](https://github.com/Geal)
 - [Rui Fu](https://github.com/freeznet)
 - [Yang Yang](https://github.com/fantapsody)
-- [Donghun Louis Lee](https://github.com/pandawithcat)
+- [Donghun Louis Lee](https://github.com/DonghunLouisLee)
 
 ### Contribution
 
