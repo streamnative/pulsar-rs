@@ -174,6 +174,7 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> 
                     msg => match msg.request_key() {
                         Some(key @ RequestKey::RequestId(_))
                         | Some(key @ RequestKey::ProducerSend { .. }) => {
+                            trace!("received this message: {:?}", msg);
                             if let Some(resolver) = self.pending_requests.remove(&key) {
                                 // We don't care if the receiver has dropped their future
                                 let _ = resolver.send(msg);
@@ -400,6 +401,16 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         .await
     }
 
+    pub async fn wait_for_exclusive_access(
+        &self,
+        request_id: u64,
+    ) -> Result<proto::CommandProducerSuccess, ConnectionError> {
+        self.wait_exclusive_access(RequestKey::RequestId(request_id), |resp| {
+            resp.command.producer_success
+        })
+        .await
+    }
+
     pub async fn get_topics_of_namespace(
         &self,
         namespace: String,
@@ -566,12 +577,54 @@ impl<Exe: Executor> ConnectionSender<Exe> {
                 pin_mut!(delay_f);
 
                 match select(response, delay_f).await {
-                    Either::Left((res, _)) => res,
+                    Either::Left((res, _)) => {
+                        println!("recv msg: {:?}", res);
+                        res
+                    }
                     Either::Right(_) => Err(ConnectionError::Io(std::io::Error::new(
                         std::io::ErrorKind::TimedOut,
                         "timeout sending message to the Pulsar server",
                     ))),
                 }
+            }
+            _ => Err(ConnectionError::Disconnected),
+        }
+    }
+
+    /// wait for desired message(commandproducersuccess with ready field true)
+    async fn wait_exclusive_access<R: Debug, F>(
+        &self,
+        key: RequestKey,
+        extract: F,
+    ) -> Result<R, ConnectionError>
+    where
+        F: FnOnce(Message) -> Option<R>,
+    {
+        let (resolver, response) = oneshot::channel();
+
+        let k = key.clone();
+        let response = async {
+            response
+                .await
+                .map_err(|oneshot::Canceled| {
+                    self.error.set(ConnectionError::Disconnected);
+                    ConnectionError::Disconnected
+                })
+                .map(move |message: Message| {
+                    trace!("received message(key = {:?}): {:?}", k, message);
+                    extract_message(message, extract)
+                })?
+        };
+
+        match self
+            .registrations
+            .unbounded_send(Register::Request { key, resolver })
+        {
+            Ok(_) => {
+                //there should be no timeout for this message
+                pin_mut!(response);
+                let res = response.await;
+                res
             }
             _ => Err(ConnectionError::Disconnected),
         }
@@ -869,6 +922,7 @@ impl<Exe: Executor> Connection<Exe> {
         let err = error.clone();
         let res = executor.spawn(Box::pin(async move {
             while let Some(msg) = rx.next().await {
+                println!("real sent msg: {:?}", msg);
                 if let Err(e) = sink.send(msg).await {
                     err.set(e);
                     break;
@@ -1026,7 +1080,7 @@ pub(crate) mod messages {
                         })
                         .collect(),
                     schema: options.schema,
-                    producer_access_mode: options.access_mode, 
+                    producer_access_mode: options.access_mode,
                     ..Default::default()
                 }),
                 ..Default::default()
