@@ -578,7 +578,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
 
                 match select(response, delay_f).await {
                     Either::Left((res, _)) => {
-                        println!("recv msg: {:?}", res);
+                        // println!("recv msg: {:?}", res);
                         res
                     }
                     Either::Right(_) => Err(ConnectionError::Io(std::io::Error::new(
@@ -922,7 +922,7 @@ impl<Exe: Executor> Connection<Exe> {
         let err = error.clone();
         let res = executor.spawn(Box::pin(async move {
             while let Some(msg) = rx.next().await {
-                println!("real sent msg: {:?}", msg);
+                // println!("real sent msg: {:?}", msg);
                 if let Err(e) = sink.send(msg).await {
                     err.set(e);
                     break;

@@ -440,18 +440,17 @@ impl<Exe: Executor> TopicProducer<Exe> {
                     e
                 }) {
                 Ok(partial_success) => {
-                    //todo should check producer_ready field
                     // If producer is not "ready", the client will avoid to timeout the request
                     // for creating the producer. Instead it will wait indefinitely until it gets
                     // a subsequent  `CommandProducerSuccess` with `producer_ready==true`.
                     if let Some(producer_ready) = partial_success.producer_ready {
                         if !producer_ready {
                             // wait until next commandproducersuccess message has been received
-                            println!("producer is still waiting for exclusive access");
+                            trace!("producer is still waiting for exclusive access");
                             let result = connection_sender
                                 .wait_for_exclusive_access(partial_success.request_id)
                                 .await;
-                            println!("result is received: {:?}", result);
+                            trace!("result is received: {:?}", result);
                         }
                     }
                     producer_name = partial_success.producer_name;
