@@ -373,7 +373,6 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         })
         .await
     }
-
     pub async fn get_last_message_id(
         &self,
         consumer_id: u64,
