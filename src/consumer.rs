@@ -1778,7 +1778,8 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
     }
 
     async fn get_last_message_id(&mut self) -> Result<Vec<MessageIdData>, Error> {
-        let responses = try_join_all(self.consumers.values_mut().map(|c| c.get_last_message_id())).await?;
+        let responses =
+            try_join_all(self.consumers.values_mut().map(|c| c.get_last_message_id())).await?;
         Ok(responses)
     }
 

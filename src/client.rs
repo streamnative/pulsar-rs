@@ -437,7 +437,10 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
         self.with_auth_provider(Box::new(auth))
     }
 
-    pub fn with_auth_provider(mut self, auth: Box<dyn crate::authentication::Authentication>) -> Self {
+    pub fn with_auth_provider(
+        mut self,
+        auth: Box<dyn crate::authentication::Authentication>,
+    ) -> Self {
         self.auth_provider = Some(auth);
         self
     }
