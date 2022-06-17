@@ -1201,7 +1201,6 @@ pub(crate) mod messages {
             payload: None,
         }
     }
-
     pub fn get_last_message_id(consumer_id: u64, request_id: u64) -> Message {
         Message {
             command: proto::BaseCommand {
