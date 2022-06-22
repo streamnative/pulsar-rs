@@ -754,44 +754,34 @@ impl<Exe: Executor> TopicProducer<Exe> {
         &mut self,
         message: ProducerMessage,
     ) -> Result<proto::CommandSendReceipt, Error> {
-        let msg = message.clone();
-        match self
-            .connection
-            .sender()
-            .send(self.id, self.name.clone(), self.message_id.get(), message)
-            .await
-        {
-            Ok(receipt) => return Ok(receipt),
-            Err(ConnectionError::Disconnected) => {}
-            Err(ConnectionError::Io(e)) => {
-                if e.kind() != std::io::ErrorKind::TimedOut {
-                    error!("send_inner got io error: {:?}", e);
-                    return Err(ProducerError::Connection(ConnectionError::Io(e)).into());
+        loop {
+            let msg = message.clone();
+            match self
+                .connection
+                .sender()
+                .send(self.id, self.name.clone(), self.message_id.get(), msg)
+                .await
+            {
+                Ok(receipt) => return Ok(receipt),
+                Err(ConnectionError::Disconnected) => {}
+                Err(ConnectionError::Io(e)) => {
+                    if e.kind() != std::io::ErrorKind::TimedOut {
+                        error!("send_inner got io error: {:?}", e);
+                        return Err(ProducerError::Connection(ConnectionError::Io(e)).into());
+                    }
                 }
-            }
-            Err(e) => {
-                error!("send_inner got error: {:?}", e);
-                return Err(ProducerError::Connection(e).into());
-            }
-        };
+                Err(e) => {
+                    error!("send_inner got error: {:?}", e);
+                    return Err(ProducerError::Connection(e).into());
+                }
+            };
 
-        error!(
-            "send_inner: connection {} disconnected",
-            self.connection.id()
-        );
-        self.reconnect().await?;
+            error!(
+                "send_inner: connection {} disconnected",
+                self.connection.id()
+            );
 
-        match self
-            .connection
-            .sender()
-            .send(self.id, self.name.clone(), self.message_id.get(), msg)
-            .await
-        {
-            Ok(receipt) => Ok(receipt),
-            Err(e) => {
-                error!("send_inner got error: {:?}", e);
-                Err(ProducerError::Connection(e).into())
-            }
+            self.reconnect().await?;
         }
     }
 
