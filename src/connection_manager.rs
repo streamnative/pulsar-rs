@@ -482,6 +482,12 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                     // in a mutex, and a case appears where the Arc is cloned
                     // somewhere at the same time, that just means the manager
                     // will create a new connection the next time it is asked
+                    trace!(
+                        "checking connection {}, is valid? {}, strong_count {}",
+                        conn.id(),
+                        conn.is_valid(),
+                        Arc::strong_count(conn)
+                    );
                     conn.is_valid() && Arc::strong_count(conn) > 1
                 }
             });

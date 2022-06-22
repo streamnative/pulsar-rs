@@ -774,6 +774,14 @@ impl<Exe: Executor> TopicProducer<Exe> {
 
         self.connection = conn;
 
+        warn!(
+            "Retry #0 -> reconnecting producer {:#} using connection {:#} to broker {:#} to topic {:#}",
+            self.id,
+            self.connection.id(),
+            broker_address.url,
+            self.topic
+        );
+
         let topic = self.topic.clone();
         let batch_size = self.options.batch_size;
 
@@ -827,6 +835,15 @@ impl<Exe: Executor> TopicProducer<Exe> {
 
                         let addr = self.client.lookup_topic(&topic).await?;
                         self.connection = self.client.manager.get_connection(&addr).await?;
+
+                        warn!(
+                            "Retry #{} -> reconnecting producer {:#} using connection {:#} to broker {:#} to topic {:#}",
+                            current_retries,
+                            self.id,
+                            self.connection.id(),
+                            broker_address.url,
+                            self.topic
+                        );
 
                         continue;
                     } else {
