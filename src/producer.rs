@@ -385,7 +385,7 @@ struct TopicProducer<Exe: Executor> {
     // while we might be pushing more messages from elsewhere
     batch: Option<Mutex<Batch>>,
     compression: Option<proto::CompressionType>,
-    _drop_signal: oneshot::Sender<()>,
+    drop_signal: oneshot::Sender<()>,
     options: ProducerOptions,
 }
 
@@ -548,7 +548,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
             message_id: sequence_ids,
             batch: batch_size.map(Batch::new).map(Mutex::new),
             compression,
-            _drop_signal,
+            drop_signal: _drop_signal,
             options,
         })
     }
@@ -787,9 +787,17 @@ impl<Exe: Executor> TopicProducer<Exe> {
 
     async fn reconnect(&mut self) -> Result<(), Error> {
         debug!("reconnecting producer for topic: {}", self.topic);
+        // Sender::send() method consumes the sender
+        // as the sender is hold by the TopicProducer, there is no way to call send method
+        // The lines below take the pointed sender and replace it by a new one bound to nothing
+        // but as the TopicProducer sender is recreate below, there is no worry
+        let (_drop_signal, _) = oneshot::channel::<()>();
+        let old_signal = std::mem::replace(&mut self.drop_signal, _drop_signal);
+        // This line ask for kill the previous errored producer
+        let _ = old_signal.send(());
+
         let broker_address = self.client.lookup_topic(&self.topic).await?;
         let conn = self.client.manager.get_connection(&broker_address).await?;
-
         self.connection = conn;
 
         warn!(
@@ -927,7 +935,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
         }));
 
         self.batch = batch;
-        self._drop_signal = _drop_signal;
+        self.drop_signal = _drop_signal;
 
         Ok(())
     }
