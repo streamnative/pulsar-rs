@@ -583,13 +583,36 @@ impl<Exe: Executor> ConnectionSender<Exe> {
                         // println!("recv msg: {:?}", res);
                         res
                     }
-                    Either::Right(_) => Err(ConnectionError::Io(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "timeout sending message to the Pulsar server",
-                    ))),
+                    Either::Right(_) => {
+                        warn!(
+                            "connection {} timedout sending message to the Pulsar server",
+                            self.connection_id
+                        );
+                        self.error.set(ConnectionError::Io(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            format!(
+                                " connection {} timedout sending message to the Pulsar server",
+                                self.connection_id
+                            ),
+                        )));
+                        Err(ConnectionError::Io(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            format!(
+                                " connection {} timedout sending message to the Pulsar server",
+                                self.connection_id
+                            ),
+                        )))
+                    }
                 }
             }
-            _ => Err(ConnectionError::Disconnected),
+            _ => {
+                warn!(
+                    "connection {} disconnected sending message to the Pulsar server",
+                    self.connection_id
+                );
+                self.error.set(ConnectionError::Disconnected);
+                Err(ConnectionError::Disconnected)
+            }
         }
     }
 
