@@ -849,7 +849,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
                     if operation_retry_options.max_retries.is_none()
                         || operation_retry_options.max_retries.unwrap() > current_retries
                     {
-                        error!("create_producer({}) answered ServiceNotReady, retrying request after {}ms (max_retries = {:?}): {}",
+                        warn!("create_producer({}) answered ServiceNotReady, retrying request after {}ms (max_retries = {:?}): {}",
                         topic, operation_retry_options.retry_delay.as_millis(),
                         operation_retry_options.max_retries, text.unwrap_or_else(String::new));
 
