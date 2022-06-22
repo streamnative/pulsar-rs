@@ -497,6 +497,34 @@ impl<Exe: Executor> TopicProducer<Exe> {
                         .into());
                     }
                 }
+                Err(ConnectionError::PulsarError(Some(proto::ServerError::ProducerBusy), text)) => {
+                    if operation_retry_options.max_retries.is_none()
+                        || operation_retry_options.max_retries.unwrap() > current_retries
+                    {
+                        error!("create_producer({}) answered ProducerBusy, retrying request after {}ms (max_retries = {:?}): {}",
+                        topic, operation_retry_options.retry_delay.as_millis(),
+                        operation_retry_options.max_retries, text.unwrap_or_else(String::new));
+
+                        current_retries += 1;
+                        client
+                            .executor
+                            .delay(operation_retry_options.retry_delay)
+                            .await;
+
+                        let addr = client.lookup_topic(&topic).await?;
+                        connection = client.manager.get_connection(&addr).await?;
+
+                        continue;
+                    } else {
+                        error!("create_producer({}) reached max retries", topic);
+
+                        return Err(ConnectionError::PulsarError(
+                            Some(proto::ServerError::ProducerBusy),
+                            text,
+                        )
+                        .into());
+                    }
+                }
                 //this also captures producer fenced error
                 Err(e) => return Err(Error::Connection(e)),
             }
@@ -851,6 +879,43 @@ impl<Exe: Executor> TopicProducer<Exe> {
 
                         return Err(ConnectionError::PulsarError(
                             Some(proto::ServerError::ServiceNotReady),
+                            text,
+                        )
+                        .into());
+                    }
+                }
+                Err(ConnectionError::PulsarError(Some(proto::ServerError::ProducerBusy), text)) => {
+                    if operation_retry_options.max_retries.is_none()
+                        || operation_retry_options.max_retries.unwrap() > current_retries
+                    {
+                        warn!("create_producer({}) answered ProducerBusy, retrying request after {}ms (max_retries = {:?}): {}",
+                        topic, operation_retry_options.retry_delay.as_millis(),
+                        operation_retry_options.max_retries, text.unwrap_or_else(String::new));
+
+                        current_retries += 1;
+                        self.client
+                            .executor
+                            .delay(operation_retry_options.retry_delay)
+                            .await;
+
+                        let addr = self.client.lookup_topic(&topic).await?;
+                        self.connection = self.client.manager.get_connection(&addr).await?;
+
+                        warn!(
+                            "Retry #{} -> reconnecting producer {:#} using connection {:#} to broker {:#} to topic {:#}",
+                            current_retries,
+                            self.id,
+                            self.connection.id(),
+                            broker_address.url,
+                            self.topic
+                        );
+
+                        continue;
+                    } else {
+                        error!("create_producer({}) reached max retries", topic);
+
+                        return Err(ConnectionError::PulsarError(
+                            Some(proto::ServerError::ProducerBusy),
                             text,
                         )
                         .into());
