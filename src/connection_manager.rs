@@ -64,7 +64,7 @@ impl std::default::Default for OperationRetryOptions {
     fn default() -> Self {
         OperationRetryOptions {
             operation_timeout: Duration::from_secs(30),
-            retry_delay: Duration::from_millis(500),
+            retry_delay: Duration::from_secs(30),
             max_retries: None,
         }
     }
