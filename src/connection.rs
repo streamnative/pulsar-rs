@@ -254,6 +254,7 @@ impl SerialId {
 /// An owned type that can send messages like a connection
 //#[derive(Clone)]
 pub struct ConnectionSender<Exe: Executor> {
+    connection_id: i64,
     tx: mpsc::UnboundedSender<Message>,
     registrations: mpsc::UnboundedSender<Register>,
     receiver_shutdown: Option<oneshot::Sender<()>>,
@@ -265,6 +266,7 @@ pub struct ConnectionSender<Exe: Executor> {
 
 impl<Exe: Executor> ConnectionSender<Exe> {
     pub(crate) fn new(
+        connection_id: i64,
         tx: mpsc::UnboundedSender<Message>,
         registrations: mpsc::UnboundedSender<Register>,
         receiver_shutdown: oneshot::Sender<()>,
@@ -274,6 +276,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         operation_timeout: Duration,
     ) -> ConnectionSender<Exe> {
         ConnectionSender {
+            connection_id,
             tx,
             registrations,
             receiver_shutdown: Some(receiver_shutdown),
@@ -302,7 +305,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
 
     pub async fn send_ping(&self) -> Result<(), ConnectionError> {
         let (resolver, response) = oneshot::channel();
-        trace!("sending ping");
+        trace!("sending ping to connection {}", self.connection_id);
 
         match (
             self.registrations
@@ -320,7 +323,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
                             self.error.set(ConnectionError::Disconnected);
                             ConnectionError::Disconnected
                         })
-                        .map(move |_| trace!("received pong")),
+                        .map(move |_| trace!("received pong from {}", self.connection_id)),
                     Either::Right(_) => {
                         self.error.set(ConnectionError::Io(std::io::Error::new(
                             std::io::ErrorKind::TimedOut,
@@ -694,8 +697,10 @@ impl<Exe: Executor> Connection<Exe> {
 
         let hostname = hostname.unwrap_or_else(|| address.ip().to_string());
 
-        debug!("Connecting to {}: {}", url, address);
+        let id = rand::random();
+        debug!("Connecting to {}: {}, as {}", url, address, id);
         let sender_prepare = Connection::prepare_stream(
+            id,
             address,
             hostname,
             tls,
@@ -723,7 +728,6 @@ impl<Exe: Executor> Connection<Exe> {
             }
         };
 
-        let id = rand::random();
         Ok(Connection { id, url, sender })
     }
 
@@ -743,6 +747,7 @@ impl<Exe: Executor> Connection<Exe> {
     }
 
     async fn prepare_stream(
+        connection_id: i64,
         address: SocketAddr,
         hostname: String,
         tls: bool,
@@ -776,6 +781,7 @@ impl<Exe: Executor> Connection<Exe> {
                         .map(|stream| tokio_util::codec::Framed::new(stream, Codec))?;
 
                     Connection::connect(
+                        connection_id,
                         stream,
                         Self::prepare_auth_data(auth).await?,
                         proxy_to_broker_url,
@@ -789,6 +795,7 @@ impl<Exe: Executor> Connection<Exe> {
                         .map(|stream| tokio_util::codec::Framed::new(stream, Codec))?;
 
                     Connection::connect(
+                        connection_id,
                         stream,
                         Self::prepare_auth_data(auth).await?,
                         proxy_to_broker_url,
@@ -820,6 +827,7 @@ impl<Exe: Executor> Connection<Exe> {
                         .map(|stream| asynchronous_codec::Framed::new(stream, Codec))?;
 
                     Connection::connect(
+                        connection_id,
                         stream,
                         Self::prepare_auth_data(auth).await?,
                         proxy_to_broker_url,
@@ -833,6 +841,7 @@ impl<Exe: Executor> Connection<Exe> {
                         .map(|stream| asynchronous_codec::Framed::new(stream, Codec))?;
 
                     Connection::connect(
+                        connection_id,
                         stream,
                         Self::prepare_auth_data(auth).await?,
                         proxy_to_broker_url,
@@ -850,6 +859,7 @@ impl<Exe: Executor> Connection<Exe> {
     }
 
     pub async fn connect<S>(
+        connection_id: i64,
         mut stream: S,
         auth_data: Option<Authentication>,
         proxy_to_broker_url: Option<String>,
@@ -934,6 +944,7 @@ impl<Exe: Executor> Connection<Exe> {
         }
 
         let sender = ConnectionSender::new(
+            connection_id,
             tx,
             registrations_tx,
             receiver_shutdown_tx,
