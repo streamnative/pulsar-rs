@@ -458,7 +458,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
                     if current_retries > 0 {
                         let dur = (std::time::Instant::now() - start).as_secs();
                         log::info!(
-                            "subscribe({}) success after {} retries over {} seconds",
+                            "producer({}) success after {} retries over {} seconds",
                             topic,
                             current_retries + 1,
                             dur
@@ -808,7 +808,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
                     if current_retries > 0 {
                         let dur = (std::time::Instant::now() - start).as_secs();
                         log::info!(
-                            "subscribe({}) success after {} retries over {} seconds",
+                            "producer({}) success after {} retries over {} seconds",
                             topic,
                             current_retries + 1,
                             dur
