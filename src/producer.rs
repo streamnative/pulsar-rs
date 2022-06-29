@@ -525,6 +525,37 @@ impl<Exe: Executor> TopicProducer<Exe> {
                         .into());
                     }
                 }
+                Err(ConnectionError::Io(e)) => {
+                    if e.kind() != std::io::ErrorKind::TimedOut {
+                        warn!("send_inner got io error: {:?}", e);
+                        return Err(ProducerError::Connection(ConnectionError::Io(e)).into());
+                    } else {
+                        if operation_retry_options.max_retries.is_none()
+                            || operation_retry_options.max_retries.unwrap() > current_retries
+                        {
+                            error!(
+                                "create_producer({}) TimedOut, retrying request after {}ms (max_retries = {:?})",
+                                topic, operation_retry_options.retry_delay.as_millis(),
+                                operation_retry_options.max_retries
+                            );
+
+                            current_retries += 1;
+                            client
+                                .executor
+                                .delay(operation_retry_options.retry_delay)
+                                .await;
+
+                            let addr = client.lookup_topic(&topic).await?;
+                            connection = client.manager.get_connection(&addr).await?;
+
+                            continue;
+                        } else {
+                            error!("create_producer({}) reached max retries", topic);
+
+                            return Err(ProducerError::Connection(ConnectionError::Io(e)).into());
+                        }
+                    }
+                }
                 //this also captures producer fenced error
                 Err(e) => return Err(Error::Connection(e)),
             }
