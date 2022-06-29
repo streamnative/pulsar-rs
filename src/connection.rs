@@ -744,6 +744,7 @@ impl<Exe: Executor> Connection<Exe> {
         match select(sender_prepare, delay_f).await {
             Either::Left((res, _)) => sender = res?,
             Either::Right(_) => {
+                warn!("TimedOut connecting to the pulsar server {}", line!());
                 return Err(ConnectionError::Io(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     "timeout connecting to the Pulsar server",
