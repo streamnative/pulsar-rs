@@ -858,7 +858,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
                 )
                 .await
                 .map_err(|e| {
-                    error!("TopicProducer::from_connection error[{}]: {:?}", line!(), e);
+                    error!("TopicProducer::create_producer error[{}]: {:?}", line!(), e);
                     e
                 }) {
                 Ok(_success) => {
@@ -986,7 +986,10 @@ impl<Exe: Executor> TopicProducer<Exe> {
                         }
                     }
                 }
-                Err(e) => return Err(Error::Connection(e)),
+                Err(e) => {
+                    error!("reconnect error[{:?}]: {:?}", line!(), e);
+                    return Err(Error::Connection(e));
+                }
             }
         }
 
