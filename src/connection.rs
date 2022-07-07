@@ -22,7 +22,7 @@ use futures::{
 use url::Url;
 
 use crate::consumer::ConsumerOptions;
-use crate::error::{ConnectionError, SharedError, AuthenticationError};
+use crate::error::{AuthenticationError, ConnectionError, SharedError};
 use crate::executor::{Executor, ExecutorKind};
 use crate::message::{
     proto::{self, command_subscribe::SubType},
@@ -174,6 +174,7 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> 
                     msg => match msg.request_key() {
                         Some(key @ RequestKey::RequestId(_))
                         | Some(key @ RequestKey::ProducerSend { .. }) => {
+                            trace!("received this message: {:?}", msg);
                             if let Some(resolver) = self.pending_requests.remove(&key) {
                                 // We don't care if the receiver has dropped their future
                                 let _ = resolver.send(msg);
@@ -372,7 +373,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         })
         .await
     }
-  
+
     pub async fn get_last_message_id(
         &self,
         consumer_id: u64,
@@ -381,7 +382,8 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         let msg = messages::get_last_message_id(consumer_id, request_id);
         self.send_message(msg, RequestKey::RequestId(request_id), |resp| {
             resp.command.get_last_message_id_response
-        }).await
+        })
+        .await
     }
 
     pub async fn create_producer(
@@ -394,6 +396,16 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         let request_id = self.request_id.get();
         let msg = messages::create_producer(topic, producer_name, producer_id, request_id, options);
         self.send_message(msg, RequestKey::RequestId(request_id), |resp| {
+            resp.command.producer_success
+        })
+        .await
+    }
+
+    pub async fn wait_for_exclusive_access(
+        &self,
+        request_id: u64,
+    ) -> Result<proto::CommandProducerSuccess, ConnectionError> {
+        self.wait_exclusive_access(RequestKey::RequestId(request_id), |resp| {
             resp.command.producer_success
         })
         .await
@@ -565,12 +577,54 @@ impl<Exe: Executor> ConnectionSender<Exe> {
                 pin_mut!(delay_f);
 
                 match select(response, delay_f).await {
-                    Either::Left((res, _)) => res,
+                    Either::Left((res, _)) => {
+                        // println!("recv msg: {:?}", res);
+                        res
+                    }
                     Either::Right(_) => Err(ConnectionError::Io(std::io::Error::new(
                         std::io::ErrorKind::TimedOut,
                         "timeout sending message to the Pulsar server",
                     ))),
                 }
+            }
+            _ => Err(ConnectionError::Disconnected),
+        }
+    }
+
+    /// wait for desired message(commandproducersuccess with ready field true)
+    async fn wait_exclusive_access<R: Debug, F>(
+        &self,
+        key: RequestKey,
+        extract: F,
+    ) -> Result<R, ConnectionError>
+    where
+        F: FnOnce(Message) -> Option<R>,
+    {
+        let (resolver, response) = oneshot::channel();
+
+        let k = key.clone();
+        let response = async {
+            response
+                .await
+                .map_err(|oneshot::Canceled| {
+                    self.error.set(ConnectionError::Disconnected);
+                    ConnectionError::Disconnected
+                })
+                .map(move |message: Message| {
+                    trace!("received message(key = {:?}): {:?}", k, message);
+                    extract_message(message, extract)
+                })?
+        };
+
+        match self
+            .registrations
+            .unbounded_send(Register::Request { key, resolver })
+        {
+            Ok(_) => {
+                //there should be no timeout for this message
+                pin_mut!(response);
+                let res = response.await;
+                res
             }
             _ => Err(ConnectionError::Disconnected),
         }
@@ -674,8 +728,9 @@ impl<Exe: Executor> Connection<Exe> {
         Ok(Connection { id, url, sender })
     }
 
-    async fn prepare_auth_data(auth: Option<Arc<Mutex<Box<dyn crate::authentication::Authentication>>>>)
-        -> Result<Option<Authentication>, ConnectionError> {
+    async fn prepare_auth_data(
+        auth: Option<Arc<Mutex<Box<dyn crate::authentication::Authentication>>>>,
+    ) -> Result<Option<Authentication>, ConnectionError> {
         match auth {
             Some(m_auth) => {
                 let mut auth_guard = m_auth.lock().await;
@@ -684,7 +739,7 @@ impl<Exe: Executor> Connection<Exe> {
                     data: auth_guard.auth_data().await?,
                 }))
             }
-            None => Ok(None)
+            None => Ok(None),
         }
     }
 
@@ -867,6 +922,7 @@ impl<Exe: Executor> Connection<Exe> {
         let err = error.clone();
         let res = executor.spawn(Box::pin(async move {
             while let Some(msg) = rx.next().await {
+                // println!("real sent msg: {:?}", msg);
                 if let Err(e) = sink.send(msg).await {
                     err.set(e);
                     break;
@@ -1024,6 +1080,7 @@ pub(crate) mod messages {
                         })
                         .collect(),
                     schema: options.schema,
+                    producer_access_mode: options.access_mode,
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -1044,6 +1101,7 @@ pub(crate) mod messages {
                     request_id,
                     namespace,
                     mode: Some(mode as i32),
+                    ..Default::default()
                 }),
                 ..Default::default()
             },
@@ -1144,7 +1202,7 @@ pub(crate) mod messages {
             payload: None,
         }
     }
-  
+
     pub fn get_last_message_id(consumer_id: u64, request_id: u64) -> Message {
         Message {
             command: proto::BaseCommand {
@@ -1265,6 +1323,7 @@ pub(crate) mod messages {
                     proto::CommandRedeliverUnacknowledgedMessages {
                         consumer_id,
                         message_ids,
+                        ..Default::default()
                     },
                 ),
                 ..Default::default()

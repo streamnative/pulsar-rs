@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::client::SerializeMessage;
-use crate::connection::{Connection, SerialId};
+use crate::connection::{self, Connection, SerialId};
 use crate::error::{ConnectionError, ProducerError};
 use crate::executor::Executor;
 use crate::message::proto::{self, CommandSendReceipt, CompressionType, EncryptionKeys, Schema};
@@ -126,6 +126,8 @@ pub struct ProducerOptions {
     pub batch_size: Option<u32>,
     /// algorithm used to compress the messages
     pub compression: Option<proto::CompressionType>,
+    /// producer access mode: shared = 0, exclusive = 1, waitforexclusive =2, exclusivewithoutfencing =3
+    pub access_mode: Option<i32>,
 }
 
 /// Wrapper structure that manges multiple producers at once, creating them as needed
@@ -429,16 +431,29 @@ impl<Exe: Executor> TopicProducer<Exe> {
         let operation_retry_options = client.operation_retry_options.clone();
 
         loop {
-            match connection
-                .sender()
+            let connection_sender = connection.sender();
+            match connection_sender
                 .create_producer(topic.clone(), producer_id, name.clone(), options.clone())
                 .await
                 .map_err(|e| {
                     error!("TopicProducer::from_connection error[{}]: {:?}", line!(), e);
                     e
                 }) {
-                Ok(success) => {
-                    producer_name = success.producer_name;
+                Ok(partial_success) => {
+                    // If producer is not "ready", the client will avoid to timeout the request
+                    // for creating the producer. Instead it will wait indefinitely until it gets
+                    // a subsequent  `CommandProducerSuccess` with `producer_ready==true`.
+                    if let Some(producer_ready) = partial_success.producer_ready {
+                        if !producer_ready {
+                            // wait until next commandproducersuccess message has been received
+                            trace!("producer is still waiting for exclusive access");
+                            let result = connection_sender
+                                .wait_for_exclusive_access(partial_success.request_id)
+                                .await;
+                            trace!("result is received: {:?}", result);
+                        }
+                    }
+                    producer_name = partial_success.producer_name;
 
                     if current_retries > 0 {
                         let dur = (std::time::Instant::now() - start).as_secs();
@@ -482,6 +497,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
                         .into());
                     }
                 }
+                //this also captures producer fenced error
                 Err(e) => return Err(Error::Connection(e)),
             }
         }
