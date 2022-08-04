@@ -1081,8 +1081,8 @@ impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
         self
     }
     /// sets the message's ordering key for key_shared subscription
-    pub fn with_ordering_key<S: Into<String>>(mut self, partition_key: S) -> Self {
-        self.partition_key = Some(partition_key.into());
+    pub fn with_ordering_key<S: Into<Vec<u8>>>(mut self, ordering_key: S) -> Self {
+        self.ordering_key = Some(ordering_key.into());
         self
     }
 
