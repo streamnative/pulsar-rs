@@ -822,8 +822,8 @@ impl<Exe: Executor> TopicProducer<Exe> {
         // as the sender is hold by the TopicProducer, there is no way to call send method
         // The lines below take the pointed sender and replace it by a new one bound to nothing
         // but as the TopicProducer sender is recreate below, there is no worry
-        let (_drop_signal, _) = oneshot::channel::<()>();
-        let old_signal = std::mem::replace(&mut self.drop_signal, _drop_signal);
+        let (drop_signal, _) = oneshot::channel::<()>();
+        let old_signal = std::mem::replace(&mut self.drop_signal, drop_signal);
         // This line ask for kill the previous errored producer
         let _ = old_signal.send(());
 
