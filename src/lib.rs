@@ -20,7 +20,7 @@
 //! ```toml
 //! [dependencies]
 //! env_logger = "0.9"
-//! pulsar = "4.1.1"
+//! pulsar = "5.0.0"
 //! serde = { version = "1.0", features = ["derive"] }
 //! serde_json = "1.0"
 //! tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }

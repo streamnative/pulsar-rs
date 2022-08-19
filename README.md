@@ -20,7 +20,7 @@ Features:
 Cargo.toml
 ```toml
 futures = "0.3"
-pulsar = "4.0"
+pulsar = "5.0"
 tokio = "1.0"
 ```
 
