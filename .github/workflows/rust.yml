@@ -18,6 +18,11 @@ jobs:
       - name: Start Pulsar Standalone Container
         run: docker run --name pulsar -p 6650:6650 -p 8080:8080 -d -e GITHUB_ACTIONS=true -e CI=true streamnative/pulsar:${{ matrix.pulsar-version }} /pulsar/bin/pulsar standalone
 
+      - uses: arduino/setup-protoc@v1
+        name: Install protoc
+        with:
+          version: "3.x"
+
       - uses: actions/checkout@v2
       - name: Build
         run: cargo build --verbose
