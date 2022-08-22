@@ -569,7 +569,6 @@ async fn run_producer<Exe: Executor>(
 
                 let _ = client.executor.spawn(Box::pin(async move {
                     pin_mut!(delay_f);
-                    pin_mut!(send_f);
                     match select(send_f, delay_f).await {
                         Either::Left((res, _)) => {
                             let _ = resolver.send(res);
