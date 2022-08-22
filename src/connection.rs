@@ -20,6 +20,7 @@ use futures::{
     Future, FutureExt, Sink, SinkExt, Stream, StreamExt,
 };
 use url::Url;
+use uuid::Uuid;
 
 use crate::consumer::ConsumerOptions;
 use crate::error::{AuthenticationError, ConnectionError, SharedError};
@@ -254,7 +255,7 @@ impl SerialId {
 /// An owned type that can send messages like a connection
 //#[derive(Clone)]
 pub struct ConnectionSender<Exe: Executor> {
-    connection_id: i64,
+    connection_id: Uuid,
     tx: mpsc::UnboundedSender<Message>,
     registrations: mpsc::UnboundedSender<Register>,
     receiver_shutdown: Option<oneshot::Sender<()>>,
@@ -266,7 +267,7 @@ pub struct ConnectionSender<Exe: Executor> {
 
 impl<Exe: Executor> ConnectionSender<Exe> {
     pub(crate) fn new(
-        connection_id: i64,
+        connection_id: Uuid,
         tx: mpsc::UnboundedSender<Message>,
         registrations: mpsc::UnboundedSender<Register>,
         receiver_shutdown: oneshot::Sender<()>,
@@ -657,7 +658,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
 }
 
 pub struct Connection<Exe: Executor> {
-    id: i64,
+    id: Uuid,
     url: Url,
     sender: ConnectionSender<Exe>,
 }
@@ -720,7 +721,7 @@ impl<Exe: Executor> Connection<Exe> {
 
         let hostname = hostname.unwrap_or_else(|| address.ip().to_string());
 
-        let id = rand::random();
+        let id = Uuid::new_v4();
         debug!("Connecting to {}: {}, as {}", url, address, id);
         let sender_prepare = Connection::prepare_stream(
             id,
@@ -771,7 +772,7 @@ impl<Exe: Executor> Connection<Exe> {
     }
 
     async fn prepare_stream(
-        connection_id: i64,
+        connection_id: Uuid,
         address: SocketAddr,
         hostname: String,
         tls: bool,
@@ -883,7 +884,7 @@ impl<Exe: Executor> Connection<Exe> {
     }
 
     pub async fn connect<S>(
-        connection_id: i64,
+        connection_id: Uuid,
         mut stream: S,
         auth_data: Option<Authentication>,
         proxy_to_broker_url: Option<String>,
@@ -981,7 +982,7 @@ impl<Exe: Executor> Connection<Exe> {
         Ok(sender)
     }
 
-    pub fn id(&self) -> i64 {
+    pub fn id(&self) -> Uuid {
         self.id
     }
 
