@@ -97,7 +97,7 @@ impl<T: DeserializeMessage, Exe: Executor> Reader<T, Exe> {
         self.consumer.topic()
     }
 
-    /// returns a list of broker URLs this reader is connnected to
+    /// returns a list of broker URLs this reader is connected to
     pub async fn connections(&mut self) -> Result<Url, Error> {
         Ok(self.consumer.connection().await?.url().clone())
     }
