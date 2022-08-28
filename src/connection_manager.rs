@@ -423,7 +423,6 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                             "could not ping connection {} to the server at {}: {}",
                             connection_id, broker_url, e
                         );
-                        break;
                     }
                 } else {
                     // if the strong pointers were dropped, we can stop the heartbeat for this
