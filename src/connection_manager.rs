@@ -1,4 +1,4 @@
-use crate::connection::{Connection};
+use crate::connection::Connection;
 use crate::error::ConnectionError;
 use crate::executor::Executor;
 use std::collections::HashMap;
@@ -64,7 +64,7 @@ impl std::default::Default for OperationRetryOptions {
     fn default() -> Self {
         OperationRetryOptions {
             operation_timeout: Duration::from_secs(30),
-            retry_delay: Duration::from_millis(500),
+            retry_delay: Duration::from_secs(5),
             max_retries: None,
         }
     }
@@ -329,7 +329,10 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                     );
                     self.executor.delay(current_backoff).await;
                 }
-                Err(e) => return Err(e),
+                Err(e) => {
+                    error!("connection error, not retryable: {:?}", e);
+                    return Err(e);
+                }
             }
         };
         let connection_id = conn.id();
@@ -409,8 +412,10 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                 }
                 if let Some(strong_conn) = weak_conn.upgrade() {
                     if !strong_conn.is_valid() {
-                        trace!("connection {} is not valid anymore, skip heart beat task",
-                             connection_id);
+                        trace!(
+                            "connection {} is not valid anymore, skip heart beat task",
+                            connection_id
+                        );
                         break;
                     }
                     if let Err(e) = strong_conn.sender().send_ping().await {
@@ -471,6 +476,12 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                     // in a mutex, and a case appears where the Arc is cloned
                     // somewhere at the same time, that just means the manager
                     // will create a new connection the next time it is asked
+                    trace!(
+                        "checking connection {}, is valid? {}, strong_count {}",
+                        conn.id(),
+                        conn.is_valid(),
+                        Arc::strong_count(conn)
+                    );
                     conn.is_valid() && Arc::strong_count(conn) > 1
                 }
             });

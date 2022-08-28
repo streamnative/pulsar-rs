@@ -385,7 +385,7 @@ struct TopicProducer<Exe: Executor> {
     // while we might be pushing more messages from elsewhere
     batch: Option<Mutex<Batch>>,
     compression: Option<proto::CompressionType>,
-    _drop_signal: oneshot::Sender<()>,
+    drop_signal: oneshot::Sender<()>,
     options: ProducerOptions,
 }
 
@@ -458,7 +458,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
                     if current_retries > 0 {
                         let dur = (std::time::Instant::now() - start).as_secs();
                         log::info!(
-                            "subscribe({}) success after {} retries over {} seconds",
+                            "producer({}) success after {} retries over {} seconds",
                             topic,
                             current_retries + 1,
                             dur
@@ -497,6 +497,65 @@ impl<Exe: Executor> TopicProducer<Exe> {
                         .into());
                     }
                 }
+                Err(ConnectionError::PulsarError(Some(proto::ServerError::ProducerBusy), text)) => {
+                    if operation_retry_options.max_retries.is_none()
+                        || operation_retry_options.max_retries.unwrap() > current_retries
+                    {
+                        error!("create_producer({}) answered ProducerBusy, retrying request after {}ms (max_retries = {:?}): {}",
+                        topic, operation_retry_options.retry_delay.as_millis(),
+                        operation_retry_options.max_retries, text.unwrap_or_else(String::new));
+
+                        current_retries += 1;
+                        client
+                            .executor
+                            .delay(operation_retry_options.retry_delay)
+                            .await;
+
+                        let addr = client.lookup_topic(&topic).await?;
+                        connection = client.manager.get_connection(&addr).await?;
+
+                        continue;
+                    } else {
+                        error!("create_producer({}) reached max retries", topic);
+
+                        return Err(ConnectionError::PulsarError(
+                            Some(proto::ServerError::ProducerBusy),
+                            text,
+                        )
+                        .into());
+                    }
+                }
+                Err(ConnectionError::Io(e)) => {
+                    if e.kind() != std::io::ErrorKind::TimedOut {
+                        warn!("send_inner got io error: {:?}", e);
+                        return Err(ProducerError::Connection(ConnectionError::Io(e)).into());
+                    } else {
+                        if operation_retry_options.max_retries.is_none()
+                            || operation_retry_options.max_retries.unwrap() > current_retries
+                        {
+                            error!(
+                                "create_producer({}) TimedOut, retrying request after {}ms (max_retries = {:?})",
+                                topic, operation_retry_options.retry_delay.as_millis(),
+                                operation_retry_options.max_retries
+                            );
+
+                            current_retries += 1;
+                            client
+                                .executor
+                                .delay(operation_retry_options.retry_delay)
+                                .await;
+
+                            let addr = client.lookup_topic(&topic).await?;
+                            connection = client.manager.get_connection(&addr).await?;
+
+                            continue;
+                        } else {
+                            error!("create_producer({}) reached max retries", topic);
+
+                            return Err(ProducerError::Connection(ConnectionError::Io(e)).into());
+                        }
+                    }
+                }
                 //this also captures producer fenced error
                 Err(e) => return Err(Error::Connection(e)),
             }
@@ -520,7 +579,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
             message_id: sequence_ids,
             batch: batch_size.map(Batch::new).map(Mutex::new),
             compression,
-            _drop_signal,
+            drop_signal: _drop_signal,
             options,
         })
     }
@@ -729,53 +788,59 @@ impl<Exe: Executor> TopicProducer<Exe> {
         &mut self,
         message: ProducerMessage,
     ) -> Result<proto::CommandSendReceipt, Error> {
-        let msg = message.clone();
-        match self
-            .connection
-            .sender()
-            .send(self.id, self.name.clone(), self.message_id.get(), message)
-            .await
-        {
-            Ok(receipt) => return Ok(receipt),
-            Err(ConnectionError::Disconnected) => {}
-            Err(ConnectionError::Io(e)) => {
-                if e.kind() != std::io::ErrorKind::TimedOut {
-                    error!("send_inner got io error: {:?}", e);
-                    return Err(ProducerError::Connection(ConnectionError::Io(e)).into());
+        loop {
+            let msg = message.clone();
+            match self
+                .connection
+                .sender()
+                .send(self.id, self.name.clone(), self.message_id.get(), msg)
+                .await
+            {
+                Ok(receipt) => return Ok(receipt),
+                Err(ConnectionError::Disconnected) => {}
+                Err(ConnectionError::Io(e)) => {
+                    if e.kind() != std::io::ErrorKind::TimedOut {
+                        error!("send_inner got io error: {:?}", e);
+                        return Err(ProducerError::Connection(ConnectionError::Io(e)).into());
+                    }
                 }
-            }
-            Err(e) => {
-                error!("send_inner got error: {:?}", e);
-                return Err(ProducerError::Connection(e).into());
-            }
-        };
+                Err(e) => {
+                    error!("send_inner got error: {:?}", e);
+                    return Err(ProducerError::Connection(e).into());
+                }
+            };
 
-        error!(
-            "send_inner: connection {} disconnected",
-            self.connection.id()
-        );
-        self.reconnect().await?;
+            error!(
+                "send_inner: connection {} disconnected",
+                self.connection.id()
+            );
 
-        match self
-            .connection
-            .sender()
-            .send(self.id, self.name.clone(), self.message_id.get(), msg)
-            .await
-        {
-            Ok(receipt) => Ok(receipt),
-            Err(e) => {
-                error!("send_inner got error: {:?}", e);
-                Err(ProducerError::Connection(e).into())
-            }
+            self.reconnect().await?;
         }
     }
 
     async fn reconnect(&mut self) -> Result<(), Error> {
         debug!("reconnecting producer for topic: {}", self.topic);
+        // Sender::send() method consumes the sender
+        // as the sender is hold by the TopicProducer, there is no way to call send method
+        // The lines below take the pointed sender and replace it by a new one bound to nothing
+        // but as the TopicProducer sender is recreate below, there is no worry
+        let (drop_signal, _) = oneshot::channel::<()>();
+        let old_signal = std::mem::replace(&mut self.drop_signal, drop_signal);
+        // This line ask for kill the previous errored producer
+        let _ = old_signal.send(());
+
         let broker_address = self.client.lookup_topic(&self.topic).await?;
         let conn = self.client.manager.get_connection(&broker_address).await?;
-
         self.connection = conn;
+
+        warn!(
+            "Retry #0 -> reconnecting producer {:#} using connection {:#} to broker {:#} to topic {:#}",
+            self.id,
+            self.connection.id(),
+            broker_address.url,
+            self.topic
+        );
 
         let topic = self.topic.clone();
         let batch_size = self.options.batch_size;
@@ -796,14 +861,14 @@ impl<Exe: Executor> TopicProducer<Exe> {
                 )
                 .await
                 .map_err(|e| {
-                    error!("TopicProducer::from_connection error[{}]: {:?}", line!(), e);
+                    error!("TopicProducer::create_producer error[{}]: {:?}", line!(), e);
                     e
                 }) {
                 Ok(_success) => {
                     if current_retries > 0 {
                         let dur = (std::time::Instant::now() - start).as_secs();
                         log::info!(
-                            "subscribe({}) success after {} retries over {} seconds",
+                            "producer({}) success after {} retries over {} seconds",
                             topic,
                             current_retries + 1,
                             dur
@@ -818,7 +883,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
                     if operation_retry_options.max_retries.is_none()
                         || operation_retry_options.max_retries.unwrap() > current_retries
                     {
-                        error!("create_producer({}) answered ServiceNotReady, retrying request after {}ms (max_retries = {:?}): {}",
+                        warn!("create_producer({}) answered ServiceNotReady, retrying request after {}ms (max_retries = {:?}): {}",
                         topic, operation_retry_options.retry_delay.as_millis(),
                         operation_retry_options.max_retries, text.unwrap_or_else(String::new));
 
@@ -831,6 +896,15 @@ impl<Exe: Executor> TopicProducer<Exe> {
                         let addr = self.client.lookup_topic(&topic).await?;
                         self.connection = self.client.manager.get_connection(&addr).await?;
 
+                        warn!(
+                            "Retry #{} -> reconnecting producer {:#} using connection {:#} to broker {:#} to topic {:#}",
+                            current_retries,
+                            self.id,
+                            self.connection.id(),
+                            broker_address.url,
+                            self.topic
+                        );
+
                         continue;
                     } else {
                         error!("create_producer({}) reached max retries", topic);
@@ -842,7 +916,83 @@ impl<Exe: Executor> TopicProducer<Exe> {
                         .into());
                     }
                 }
-                Err(e) => return Err(Error::Connection(e)),
+                Err(ConnectionError::PulsarError(Some(proto::ServerError::ProducerBusy), text)) => {
+                    if operation_retry_options.max_retries.is_none()
+                        || operation_retry_options.max_retries.unwrap() > current_retries
+                    {
+                        warn!("create_producer({}) answered ProducerBusy, retrying request after {}ms (max_retries = {:?}): {}",
+                        topic, operation_retry_options.retry_delay.as_millis(),
+                        operation_retry_options.max_retries, text.unwrap_or_else(String::new));
+
+                        current_retries += 1;
+                        self.client
+                            .executor
+                            .delay(operation_retry_options.retry_delay)
+                            .await;
+
+                        let addr = self.client.lookup_topic(&topic).await?;
+                        self.connection = self.client.manager.get_connection(&addr).await?;
+
+                        warn!(
+                            "Retry #{} -> reconnecting producer {:#} using connection {:#} to broker {:#} to topic {:#}",
+                            current_retries,
+                            self.id,
+                            self.connection.id(),
+                            broker_address.url,
+                            self.topic
+                        );
+
+                        continue;
+                    } else {
+                        error!("create_producer({}) reached max retries", topic);
+
+                        return Err(ConnectionError::PulsarError(
+                            Some(proto::ServerError::ProducerBusy),
+                            text,
+                        )
+                        .into());
+                    }
+                }
+                Err(ConnectionError::Io(e)) => {
+                    if e.kind() != std::io::ErrorKind::TimedOut {
+                        error!("send_inner got io error: {:?}", e);
+                        return Err(ProducerError::Connection(ConnectionError::Io(e)).into());
+                    } else {
+                        if operation_retry_options.max_retries.is_none()
+                            || operation_retry_options.max_retries.unwrap() > current_retries
+                        {
+                            warn!("create_producer({}) TimedOut, retrying request after {}ms (max_retries = {:?})",
+                            topic, operation_retry_options.retry_delay.as_millis(), operation_retry_options.max_retries);
+
+                            current_retries += 1;
+                            self.client
+                                .executor
+                                .delay(operation_retry_options.retry_delay)
+                                .await;
+
+                            let addr = self.client.lookup_topic(&topic).await?;
+                            self.connection = self.client.manager.get_connection(&addr).await?;
+
+                            warn!(
+                            "Retry #{} -> reconnecting producer {:#} using connection {:#} to broker {:#} to topic {:#}",
+                            current_retries,
+                            self.id,
+                            self.connection.id(),
+                            broker_address.url,
+                            self.topic
+                        );
+
+                            continue;
+                        } else {
+                            error!("create_producer({}) reached max retries", topic);
+                            return Err(Error::Connection(ConnectionError::Io(e)));
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("reconnect error[{:?}]: {:?}", line!(), e);
+                    return Err(Error::Connection(e));
+                }
             }
         }
 
@@ -858,7 +1008,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
         }));
 
         self.batch = batch;
-        self._drop_signal = _drop_signal;
+        self.drop_signal = _drop_signal;
 
         Ok(())
     }

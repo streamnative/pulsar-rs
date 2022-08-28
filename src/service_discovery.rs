@@ -55,7 +55,10 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
                         .lookup_topic(topic.to_string(), is_authoritative)
                         .await?
                 }
-                Err(e) => return Err(e.into()),
+                Err(e) => {
+                    error!("tried to lookup a topic but error occrured: {:?}", e);
+                    return Err(e.into());
+                }
             };
 
             if response.response.is_none()
@@ -78,6 +81,12 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
                         error!("lookup({}) reached max retries", topic);
                     }
                 }
+
+                error!(
+                    "tried to lookup a topic but error occured[{:?}]: {:?}",
+                    line!(),
+                    error
+                );
                 return Err(ServiceDiscoveryError::Query(
                     error,
                     response.message.clone(),
@@ -123,6 +132,11 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
             } else if let Some(u) = broker_url {
                 format!("{}:{}", u.host_str().unwrap(), u.port().unwrap_or(6650))
             } else {
+                error!(
+                    "tried to lookup a topic but error occured[{:?}]: {:?}",
+                    line!(),
+                    ServiceDiscoveryError::NotFound
+                );
                 return Err(ServiceDiscoveryError::NotFound);
             };
 
@@ -271,10 +285,12 @@ fn convert_lookup_response(
         response.response == Some(command_lookup_topic_response::LookupType::Redirect as i32);
 
     let broker_url = match response.broker_service_url.as_ref() {
-        Some(u) => Some(Url::parse(&response.broker_service_url.clone().unwrap()).map_err(|e| {
-            error!("error parsing URL: {:?}", e);
-            ServiceDiscoveryError::NotFound
-        })?),
+        Some(u) => Some(
+            Url::parse(&response.broker_service_url.clone().unwrap()).map_err(|e| {
+                error!("error parsing URL: {:?}", e);
+                ServiceDiscoveryError::NotFound
+            })?,
+        ),
         None => None,
     };
 
