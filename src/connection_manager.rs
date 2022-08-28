@@ -200,16 +200,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
     ///
     /// creates a connection if not available
     pub async fn get_base_connection(&self) -> Result<Arc<Connection<Exe>>, ConnectionError> {
-        let broker_address = BrokerAddress {
-            url: self.url.clone(),
-            broker_url: format!(
-                "{}:{}",
-                self.url.host_str().unwrap(),
-                self.url.port().unwrap_or(6650)
-            ),
-            proxy: false,
-        };
-
+        let broker_address = self.get_base_address();
         self.get_connection(&broker_address).await
     }
 
