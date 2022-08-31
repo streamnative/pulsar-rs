@@ -15,9 +15,6 @@ documentation = "https://docs.rs/pulsar"
 description = "Rust client for Apache Pulsar"
 keywords = ["pulsar", "api", "client"]
 
-[badges]
-travis-ci = {repository = "wyyerd/pulsar-rs"}
-
 [dependencies]
 bytes = "1.0.0"
 crc = "3.0.0"
