@@ -8,14 +8,18 @@ use crate::connection_manager::{
     BrokerAddress, ConnectionManager, ConnectionRetryOptions, OperationRetryOptions, TlsOptions,
 };
 use crate::consumer::{ConsumerBuilder, ConsumerOptions, InitialPosition};
+use crate::error::ConnectionError;
 use crate::error::Error;
 use crate::executor::Executor;
 use crate::message::proto::{self, CommandSendReceipt};
 use crate::message::Payload;
 use crate::producer::{self, ProducerBuilder, SendFuture};
 use crate::service_discovery::ServiceDiscovery;
-use futures::StreamExt;
-use futures::lock::Mutex;
+use futures::{
+    future::{select, Either},
+    lock::Mutex,
+    pin_mut, StreamExt,
+};
 
 /// Helper trait for consumer deserialization
 pub trait DeserializeMessage {
@@ -437,7 +441,10 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
         self.with_auth_provider(Box::new(auth))
     }
 
-    pub fn with_auth_provider(mut self, auth: Box<dyn crate::authentication::Authentication>) -> Self {
+    pub fn with_auth_provider(
+        mut self,
+        auth: Box<dyn crate::authentication::Authentication>,
+    ) -> Self {
         self.auth_provider = Some(auth);
         self
     }
@@ -555,9 +562,26 @@ async fn run_producer<Exe: Executor>(
     }) = messages.next().await
     {
         match producer.send(topic, payload).await {
-            Ok(future) => {
+            Ok(send_f) => {
+                let delay_f = client
+                    .executor
+                    .delay(client.operation_retry_options.operation_timeout);
+
                 let _ = client.executor.spawn(Box::pin(async move {
-                    let _ = resolver.send(future.await);
+                    pin_mut!(delay_f);
+                    match select(send_f, delay_f).await {
+                        Either::Left((res, _)) => {
+                            let _ = resolver.send(res);
+                        }
+                        Either::Right(_) => {
+                            let _ = resolver.send(Err(Error::from(ConnectionError::Io(
+                                std::io::Error::new(
+                                    std::io::ErrorKind::TimedOut,
+                                    "client sink timed out when sending message to the Pulsar server",
+                                ),
+                            ))));
+                        }
+                    }
                 }));
             }
             Err(e) => {
