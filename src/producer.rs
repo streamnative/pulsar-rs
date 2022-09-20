@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::client::SerializeMessage;
-use crate::connection::{self, Connection, SerialId};
+use crate::connection::{Connection, SerialId};
 use crate::error::{ConnectionError, ProducerError};
 use crate::executor::Executor;
 use crate::message::proto::{self, CommandSendReceipt, CompressionType, EncryptionKeys, Schema};
