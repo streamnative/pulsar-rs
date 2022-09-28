@@ -475,7 +475,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
                     {
                         error!("create_producer({}) answered ServiceNotReady, retrying request after {}ms (max_retries = {:?}): {}",
                         topic, operation_retry_options.retry_delay.as_millis(),
-                        operation_retry_options.max_retries, text.unwrap_or_else(String::new));
+                        operation_retry_options.max_retries, text.unwrap_or_default());
 
                         current_retries += 1;
                         client
@@ -503,7 +503,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
                     {
                         error!("create_producer({}) answered ProducerBusy, retrying request after {}ms (max_retries = {:?}): {}",
                         topic, operation_retry_options.retry_delay.as_millis(),
-                        operation_retry_options.max_retries, text.unwrap_or_else(String::new));
+                        operation_retry_options.max_retries, text.unwrap_or_default());
 
                         current_retries += 1;
                         client
@@ -529,31 +529,29 @@ impl<Exe: Executor> TopicProducer<Exe> {
                     if e.kind() != std::io::ErrorKind::TimedOut {
                         warn!("send_inner got io error: {:?}", e);
                         return Err(ProducerError::Connection(ConnectionError::Io(e)).into());
-                    } else {
-                        if operation_retry_options.max_retries.is_none()
-                            || operation_retry_options.max_retries.unwrap() > current_retries
-                        {
-                            error!(
+                    } else if operation_retry_options.max_retries.is_none()
+                        || operation_retry_options.max_retries.unwrap() > current_retries
+                    {
+                        error!(
                                 "create_producer({}) TimedOut, retrying request after {}ms (max_retries = {:?})",
                                 topic, operation_retry_options.retry_delay.as_millis(),
                                 operation_retry_options.max_retries
                             );
 
-                            current_retries += 1;
-                            client
-                                .executor
-                                .delay(operation_retry_options.retry_delay)
-                                .await;
+                        current_retries += 1;
+                        client
+                            .executor
+                            .delay(operation_retry_options.retry_delay)
+                            .await;
 
-                            let addr = client.lookup_topic(&topic).await?;
-                            connection = client.manager.get_connection(&addr).await?;
+                        let addr = client.lookup_topic(&topic).await?;
+                        connection = client.manager.get_connection(&addr).await?;
 
-                            continue;
-                        } else {
-                            error!("create_producer({}) reached max retries", topic);
+                        continue;
+                    } else {
+                        error!("create_producer({}) reached max retries", topic);
 
-                            return Err(ProducerError::Connection(ConnectionError::Io(e)).into());
-                        }
+                        return Err(ProducerError::Connection(ConnectionError::Io(e)).into());
                     }
                 }
                 //this also captures producer fenced error
@@ -885,7 +883,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
                     {
                         warn!("create_producer({}) answered ServiceNotReady, retrying request after {}ms (max_retries = {:?}): {}",
                         topic, operation_retry_options.retry_delay.as_millis(),
-                        operation_retry_options.max_retries, text.unwrap_or_else(String::new));
+                        operation_retry_options.max_retries, text.unwrap_or_default());
 
                         current_retries += 1;
                         self.client
@@ -922,7 +920,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
                     {
                         warn!("create_producer({}) answered ProducerBusy, retrying request after {}ms (max_retries = {:?}): {}",
                         topic, operation_retry_options.retry_delay.as_millis(),
-                        operation_retry_options.max_retries, text.unwrap_or_else(String::new));
+                        operation_retry_options.max_retries, text.unwrap_or_default());
 
                         current_retries += 1;
                         self.client
@@ -957,23 +955,22 @@ impl<Exe: Executor> TopicProducer<Exe> {
                     if e.kind() != std::io::ErrorKind::TimedOut {
                         error!("send_inner got io error: {:?}", e);
                         return Err(ProducerError::Connection(ConnectionError::Io(e)).into());
-                    } else {
-                        if operation_retry_options.max_retries.is_none()
-                            || operation_retry_options.max_retries.unwrap() > current_retries
-                        {
-                            warn!("create_producer({}) TimedOut, retrying request after {}ms (max_retries = {:?})",
+                    } else if operation_retry_options.max_retries.is_none()
+                        || operation_retry_options.max_retries.unwrap() > current_retries
+                    {
+                        warn!("create_producer({}) TimedOut, retrying request after {}ms (max_retries = {:?})",
                             topic, operation_retry_options.retry_delay.as_millis(), operation_retry_options.max_retries);
 
-                            current_retries += 1;
-                            self.client
-                                .executor
-                                .delay(operation_retry_options.retry_delay)
-                                .await;
+                        current_retries += 1;
+                        self.client
+                            .executor
+                            .delay(operation_retry_options.retry_delay)
+                            .await;
 
-                            let addr = self.client.lookup_topic(&topic).await?;
-                            self.connection = self.client.manager.get_connection(&addr).await?;
+                        let addr = self.client.lookup_topic(&topic).await?;
+                        self.connection = self.client.manager.get_connection(&addr).await?;
 
-                            warn!(
+                        warn!(
                             "Retry #{} -> reconnecting producer {:#} using connection {:#} to broker {:#} to topic {:#}",
                             current_retries,
                             self.id,
@@ -982,11 +979,10 @@ impl<Exe: Executor> TopicProducer<Exe> {
                             self.topic
                         );
 
-                            continue;
-                        } else {
-                            error!("create_producer({}) reached max retries", topic);
-                            return Err(Error::Connection(ConnectionError::Io(e)));
-                        }
+                        continue;
+                    } else {
+                        error!("create_producer({}) reached max retries", topic);
+                        return Err(Error::Connection(ConnectionError::Io(e)));
                     }
                 }
                 Err(e) => {

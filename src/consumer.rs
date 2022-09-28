@@ -503,7 +503,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
                     {
                         error!("subscribe({}) answered ServiceNotReady, retrying request after {}ms (max_retries = {:?}): {}",
                         topic, operation_retry_options.retry_delay.as_millis(),
-                        operation_retry_options.max_retries, text.unwrap_or_else(String::new));
+                        operation_retry_options.max_retries, text.unwrap_or_default());
 
                         current_retries += 1;
                         client
@@ -1320,7 +1320,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct MessageData {
     pub id: proto::MessageIdData,
     batch_size: Option<i32>,
@@ -1902,9 +1902,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
                 let mut v = futures::future::join_all(actions).await;
 
                 for res in v.drain(..) {
-                    if res.is_err() {
-                        return res;
-                    }
+                    res?;
                 }
 
                 Ok(())
@@ -2081,8 +2079,8 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "tokio-runtime")]
     async fn multi_consumer() {
-        let _ = log::set_logger(&MULTI_LOGGER);
-        let _ = log::set_max_level(LevelFilter::Debug);
+        let _result = log::set_logger(&MULTI_LOGGER);
+        log::set_max_level(LevelFilter::Debug);
         let addr = "pulsar://127.0.0.1:6650";
 
         let topic_n: u16 = rand::random();
@@ -2173,8 +2171,8 @@ mod tests {
     #[cfg(feature = "tokio-runtime")]
     async fn consumer_dropped_with_lingering_acks() {
         use rand::{distributions::Alphanumeric, Rng};
-        let _ = log::set_logger(&TEST_LOGGER);
-        let _ = log::set_max_level(LevelFilter::Debug);
+        let _result = log::set_logger(&TEST_LOGGER);
+        log::set_max_level(LevelFilter::Debug);
         let addr = "pulsar://127.0.0.1:6650";
 
         let topic = format!(
@@ -2266,8 +2264,8 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "tokio-runtime")]
     async fn dead_letter_queue() {
-        let _ = log::set_logger(&TEST_LOGGER);
-        let _ = log::set_max_level(LevelFilter::Debug);
+        let _result = log::set_logger(&TEST_LOGGER);
+        log::set_max_level(LevelFilter::Debug);
         let addr = "pulsar://127.0.0.1:6650";
 
         let test_id: u16 = rand::random();
@@ -2340,8 +2338,8 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "tokio-runtime")]
     async fn failover() {
-        let _ = log::set_logger(&MULTI_LOGGER);
-        let _ = log::set_max_level(LevelFilter::Debug);
+        let _result = log::set_logger(&MULTI_LOGGER);
+        log::set_max_level(LevelFilter::Debug);
         let addr = "pulsar://127.0.0.1:6650";
         let topic = format!("failover_{}", rand::random::<u16>());
         let client: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await.unwrap();
@@ -2397,8 +2395,8 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "tokio-runtime")]
     async fn seek_single_consumer() {
-        let _ = log::set_logger(&MULTI_LOGGER);
-        let _ = log::set_max_level(LevelFilter::Debug);
+        let _result = log::set_logger(&MULTI_LOGGER);
+        log::set_max_level(LevelFilter::Debug);
         log::info!("starting seek test");
         let addr = "pulsar://127.0.0.1:6650";
         let topic = format!("seek_{}", rand::random::<u16>());
@@ -2462,7 +2460,7 @@ mod tests {
 
         // // call seek(timestamp), roll back the consumer to start_time
         log::info!("calling seek method");
-        let _seek_result = consumer_1
+        consumer_1
             .seek(None, None, Some(start_time), client)
             .await
             .unwrap();

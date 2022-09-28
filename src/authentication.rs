@@ -24,9 +24,10 @@ pub mod token {
     }
 
     impl TokenAuthentication {
+        #[allow(clippy::new_ret_no_self)]
         pub fn new(token: String) -> Rc<dyn Authentication> {
             Rc::new(TokenAuthentication {
-                token: token.into_bytes()
+                token: token.into_bytes(),
             })
         }
     }
@@ -54,12 +55,12 @@ pub mod oauth2 {
     use std::time::Instant;
 
     use async_trait::async_trait;
-    use data_url::{DataUrl};
+    use data_url::DataUrl;
     use nom::lib::std::ops::Add;
-    use oauth2::{AuthUrl, ClientId, ClientSecret, Scope, TokenResponse, TokenUrl};
-    use oauth2::AuthType::RequestBody;
     use oauth2::basic::{BasicClient, BasicTokenResponse};
     use oauth2::reqwest::async_http_client;
+    use oauth2::AuthType::RequestBody;
+    use oauth2::{AuthUrl, ClientId, ClientSecret, Scope, TokenResponse, TokenUrl};
     use openidconnect::core::CoreProviderMetadata;
     use openidconnect::IssuerUrl;
     use serde::Deserialize;
@@ -72,6 +73,7 @@ pub mod oauth2 {
     struct OAuth2PrivateParams {
         client_id: String,
         client_secret: String,
+        #[allow(dead_code)]
         client_email: Option<String>,
         issuer_url: Option<String>,
     }
@@ -86,7 +88,11 @@ pub mod oauth2 {
 
     impl Display for OAuth2Params {
         fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-            write!(f, "OAuth2Params({}, {}, {:?}, {:?})", self.issuer_url, self.credentials_url, self.audience, self.scope)
+            write!(
+                f,
+                "OAuth2Params({}, {}, {:?}, {:?})",
+                self.issuer_url, self.credentials_url, self.audience, self.scope
+            )
         }
     }
 
@@ -153,21 +159,30 @@ pub mod oauth2 {
                     let data_url = match DataUrl::process(self.credentials_url.as_str()) {
                         Ok(data_url) => data_url,
                         Err(err) => {
-                            return Err(Box::from(format!("invalid data url [{}]: {:?}", self.credentials_url.as_str(), err)));
+                            return Err(Box::from(format!(
+                                "invalid data url [{}]: {:?}",
+                                self.credentials_url.as_str(),
+                                err
+                            )));
                         }
                     };
                     let body = match data_url.decode_to_vec() {
                         Ok((body, _)) => body,
                         Err(err) => {
-                            return Err(Box::from(format!("invalid data url [{}]: {:?}", self.credentials_url.as_str(), err)));
+                            return Err(Box::from(format!(
+                                "invalid data url [{}]: {:?}",
+                                self.credentials_url.as_str(),
+                                err
+                            )));
                         }
                     };
 
                     Ok(serde_json::from_slice(&body)?)
                 }
-                _ => {
-                    Err(Box::from(format!("invalid credential url [{}]", self.credentials_url.as_str())))
-                }
+                _ => Err(Box::from(format!(
+                    "invalid credential url [{}]",
+                    self.credentials_url.as_str()
+                ))),
             }
         }
     }
@@ -214,7 +229,10 @@ pub mod oauth2 {
                             self.token = None;
                             return Err(AuthenticationError::Custom(e.to_string()));
                         } else {
-                            warn!("failed to get a new token for [{}], use the existing one for now", self.params);
+                            warn!(
+                                "failed to get a new token for [{}], use the existing one for now",
+                                self.params
+                            );
                         }
                     }
                 }
@@ -229,7 +247,10 @@ pub mod oauth2 {
                 Some(url) => Ok(Some(url.clone())),
                 None => {
                     let metadata = CoreProviderMetadata::discover_async(
-                        IssuerUrl::from_url(Url::parse(self.params.issuer_url.as_str())?), async_http_client).await?;
+                        IssuerUrl::from_url(Url::parse(self.params.issuer_url.as_str())?),
+                        async_http_client,
+                    )
+                    .await?;
                     if let Some(token_endpoint) = metadata.token_endpoint() {
                         self.token_url = Some(token_endpoint.clone());
                     } else {
@@ -237,17 +258,17 @@ pub mod oauth2 {
                     }
 
                     match metadata.token_endpoint() {
-                        Some(endpoint) => {
-                            Ok(Some(endpoint.clone()))
-                        }
-                        None => Err(Box::from("token endpoint is unavailable"))
+                        Some(endpoint) => Ok(Some(endpoint.clone())),
+                        None => Err(Box::from("token endpoint is unavailable")),
                     }
                 }
             }
         }
 
         async fn fetch_token(&mut self) -> Result<BasicTokenResponse, Box<dyn std::error::Error>> {
-            let private_params = self.private_params.as_ref()
+            let private_params = self
+                .private_params
+                .as_ref()
                 .expect("oauth2 provider is uninitialized");
 
             let issuer_url = if let Some(url) = private_params.issuer_url.as_ref() {
@@ -260,11 +281,11 @@ pub mod oauth2 {
                 ClientId::new(private_params.client_id.clone()),
                 Some(ClientSecret::new(private_params.client_secret.clone())),
                 AuthUrl::from_url(Url::parse(issuer_url)?),
-                self.token_url().await?)
-                .set_auth_type(RequestBody);
+                self.token_url().await?,
+            )
+            .set_auth_type(RequestBody);
 
-            let mut request = client
-                .exchange_client_credentials();
+            let mut request = client.exchange_client_credentials();
 
             if let Some(audience) = &self.params.audience {
                 request = request.add_extra_param("audience", audience.clone());
@@ -274,8 +295,7 @@ pub mod oauth2 {
                 request = request.add_scope(Scope::new(scope.clone()));
             }
 
-            let token = request
-                .request_async(async_http_client).await?;
+            let token = request.request_async(async_http_client).await?;
             debug!("Got a new oauth2 token for [{}]", self.params);
             Ok(token)
         }

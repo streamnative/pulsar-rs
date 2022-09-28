@@ -649,8 +649,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
             Ok(_) => {
                 //there should be no timeout for this message
                 pin_mut!(response);
-                let res = response.await;
-                res
+                response.await
             }
             _ => Err(ConnectionError::Disconnected),
         }
@@ -741,9 +740,8 @@ impl<Exe: Executor> Connection<Exe> {
         pin_mut!(sender_prepare);
         pin_mut!(delay_f);
 
-        let sender;
-        match select(sender_prepare, delay_f).await {
-            Either::Left((res, _)) => sender = res?,
+        let sender = match select(sender_prepare, delay_f).await {
+            Either::Left((res, _)) => res?,
             Either::Right(_) => {
                 warn!("TimedOut connecting to the pulsar server {}", line!());
                 return Err(ConnectionError::Io(std::io::Error::new(
@@ -896,7 +894,7 @@ impl<Exe: Executor> Connection<Exe> {
         S: Sink<Message, Error = ConnectionError>,
         S: Send + std::marker::Unpin + 'static,
     {
-        let _ = stream
+        stream
             .send({
                 let msg = messages::connect(auth_data, proxy_to_broker_url);
                 trace!("connection message: {:?}", msg);
@@ -1230,7 +1228,6 @@ pub(crate) mod messages {
                 consumer_stats: Some(proto::CommandConsumerStats {
                     request_id,
                     consumer_id,
-                    ..Default::default()
                 }),
                 ..Default::default()
             },

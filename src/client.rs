@@ -57,7 +57,7 @@ impl SerializeMessage for producer::Message {
     }
 }
 
-impl<'a> SerializeMessage for () {
+impl SerializeMessage for () {
     fn serialize_message(_input: Self) -> Result<producer::Message, Error> {
         Ok(producer::Message {
             ..Default::default()
@@ -93,7 +93,7 @@ impl SerializeMessage for String {
     }
 }
 
-impl<'a> SerializeMessage for &String {
+impl<'a> SerializeMessage for &'a String {
     fn serialize_message(input: Self) -> Result<producer::Message, Error> {
         let payload = input.as_bytes().to_vec();
         Ok(producer::Message {

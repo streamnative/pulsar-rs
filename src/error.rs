@@ -273,7 +273,7 @@ impl fmt::Debug for ProducerError {
                     }
                 }
                 write!(f, ")")
-            }, 
+            }
             ProducerError::Fenced => write!(f, "Producer is fenced"),
         }
     }

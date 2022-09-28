@@ -1,11 +1,11 @@
 #[macro_use]
 extern crate serde;
+use pulsar::authentication::oauth2::OAuth2Authentication;
 use pulsar::{
     message::proto, producer, Authentication, Error as PulsarError, Pulsar, SerializeMessage,
     TokioExecutor,
 };
 use std::env;
-use pulsar::authentication::oauth2::{OAuth2Authentication};
 
 #[derive(Serialize, Deserialize)]
 struct TestData {
@@ -45,7 +45,8 @@ async fn main() -> Result<(), pulsar::Error> {
     } else if let Ok(oauth2_cfg) = env::var("PULSAR_OAUTH2") {
         builder = builder.with_auth_provider(OAuth2Authentication::client_credentials(
             serde_json::from_str(oauth2_cfg.as_str())
-                .expect(format!("invalid oauth2 config [{}]", oauth2_cfg.as_str()).as_str())));
+                .unwrap_or_else(|_| panic!("invalid oauth2 config [{}]", oauth2_cfg.as_str())),
+        ));
     }
 
     let pulsar: Pulsar<_> = builder.build().await?;

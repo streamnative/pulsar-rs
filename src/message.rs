@@ -527,22 +527,22 @@ impl BatchedMessage {
     }
 }
 
-#[rustfmt::skip]
 pub mod proto {
     include!(concat!(env!("OUT_DIR"), "/pulsar.proto.rs"));
 
     //trait implementations used in Consumer::unacked_messages
     impl std::cmp::Eq for MessageIdData {}
 
+    #[allow(clippy::derive_hash_xor_eq)]
     impl std::hash::Hash for MessageIdData {
-         fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-             self.ledger_id.hash(state);
-             self.entry_id.hash(state);
-             self.partition.hash(state);
-             self.batch_index.hash(state);
-             self.ack_set.hash(state);
-             self.batch_size.hash(state);
-         }
+        fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+            self.ledger_id.hash(state);
+            self.entry_id.hash(state);
+            self.partition.hash(state);
+            self.batch_index.hash(state);
+            self.ack_set.hash(state);
+            self.batch_size.hash(state);
+        }
     }
 }
 
