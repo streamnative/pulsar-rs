@@ -17,30 +17,35 @@ pub enum Error {
 }
 
 impl From<ConnectionError> for Error {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn from(err: ConnectionError) -> Self {
         Error::Connection(err)
     }
 }
 
 impl From<ConsumerError> for Error {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn from(err: ConsumerError) -> Self {
         Error::Consumer(err)
     }
 }
 
 impl From<ProducerError> for Error {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn from(err: ProducerError) -> Self {
         Error::Producer(err)
     }
 }
 
 impl From<ServiceDiscoveryError> for Error {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn from(err: ServiceDiscoveryError) -> Self {
         Error::ServiceDiscovery(err)
     }
 }
 
 impl fmt::Display for Error {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Error::Connection(e) => write!(f, "Connection error: {}", e),
@@ -55,6 +60,7 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Error::Connection(e) => e.source(),
@@ -86,24 +92,28 @@ pub enum ConnectionError {
 }
 
 impl From<io::Error> for ConnectionError {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn from(err: io::Error) -> Self {
         ConnectionError::Io(err)
     }
 }
 
 impl From<native_tls::Error> for ConnectionError {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn from(err: native_tls::Error) -> Self {
         ConnectionError::Tls(err)
     }
 }
 
 impl From<AuthenticationError> for ConnectionError {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn from(err: AuthenticationError) -> Self {
         ConnectionError::Authentication(err)
     }
 }
 
 impl fmt::Display for ConnectionError {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             ConnectionError::Io(e) => write!(f, "{}", e),
@@ -128,6 +138,7 @@ impl fmt::Display for ConnectionError {
 }
 
 impl std::error::Error for ConnectionError {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             ConnectionError::Io(e) => Some(e),
@@ -147,18 +158,21 @@ pub enum ConsumerError {
 }
 
 impl From<ConnectionError> for ConsumerError {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn from(err: ConnectionError) -> Self {
         ConsumerError::Connection(err)
     }
 }
 
 impl From<io::Error> for ConsumerError {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn from(err: io::Error) -> Self {
         ConsumerError::Io(err)
     }
 }
 
 impl From<futures::channel::mpsc::SendError> for ConsumerError {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn from(err: futures::channel::mpsc::SendError) -> Self {
         if err.is_full() {
             ConsumerError::ChannelFull
@@ -169,6 +183,7 @@ impl From<futures::channel::mpsc::SendError> for ConsumerError {
 }
 
 impl fmt::Display for ConsumerError {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             ConsumerError::Connection(e) => write!(f, "Connection error: {}", e),
@@ -188,6 +203,7 @@ impl fmt::Display for ConsumerError {
 }
 
 impl std::error::Error for ConsumerError {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             ConsumerError::Connection(e) => Some(e),
@@ -208,18 +224,21 @@ pub enum ProducerError {
 }
 
 impl From<ConnectionError> for ProducerError {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn from(err: ConnectionError) -> Self {
         ProducerError::Connection(err)
     }
 }
 
 impl From<io::Error> for ProducerError {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn from(err: io::Error) -> Self {
         ProducerError::Io(err)
     }
 }
 
 impl fmt::Display for ProducerError {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             ProducerError::Connection(e) => write!(f, "Connection error: {}", e),
@@ -255,6 +274,7 @@ impl fmt::Display for ProducerError {
 }
 
 impl fmt::Debug for ProducerError {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ProducerError::Connection(e) => write!(f, "Connection({:?})", e),
@@ -280,6 +300,7 @@ impl fmt::Debug for ProducerError {
 }
 
 impl std::error::Error for ProducerError {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             ProducerError::Connection(e) => Some(e),
@@ -307,12 +328,14 @@ pub enum ServiceDiscoveryError {
 }
 
 impl From<ConnectionError> for ServiceDiscoveryError {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn from(err: ConnectionError) -> Self {
         ServiceDiscoveryError::Connection(err)
     }
 }
 
 impl fmt::Display for ServiceDiscoveryError {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             ServiceDiscoveryError::Connection(e) => write!(f, "Connection error: {}", e),
@@ -329,6 +352,7 @@ impl fmt::Display for ServiceDiscoveryError {
 }
 
 impl std::error::Error for ServiceDiscoveryError {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             ServiceDiscoveryError::Connection(e) => Some(e),
@@ -343,6 +367,7 @@ pub enum AuthenticationError {
 }
 
 impl fmt::Display for AuthenticationError {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             AuthenticationError::Custom(m) => write!(f, "authentication error [{}]", m),
@@ -359,6 +384,7 @@ pub(crate) struct SharedError {
 }
 
 impl SharedError {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn new() -> SharedError {
         SharedError {
             error_set: Arc::new(AtomicBool::new(false)),
@@ -366,10 +392,12 @@ impl SharedError {
         }
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn is_set(&self) -> bool {
         self.error_set.load(Ordering::Relaxed)
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn remove(&self) -> Option<ConnectionError> {
         let mut lock = self.error.lock().unwrap();
         let error = lock.take();
@@ -377,6 +405,7 @@ impl SharedError {
         error
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn set(&self, error: ConnectionError) {
         let mut lock = self.error.lock().unwrap();
         *lock = Some(error);
@@ -387,6 +416,7 @@ impl SharedError {
 use crate::message::proto::ServerError;
 use crate::producer::SendFuture;
 
+#[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
 pub(crate) fn server_error(i: i32) -> Option<ServerError> {
     match i {
         0 => Some(ServerError::UnknownError),

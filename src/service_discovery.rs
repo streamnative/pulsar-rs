@@ -20,11 +20,13 @@ pub struct ServiceDiscovery<Exe: Executor> {
 }
 
 impl<Exe: Executor> ServiceDiscovery<Exe> {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_manager(manager: Arc<ConnectionManager<Exe>>) -> Self {
         ServiceDiscovery { manager }
     }
 
     /// get the broker address for a topic
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn lookup_topic<S: Into<String>>(
         &self,
         topic: S,
@@ -164,6 +166,7 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
     }
 
     /// get the number of partitions for a partitioned topic
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn lookup_partitioned_topic_number<S: Into<String>>(
         &self,
         topic: S,
@@ -242,6 +245,7 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
 
     /// Lookup a topic, returning a list of the partitions (if partitioned) and addresses
     /// associated with that topic.
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn lookup_partitioned_topic<S: Into<String>>(
         &self,
         topic: S,
@@ -275,6 +279,7 @@ struct LookupResponse {
 }
 
 /// extracts information from a lookup response
+#[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
 fn convert_lookup_response(
     response: &CommandLookupTopicResponse,
 ) -> Result<LookupResponse, ServiceDiscoveryError> {

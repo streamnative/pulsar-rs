@@ -29,6 +29,7 @@ pub struct SendFuture(pub(crate) oneshot::Receiver<Result<CommandSendReceipt, Er
 impl Future for SendFuture {
     type Output = Result<CommandSendReceipt, Error>;
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match Pin::new(&mut self.0).poll(cx) {
             Poll::Ready(Ok(r)) => Poll::Ready(r),
@@ -99,6 +100,7 @@ pub(crate) struct ProducerMessage {
 }
 
 impl From<Message> for ProducerMessage {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn from(m: Message) -> Self {
         ProducerMessage {
             payload: m.payload,
@@ -158,16 +160,19 @@ pub struct MultiTopicProducer<Exe: Executor> {
 
 impl<Exe: Executor> MultiTopicProducer<Exe> {
     /// producer options
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn options(&self) -> &ProducerOptions {
         &self.options
     }
 
     /// list topics currently handled by this producer
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn topics(&self) -> Vec<String> {
         self.producers.keys().cloned().collect()
     }
 
     /// stops the producer
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn close_producer<S: Into<String>>(&mut self, topic: S) -> Result<(), Error> {
         let partitions = self.client.lookup_partitioned_topic(topic).await?;
         for (topic, _) in partitions {
@@ -177,6 +182,7 @@ impl<Exe: Executor> MultiTopicProducer<Exe> {
     }
 
     /// sends one message on a topic
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn send<T: SerializeMessage + Sized, S: Into<String>>(
         &mut self,
         topic: S,
@@ -202,6 +208,7 @@ impl<Exe: Executor> MultiTopicProducer<Exe> {
     }
 
     /// sends a list of messages on a topic
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn send_all<'a, 'b, T, S, I>(
         &mut self,
         topic: S,
@@ -235,11 +242,13 @@ pub struct Producer<Exe: Executor> {
 
 impl<Exe: Executor> Producer<Exe> {
     /// creates a producer builder from a client instance
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn builder(pulsar: &Pulsar<Exe>) -> ProducerBuilder<Exe> {
         ProducerBuilder::new(pulsar)
     }
 
     /// this producer's topic
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn topic(&self) -> &str {
         match &self.inner {
             ProducerInner::Single(p) => p.topic(),
@@ -248,6 +257,7 @@ impl<Exe: Executor> Producer<Exe> {
     }
 
     /// list of partitions for this producer's topic
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn partitions(&self) -> Option<Vec<String>> {
         match &self.inner {
             ProducerInner::Single(_) => None,
@@ -258,6 +268,7 @@ impl<Exe: Executor> Producer<Exe> {
     }
 
     /// configuration options
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn options(&self) -> &ProducerOptions {
         match &self.inner {
             ProducerInner::Single(p) => p.options(),
@@ -268,11 +279,13 @@ impl<Exe: Executor> Producer<Exe> {
     /// creates a message builder
     ///
     /// the created message will ber sent by this producer in [MessageBuilder::send]
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn create_message(&mut self) -> MessageBuilder<(), Exe> {
         MessageBuilder::new(self)
     }
 
     /// test that the broker connections are still valid
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn check_connection(&self) -> Result<(), Error> {
         match &self.inner {
             ProducerInner::Single(p) => p.check_connection().await,
@@ -303,6 +316,7 @@ impl<Exe: Executor> Producer<Exe> {
     /// # Ok(())
     /// # }
     /// ```
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn send<T: SerializeMessage + Sized>(
         &mut self,
         message: T,
@@ -314,6 +328,7 @@ impl<Exe: Executor> Producer<Exe> {
     }
 
     /// sends a list of messages
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn send_all<T, I>(&mut self, messages: I) -> Result<Vec<SendFuture>, Error>
     where
         T: SerializeMessage,
@@ -335,6 +350,7 @@ impl<Exe: Executor> Producer<Exe> {
     }
 
     /// sends the current batch of messages
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn send_batch(&mut self) -> Result<(), Error> {
         match &mut self.inner {
             ProducerInner::Single(p) => p.send_batch().await,
@@ -346,6 +362,7 @@ impl<Exe: Executor> Producer<Exe> {
         }
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub(crate) async fn send_raw(&mut self, message: ProducerMessage) -> Result<SendFuture, Error> {
         match &mut self.inner {
             ProducerInner::Single(p) => p.send_raw(message).await,
@@ -367,6 +384,7 @@ struct PartitionedProducer<Exe: Executor> {
 }
 
 impl<Exe: Executor> PartitionedProducer<Exe> {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn next(&mut self) -> &mut TopicProducer<Exe> {
         self.producers.rotate_left(1);
         self.producers.front_mut().unwrap()
@@ -390,6 +408,7 @@ struct TopicProducer<Exe: Executor> {
 }
 
 impl<Exe: Executor> TopicProducer<Exe> {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub(crate) async fn from_connection<S: Into<String>>(
         client: Pulsar<Exe>,
         mut connection: Arc<Connection<Exe>>,
@@ -582,19 +601,23 @@ impl<Exe: Executor> TopicProducer<Exe> {
         })
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn topic(&self) -> &str {
         &self.topic
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn options(&self) -> &ProducerOptions {
         &self.options
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn check_connection(&self) -> Result<(), Error> {
         self.connection.sender().send_ping().await?;
         Ok(())
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn send<T: SerializeMessage + Sized>(&mut self, message: T) -> Result<SendFuture, Error> {
         match T::serialize_message(message) {
             Ok(message) => self.send_raw(message.into()).await,
@@ -602,6 +625,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
         }
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn send_batch(&mut self) -> Result<(), Error> {
         match self.batch.as_ref() {
             None => Err(ProducerError::Custom("not a batching producer".to_string()).into()),
@@ -645,6 +669,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
         }
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub(crate) async fn send_raw(&mut self, message: ProducerMessage) -> Result<SendFuture, Error> {
         let (tx, rx) = oneshot::channel();
         match self.batch.as_ref() {
@@ -695,6 +720,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
         }
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn send_compress(
         &mut self,
         mut message: ProducerMessage,
@@ -782,6 +808,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
         self.send_inner(compressed_message).await
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn send_inner(
         &mut self,
         message: ProducerMessage,
@@ -817,6 +844,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
         }
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn reconnect(&mut self) -> Result<(), Error> {
         debug!("reconnecting producer for topic: {}", self.topic);
         // Sender::send() method consumes the sender
@@ -1023,6 +1051,7 @@ pub struct ProducerBuilder<Exe: Executor> {
 
 impl<Exe: Executor> ProducerBuilder<Exe> {
     /// creates a new ProducerBuilder from a client
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn new(pulsar: &Pulsar<Exe>) -> Self {
         ProducerBuilder {
             pulsar: pulsar.clone(),
@@ -1033,24 +1062,28 @@ impl<Exe: Executor> ProducerBuilder<Exe> {
     }
 
     /// sets the producer's topic
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_topic<S: Into<String>>(mut self, topic: S) -> Self {
         self.topic = Some(topic.into());
         self
     }
 
     /// sets the producer's name
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_name<S: Into<String>>(mut self, name: S) -> Self {
         self.name = Some(name.into());
         self
     }
 
     /// configuration options
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_options(mut self, options: ProducerOptions) -> Self {
         self.producer_options = Some(options);
         self
     }
 
     /// creates a new producer
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn build(self) -> Result<Producer<Exe>, Error> {
         let ProducerBuilder {
             pulsar,
@@ -1105,6 +1138,7 @@ impl<Exe: Executor> ProducerBuilder<Exe> {
     }
 
     /// creates a new [MultiTopicProducer]
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn build_multi_topic(self) -> MultiTopicProducer<Exe> {
         MultiTopicProducer {
             client: self.pulsar,
@@ -1129,6 +1163,7 @@ struct Batch {
 }
 
 impl Batch {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn new(length: u32) -> Batch {
         Batch {
             length,
@@ -1136,10 +1171,12 @@ impl Batch {
         }
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn is_full(&self) -> bool {
         self.storage.lock().await.len() >= self.length as usize
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn push_back(
         &self,
         msg: (
@@ -1169,6 +1206,7 @@ impl Batch {
         self.storage.lock().await.push_back((tx, batched))
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn get_messages(
         &self,
     ) -> Vec<(
@@ -1194,6 +1232,7 @@ pub struct MessageBuilder<'a, T, Exe: Executor> {
 
 impl<'a, Exe: Executor> MessageBuilder<'a, (), Exe> {
     /// creates a message builder from an existing producer
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn new(producer: &'a mut Producer<Exe>) -> Self {
         MessageBuilder {
             producer,
@@ -1209,6 +1248,7 @@ impl<'a, Exe: Executor> MessageBuilder<'a, (), Exe> {
 
 impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
     /// sets the message's content
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_content<C>(self, content: C) -> MessageBuilder<'a, C, Exe> {
         MessageBuilder {
             producer: self.producer,
@@ -1222,11 +1262,14 @@ impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
     }
 
     /// sets the message's partition key
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_partition_key<S: Into<String>>(mut self, partition_key: S) -> Self {
         self.partition_key = Some(partition_key.into());
         self
     }
+
     /// sets the message's ordering key for key_shared subscription
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_ordering_key<S: Into<String>>(mut self, partition_key: S) -> Self {
         self.partition_key = Some(partition_key.into());
         self
@@ -1236,24 +1279,28 @@ impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
     ///
     /// this is the same as `with_partition_key`, this method is added for
     /// more consistency with other clients
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_key<S: Into<String>>(mut self, partition_key: S) -> Self {
         self.partition_key = Some(partition_key.into());
         self
     }
 
     /// sets a user defined property
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_property<S1: Into<String>, S2: Into<String>>(mut self, key: S1, value: S2) -> Self {
         self.properties.insert(key.into(), value.into());
         self
     }
 
     /// delivers the message at this date
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn deliver_at(mut self, date: SystemTime) -> Result<Self, std::time::SystemTimeError> {
         self.deliver_at_time = Some(date.duration_since(UNIX_EPOCH)?.as_millis() as i64);
         Ok(self)
     }
 
     /// delays message deliver with this duration
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn delay(mut self, delay: Duration) -> Result<Self, std::time::SystemTimeError> {
         let date = SystemTime::now() + delay;
         println!(
@@ -1266,6 +1313,7 @@ impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
     }
 
     /// delivers the message at this date
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn event_time(mut self, event_time: u64) -> Self {
         self.event_time = Some(event_time);
         self
@@ -1274,6 +1322,7 @@ impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
 
 impl<'a, T: SerializeMessage + Sized, Exe: Executor> MessageBuilder<'a, T, Exe> {
     /// sends the message through the producer that created it
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn send(self) -> Result<SendFuture, Error> {
         let MessageBuilder {
             producer,

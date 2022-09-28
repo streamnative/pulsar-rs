@@ -25,6 +25,7 @@ pub mod token {
 
     impl TokenAuthentication {
         #[allow(clippy::new_ret_no_self)]
+        #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
         pub fn new(token: String) -> Rc<dyn Authentication> {
             Rc::new(TokenAuthentication {
                 token: token.into_bytes(),
@@ -34,14 +35,17 @@ pub mod token {
 
     #[async_trait]
     impl Authentication for TokenAuthentication {
+        #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
         fn auth_method_name(&self) -> String {
             String::from("token")
         }
 
+        #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
         async fn initialize(&mut self) -> Result<(), AuthenticationError> {
             Ok(())
         }
 
+        #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
         async fn auth_data(&mut self) -> Result<Vec<u8>, AuthenticationError> {
             Ok(self.token.clone())
         }
@@ -87,6 +91,7 @@ pub mod oauth2 {
     }
 
     impl Display for OAuth2Params {
+        #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
         fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
             write!(
                 f,
@@ -103,6 +108,7 @@ pub mod oauth2 {
     }
 
     impl From<BasicTokenResponse> for CachedToken {
+        #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
         fn from(resp: BasicTokenResponse) -> Self {
             let now = Instant::now();
             CachedToken {
@@ -114,6 +120,7 @@ pub mod oauth2 {
     }
 
     impl CachedToken {
+        #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
         fn is_expiring(&self) -> bool {
             match &self.expiring_at {
                 Some(expiring_at) => Instant::now().ge(expiring_at),
@@ -121,6 +128,7 @@ pub mod oauth2 {
             }
         }
 
+        #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
         fn is_expired(&self) -> bool {
             match &self.expired_at {
                 Some(expired_at) => Instant::now().ge(expired_at),
@@ -137,6 +145,7 @@ pub mod oauth2 {
     }
 
     impl OAuth2Authentication {
+        #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
         pub fn client_credentials(params: OAuth2Params) -> Box<dyn Authentication> {
             Box::new(OAuth2Authentication {
                 params,
@@ -148,6 +157,7 @@ pub mod oauth2 {
     }
 
     impl OAuth2Params {
+        #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
         fn read_private_params(&self) -> Result<OAuth2PrivateParams, Box<dyn std::error::Error>> {
             let credentials_url = Url::parse(self.credentials_url.as_str())?;
             match credentials_url.scheme() {
@@ -189,10 +199,12 @@ pub mod oauth2 {
 
     #[async_trait]
     impl Authentication for OAuth2Authentication {
+        #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
         fn auth_method_name(&self) -> String {
             String::from("token")
         }
 
+        #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
         async fn initialize(&mut self) -> Result<(), AuthenticationError> {
             match self.params.read_private_params() {
                 Ok(private_params) => self.private_params = Some(private_params),
@@ -204,6 +216,7 @@ pub mod oauth2 {
             Ok(())
         }
 
+        #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
         async fn auth_data(&mut self) -> Result<Vec<u8>, AuthenticationError> {
             if self.private_params.is_none() {
                 return Err(AuthenticationError::Custom("not initialized".to_string()));
@@ -242,6 +255,7 @@ pub mod oauth2 {
     }
 
     impl OAuth2Authentication {
+        #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
         async fn token_url(&mut self) -> Result<Option<TokenUrl>, Box<dyn std::error::Error>> {
             match &self.token_url {
                 Some(url) => Ok(Some(url.clone())),
@@ -265,6 +279,7 @@ pub mod oauth2 {
             }
         }
 
+        #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
         async fn fetch_token(&mut self) -> Result<BasicTokenResponse, Box<dyn std::error::Error>> {
             let private_params = self
                 .private_params

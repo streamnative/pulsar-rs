@@ -64,36 +64,43 @@ pub struct ConsumerOptions {
 
 impl ConsumerOptions {
     /// within options, sets the priority level
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_priority_level(mut self, priority_level: i32) -> Self {
         self.priority_level = Some(priority_level);
         self
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn durable(mut self, durable: bool) -> Self {
         self.durable = Some(durable);
         self
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn starting_on_message(mut self, message_id_data: MessageIdData) -> Self {
         self.start_message_id = Some(message_id_data);
         self
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_metadata(mut self, metadata: BTreeMap<String, String>) -> Self {
         self.metadata = metadata;
         self
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn read_compacted(mut self, read_compacted: bool) -> Self {
         self.read_compacted = Some(read_compacted);
         self
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_schema(mut self, schema: Schema) -> Self {
         self.schema = Some(schema);
         self
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_initial_position(mut self, initial_position: InitialPosition) -> Self {
         self.initial_position = initial_position;
         self
@@ -118,11 +125,14 @@ pub enum InitialPosition {
 }
 
 impl Default for InitialPosition {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn default() -> Self {
         InitialPosition::Latest
     }
 }
+
 impl From<InitialPosition> for i32 {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn from(i: InitialPosition) -> Self {
         match i {
             InitialPosition::Earliest => 1,
@@ -168,13 +178,16 @@ impl From<InitialPosition> for i32 {
 pub struct Consumer<T: DeserializeMessage, Exe: Executor> {
     inner: InnerConsumer<T, Exe>,
 }
+
 impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
     /// creates a [ConsumerBuilder] from a client instance
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn builder(pulsar: &Pulsar<Exe>) -> ConsumerBuilder<Exe> {
         ConsumerBuilder::new(pulsar)
     }
 
     /// test that the connections to the Pulsar brokers are still valid
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn check_connection(&mut self) -> Result<(), Error> {
         match &mut self.inner {
             InnerConsumer::Single(c) => c.check_connection().await,
@@ -183,6 +196,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
     }
 
     /// get consumer stats
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn get_stats(&mut self) -> Result<Vec<CommandConsumerStatsResponse>, Error> {
         match &mut self.inner {
             InnerConsumer::Single(c) => Ok(vec![c.get_stats().await?]),
@@ -191,6 +205,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
     }
 
     /// acknowledges a single message
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         match &mut self.inner {
             InnerConsumer::Single(c) => c.ack(msg).await,
@@ -199,6 +214,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
     }
 
     /// acknowledges a message and all the preceding messages
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn cumulative_ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         match &mut self.inner {
             InnerConsumer::Single(c) => c.cumulative_ack(msg).await,
@@ -209,6 +225,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
     /// negative acknowledgement
     ///
     /// the message will be sent again on the subscription
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn nack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         match &mut self.inner {
             InnerConsumer::Single(c) => c.nack(msg).await,
@@ -219,6 +236,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
     /// seek currently destroys the existing consumer and creates a new one
     /// this is how java and cpp pulsar client implement this feature mainly because
     /// there are many minor problems with flushing existing messages and receiving new ones
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn seek(
         &mut self,
         consumer_ids: Option<Vec<String>>,
@@ -279,6 +297,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn unsubscribe(&mut self) -> Result<(), Error> {
         match &mut self.inner {
             InnerConsumer::Single(c) => c.unsubscribe().await,
@@ -286,6 +305,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         }
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn get_last_message_id(&mut self) -> Result<Vec<MessageIdData>, Error> {
         match &mut self.inner {
             InnerConsumer::Single(c) => Ok(vec![c.get_last_message_id().await?]),
@@ -294,6 +314,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
     }
 
     /// returns the list of topics this consumer is subscribed on
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn topics(&self) -> Vec<String> {
         match &self.inner {
             InnerConsumer::Single(c) => vec![c.topic()],
@@ -302,6 +323,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
     }
 
     /// returns a list of broker URLs this consumer is connnected to
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn connections(&mut self) -> Result<Vec<Url>, Error> {
         match &mut self.inner {
             InnerConsumer::Single(c) => Ok(vec![c.connection().await?.url().clone()]),
@@ -324,6 +346,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
     }
 
     /// returns the consumer's configuration options
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn options(&self) -> &ConsumerOptions {
         match &self.inner {
             InnerConsumer::Single(c) => &c.config.options,
@@ -332,6 +355,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
     }
 
     /// returns the consumer's dead letter policy options
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn dead_letter_policy(&self) -> Option<&DeadLetterPolicy> {
         match &self.inner {
             InnerConsumer::Single(c) => c.dead_letter_policy.as_ref(),
@@ -340,6 +364,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
     }
 
     /// returns the consumer's subscription name
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn subscription(&self) -> &str {
         match &self.inner {
             InnerConsumer::Single(c) => &c.config.subscription,
@@ -348,6 +373,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
     }
 
     /// returns the consumer's subscription type
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn sub_type(&self) -> SubType {
         match &self.inner {
             InnerConsumer::Single(c) => c.config.sub_type,
@@ -356,6 +382,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
     }
 
     /// returns the consumer's batch size
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn batch_size(&self) -> Option<u32> {
         match &self.inner {
             InnerConsumer::Single(c) => c.config.batch_size,
@@ -364,6 +391,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
     }
 
     /// returns the consumer's name
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn consumer_name(&self) -> Option<&str> {
         match &self.inner {
             InnerConsumer::Single(c) => &c.config.consumer_name,
@@ -374,6 +402,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
     }
 
     /// returns the consumer's list of ids
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn consumer_id(&self) -> Vec<u64> {
         match &self.inner {
             InnerConsumer::Single(c) => vec![c.consumer_id],
@@ -385,6 +414,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
     ///
     /// if messages are not acknowledged before this delay, they will be sent
     /// again on the subscription
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn unacked_message_redelivery_delay(&self) -> Option<Duration> {
         match &self.inner {
             InnerConsumer::Single(c) => c.config.unacked_message_redelivery_delay,
@@ -393,6 +423,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
     }
 
     /// returns the date of the last message reception
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn last_message_received(&self) -> Option<DateTime<Utc>> {
         match &self.inner {
             InnerConsumer::Single(c) => c.last_message_received(),
@@ -401,6 +432,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
     }
 
     /// returns the current number of messages received
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn messages_received(&self) -> u64 {
         match &self.inner {
             InnerConsumer::Single(c) => c.messages_received(),
@@ -413,6 +445,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
 impl<T: DeserializeMessage + 'static, Exe: Executor> Stream for Consumer<T, Exe> {
     type Item = Result<Message<T>, Error>;
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match &mut self.inner {
             InnerConsumer::Single(c) => Pin::new(c).poll_next(cx),
@@ -443,6 +476,7 @@ pub(crate) struct TopicConsumer<T: DeserializeMessage, Exe: Executor> {
 }
 
 impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn new(
         client: Pulsar<Exe>,
         topic: String,
@@ -628,10 +662,12 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         })
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn topic(&self) -> String {
         self.topic.clone()
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn connection(&mut self) -> Result<Arc<Connection<Exe>>, Error> {
         let (resolver, response) = oneshot::channel();
         self.engine_tx
@@ -645,6 +681,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         })
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn get_stats(&mut self) -> Result<CommandConsumerStatsResponse, Error> {
         let consumer_id = self.consumer_id;
         let conn = self.connection().await?;
@@ -652,6 +689,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         Ok(consumer_stats_response)
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn check_connection(&mut self) -> Result<(), Error> {
         let conn = self.connection().await?;
         info!("check connection for id {}", conn.id());
@@ -659,6 +697,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         self.engine_tx
             .send(EngineMessage::Ack(msg.message_id.clone(), false))
@@ -666,10 +705,12 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub(crate) fn acker(&self) -> mpsc::UnboundedSender<EngineMessage<Exe>> {
         self.engine_tx.clone()
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn cumulative_ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         self.engine_tx
             .send(EngineMessage::Ack(msg.message_id.clone(), true))
@@ -677,6 +718,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn nack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         self.engine_tx
             .send(EngineMessage::Nack(msg.message_id.clone()))
@@ -684,6 +726,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn seek(
         &mut self,
         message_id: Option<MessageIdData>,
@@ -698,6 +741,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn unsubscribe(&mut self) -> Result<(), Error> {
         let consumer_id = self.consumer_id;
         self.connection()
@@ -708,6 +752,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn get_last_message_id(&mut self) -> Result<MessageIdData, Error> {
         let consumer_id = self.consumer_id;
         let conn = self.connection().await?;
@@ -715,18 +760,22 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         Ok(get_last_message_id_response.last_message_id)
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn last_message_received(&self) -> Option<DateTime<Utc>> {
         self.last_message_received
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn messages_received(&self) -> u64 {
         self.messages_received
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn config(&self) -> &ConsumerConfig {
         &self.config
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn create_message(&self, message_id: proto::MessageIdData, payload: Payload) -> Message<T> {
         Message {
             topic: self.topic.clone(),
@@ -743,6 +792,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
 impl<T: DeserializeMessage, Exe: Executor> Stream for TopicConsumer<T, Exe> {
     type Item = Result<Message<T>, Error>;
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match self.messages.as_mut().poll_next(cx) {
             Poll::Pending => Poll::Pending,
@@ -785,6 +835,7 @@ pub(crate) enum EngineMessage<Exe: Executor> {
 }
 
 impl<Exe: Executor> ConsumerEngine<Exe> {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn new(
         client: Pulsar<Exe>,
         connection: Arc<Connection<Exe>>,
@@ -822,7 +873,8 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             _drop_signal,
         }
     }
-
+    
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn engine(&mut self) -> Result<(), Error> {
         debug!("starting the consumer engine for topic {}", self.topic);
         let mut messages_or_ack_f = None;
@@ -986,6 +1038,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         }
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn ack(&mut self, message_id: MessageData, cumulative: bool) {
         //FIXME: this does not handle cumulative acks
         self.unacked_messages.remove(&message_id.id);
@@ -999,6 +1052,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
     }
 
     /// Process the message. Returns `true` if there are more messages to process
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn process_message(&mut self, message: RawMessage) -> Result<bool, Error> {
         match message {
             RawMessage {
@@ -1076,6 +1130,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         Ok(true)
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn process_payload(
         &mut self,
         message: CommandMessage,
@@ -1225,6 +1280,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn send_to_consumer(
         &mut self,
         message_id: MessageIdData,
@@ -1244,6 +1300,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn reconnect(&mut self) -> Result<(), Error> {
         debug!("reconnecting consumer for topic: {}", self.topic);
         let broker_address = self.client.lookup_topic(&self.topic).await?;
@@ -1305,6 +1362,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn debug_format(&self) -> String {
         format!(
             "[{id} - {subscription}{name}: {topic}]",
@@ -1335,6 +1393,7 @@ struct BatchedMessageIterator {
 }
 
 impl BatchedMessageIterator {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn new(message_id: proto::MessageIdData, payload: Payload) -> Result<Self, ConnectionError> {
         let total_messages = payload
             .metadata
@@ -1355,6 +1414,7 @@ impl BatchedMessageIterator {
 impl Iterator for BatchedMessageIterator {
     type Item = (proto::MessageIdData, Payload);
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn next(&mut self) -> Option<Self::Item> {
         let remaining = self.total_messages - self.current_index;
         if remaining == 0 {
@@ -1409,6 +1469,7 @@ pub struct ConsumerBuilder<Exe: Executor> {
 
 impl<Exe: Executor> ConsumerBuilder<Exe> {
     /// Creates a new [ConsumerBuilder] from an existing client instance
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn new(pulsar: &Pulsar<Exe>) -> Self {
         ConsumerBuilder {
             pulsar: pulsar.clone(),
@@ -1429,6 +1490,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
     }
 
     /// sets the consumer's topic or add one to the list of topics
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_topic<S: Into<String>>(mut self, topic: S) -> ConsumerBuilder<Exe> {
         match &mut self.topics {
             Some(topics) => topics.push(topic.into()),
@@ -1438,6 +1500,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
     }
 
     /// adds a list of topics to the future consumer
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_topics<S: AsRef<str>, I: IntoIterator<Item = S>>(
         mut self,
         topics: I,
@@ -1454,18 +1517,21 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
 
     /// sets up a consumer that will listen on all topics matching the regular
     /// expression
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_topic_regex(mut self, regex: Regex) -> ConsumerBuilder<Exe> {
         self.topic_regex = Some(regex);
         self
     }
 
     /// sets the subscription's name
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_subscription<S: Into<String>>(mut self, subscription: S) -> Self {
         self.subscription = Some(subscription.into());
         self
     }
 
     /// sets the kind of subscription
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_subscription_type(mut self, subscription_type: SubType) -> Self {
         self.subscription_type = Some(subscription_type);
         self
@@ -1475,24 +1541,28 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
     /// specify namespace using the `<persistent|non-persistent://<tenant>/<namespace>/<topic>`
     /// topic format.
     /// Defaults to `public/default` if not specifid
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_lookup_namespace<S: Into<String>>(mut self, namespace: S) -> Self {
         self.namespace = Some(namespace.into());
         self
     }
 
     /// Interval for refreshing the topics when using a topic regex. Unused otherwise.
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_topic_refresh(mut self, refresh_interval: Duration) -> Self {
         self.topic_refresh = Some(refresh_interval);
         self
     }
 
     /// sets the consumer id for this consumer
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_consumer_id(mut self, consumer_id: u64) -> Self {
         self.consumer_id = Some(consumer_id);
         self
     }
 
     /// sets the consumer's name
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_consumer_name<S: Into<String>>(mut self, consumer_name: S) -> Self {
         self.consumer_name = Some(consumer_name.into());
         self
@@ -1504,18 +1574,21 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
     /// not be sent by Pulsar
     ///
     /// default value: 1000
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_batch_size(mut self, batch_size: u32) -> Self {
         self.batch_size = Some(batch_size);
         self
     }
 
     /// sets consumer options
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_options(mut self, options: ConsumerOptions) -> Self {
         self.consumer_options = Some(options);
         self
     }
 
     /// sets the dead letter policy
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_dead_letter_policy(mut self, dead_letter_policy: DeadLetterPolicy) -> Self {
         self.dead_letter_policy = Some(dead_letter_policy);
         self
@@ -1524,6 +1597,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
     /// The time after which a message is dropped without being acknowledged or nacked
     /// that the message is resent. If `None`, messages will only be resent when a
     /// consumer disconnects with pending unacknowledged messages.
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_unacked_message_resend_delay(mut self, delay: Option<Duration>) -> Self {
         self.unacked_message_resend_delay = delay;
         self
@@ -1531,6 +1605,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
 
     // Checks the builder for inconsistencies
     // returns a config and a list of topics with associated brokers
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn validate<T: DeserializeMessage>(
         self,
     ) -> Result<(ConsumerConfig, Vec<(String, BrokerAddress)>), Error> {
@@ -1620,6 +1695,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
     }
 
     /// creates a [Consumer] from this builder
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn build<T: DeserializeMessage>(self) -> Result<Consumer<T, Exe>, Error> {
         // would this clone() consume too much memory?
         let (config, joined_topics) = self.clone().validate::<T>().await?;
@@ -1667,6 +1743,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
     }
 
     /// creates a [Reader] from this builder
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn into_reader<T: DeserializeMessage>(self) -> Result<Reader<T, Exe>, Error> {
         // would this clone() consume too much memory?
         let (mut config, mut joined_topics) = self.clone().validate::<T>().await?;
@@ -1735,15 +1812,18 @@ struct MultiTopicConsumer<T: DeserializeMessage, Exe: Executor> {
 }
 
 impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn topics(&self) -> Vec<String> {
         self.topics.iter().map(|s| s.to_string()).collect()
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn get_stats(&mut self) -> Result<Vec<CommandConsumerStatsResponse>, Error> {
         let resposnes = try_join_all(self.consumers.values_mut().map(|c| c.get_stats())).await?;
         Ok(resposnes)
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn last_message_received(&self) -> Option<DateTime<Utc>> {
         self.consumers
             .values()
@@ -1752,6 +1832,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
             .max()
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn messages_received(&self) -> u64 {
         self.consumers
             .values()
@@ -1760,6 +1841,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
             .sum()
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn check_connections(&mut self) -> Result<(), Error> {
         self.pulsar
             .manager
@@ -1776,12 +1858,14 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn get_last_message_id(&mut self) -> Result<Vec<MessageIdData>, Error> {
         let responses =
             try_join_all(self.consumers.values_mut().map(|c| c.get_last_message_id())).await?;
         Ok(responses)
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn unsubscribe(&mut self) -> Result<(), Error> {
         for consumer in self.consumers.values_mut() {
             consumer.unsubscribe().await?;
@@ -1790,6 +1874,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn add_consumers<I: IntoIterator<Item = TopicConsumer<T, Exe>>>(&mut self, consumers: I) {
         for consumer in consumers {
             let topic = consumer.topic().to_owned();
@@ -1798,6 +1883,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
         }
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn remove_consumers(&mut self, topics: &[String]) {
         self.topics.retain(|t| !topics.contains(t));
         for topic in topics {
@@ -1812,6 +1898,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
         }
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn update_topics(&mut self) {
         if let Some(regex) = self.topic_regex.clone() {
             let pulsar = self.pulsar.clone();
@@ -1856,6 +1943,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
         }
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         if let Some(c) = self.consumers.get_mut(&msg.topic) {
             c.ack(msg).await
@@ -1864,6 +1952,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
         }
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn cumulative_ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         if let Some(c) = self.consumers.get_mut(&msg.topic) {
             c.cumulative_ack(msg).await
@@ -1872,6 +1961,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
         }
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn nack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         if let Some(c) = self.consumers.get_mut(&msg.topic) {
             c.nack(msg).await?;
@@ -1882,6 +1972,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
     }
 
     /// Assume that this seek method will call seek for the topics given in the consumer_ids
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn seek(
         &mut self,
         consumer_ids: Option<Vec<String>>,
@@ -1915,6 +2006,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
         }
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn config(&self) -> &ConsumerConfig {
         &self.config
     }
@@ -1935,28 +2027,33 @@ pub struct Message<T> {
 
 impl<T> Message<T> {
     /// Pulsar metadata for the message
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn metadata(&self) -> &MessageMetadata {
         &self.payload.metadata
     }
 
     /// Get Pulsar message id for the message
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn message_id(&self) -> &proto::MessageIdData {
         &self.message_id.id
     }
 
     /// Get message key (partition key)
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn key(&self) -> Option<String> {
         self.payload.metadata.partition_key.clone()
     }
 }
 impl<T: DeserializeMessage> Message<T> {
     /// directly deserialize a message
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn deserialize(&self) -> T::Output {
         T::deserialize_message(&self.payload)
     }
 }
 
 impl<T: DeserializeMessage, Exe: Executor> Debug for MultiTopicConsumer<T, Exe> {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(
             f,
@@ -1969,6 +2066,7 @@ impl<T: DeserializeMessage, Exe: Executor> Debug for MultiTopicConsumer<T, Exe> 
 impl<T: 'static + DeserializeMessage, Exe: Executor> Stream for MultiTopicConsumer<T, Exe> {
     type Item = Result<Message<T>, Error>;
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if let Some(mut new_consumers) = self.new_consumers.take() {
             match new_consumers.as_mut().poll(cx) {

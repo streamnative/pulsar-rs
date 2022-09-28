@@ -67,14 +67,17 @@ pub struct Authentication {
 
 #[async_trait]
 impl crate::authentication::Authentication for Authentication {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn auth_method_name(&self) -> String {
         self.name.clone()
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn initialize(&mut self) -> Result<(), AuthenticationError> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn auth_data(&mut self) -> Result<Vec<u8>, AuthenticationError> {
         Ok(self.data.clone())
     }
@@ -93,6 +96,7 @@ pub(crate) struct Receiver<S: Stream<Item = Result<Message, ConnectionError>>> {
 }
 
 impl<S: Stream<Item = Result<Message, ConnectionError>>> Receiver<S> {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn new(
         inbound: S,
         outbound: mpsc::UnboundedSender<Message>,
@@ -117,6 +121,7 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Receiver<S> {
 impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> {
     type Output = Result<(), ()>;
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match self.shutdown.as_mut().poll(cx) {
             Poll::Ready(Ok(())) | Poll::Ready(Err(futures::channel::oneshot::Canceled)) => {
@@ -238,15 +243,19 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> 
 pub struct SerialId(Arc<AtomicUsize>);
 
 impl Default for SerialId {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn default() -> Self {
         SerialId(Arc::new(AtomicUsize::new(0)))
     }
 }
 
 impl SerialId {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn new() -> Self {
         Self::default()
     }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn get(&self) -> u64 {
         self.0.fetch_add(1, Ordering::Relaxed) as u64
     }
@@ -266,6 +275,7 @@ pub struct ConnectionSender<Exe: Executor> {
 }
 
 impl<Exe: Executor> ConnectionSender<Exe> {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub(crate) fn new(
         connection_id: Uuid,
         tx: mpsc::UnboundedSender<Message>,
@@ -288,6 +298,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         }
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub(crate) async fn send(
         &self,
         producer_id: u64,
@@ -304,6 +315,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
             .await
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn send_ping(&self) -> Result<(), ConnectionError> {
         let (resolver, response) = oneshot::channel();
         trace!("sending ping to connection {}", self.connection_id);
@@ -341,6 +353,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         }
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn lookup_topic<S: Into<String>>(
         &self,
         topic: S,
@@ -354,6 +367,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         .await
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn lookup_partitioned_topic<S: Into<String>>(
         &self,
         topic: S,
@@ -366,6 +380,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         .await
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn get_consumer_stats(
         &self,
         consumer_id: u64,
@@ -377,6 +392,8 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         })
         .await
     }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn get_last_message_id(
         &self,
         consumer_id: u64,
@@ -389,6 +406,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         .await
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn create_producer(
         &self,
         topic: String,
@@ -404,6 +422,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         .await
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn wait_for_exclusive_access(
         &self,
         request_id: u64,
@@ -414,6 +433,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         .await
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn get_topics_of_namespace(
         &self,
         namespace: String,
@@ -427,6 +447,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         .await
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn close_producer(
         &self,
         producer_id: u64,
@@ -439,6 +460,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         .await
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn subscribe(
         &self,
         resolver: mpsc::UnboundedSender<Message>,
@@ -475,12 +497,14 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         .await
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn send_flow(&self, consumer_id: u64, message_permits: u32) -> Result<(), ConnectionError> {
         self.tx
             .unbounded_send(messages::flow(consumer_id, message_permits))
             .map_err(|_| ConnectionError::Disconnected)
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn send_ack(
         &self,
         consumer_id: u64,
@@ -492,6 +516,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
             .map_err(|_| ConnectionError::Disconnected)
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn send_redeliver_unacknowleged_messages(
         &self,
         consumer_id: u64,
@@ -505,6 +530,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
             .map_err(|_| ConnectionError::Disconnected)
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn close_consumer(
         &self,
         consumer_id: u64,
@@ -517,6 +543,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         .await
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn seek(
         &self,
         consumer_id: u64,
@@ -531,6 +558,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         .await
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn unsubscribe(
         &self,
         consumer_id: u64,
@@ -543,6 +571,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         .await
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn send_message<R: Debug, F>(
         &self,
         msg: Message,
@@ -618,6 +647,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
     }
 
     /// wait for desired message(commandproducersuccess with ready field true)
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn wait_exclusive_access<R: Debug, F>(
         &self,
         key: RequestKey,
@@ -663,6 +693,7 @@ pub struct Connection<Exe: Executor> {
 }
 
 impl<Exe: Executor> Connection<Exe> {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn new(
         url: Url,
         auth_data: Option<Arc<Mutex<Box<dyn crate::authentication::Authentication>>>>,
@@ -754,6 +785,7 @@ impl<Exe: Executor> Connection<Exe> {
         Ok(Connection { id, url, sender })
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn prepare_auth_data(
         auth: Option<Arc<Mutex<Box<dyn crate::authentication::Authentication>>>>,
     ) -> Result<Option<Authentication>, ConnectionError> {
@@ -769,6 +801,7 @@ impl<Exe: Executor> Connection<Exe> {
         }
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn prepare_stream(
         connection_id: Uuid,
         address: SocketAddr,
@@ -881,6 +914,7 @@ impl<Exe: Executor> Connection<Exe> {
         }
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn connect<S>(
         connection_id: Uuid,
         mut stream: S,
@@ -980,29 +1014,35 @@ impl<Exe: Executor> Connection<Exe> {
         Ok(sender)
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn id(&self) -> Uuid {
         self.id
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn error(&self) -> Option<ConnectionError> {
         self.sender.error.remove()
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn is_valid(&self) -> bool {
         !self.sender.error.is_set()
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn url(&self) -> &Url {
         &self.url
     }
 
     /// Chain to send a message, e.g. conn.sender().send_ping()
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn sender(&self) -> &ConnectionSender<Exe> {
         &self.sender
     }
 }
 
 impl<Exe: Executor> Drop for Connection<Exe> {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn drop(&mut self) {
         trace!("dropping connection {} for {}", self.id, self.url);
         if let Some(shutdown) = self.sender.receiver_shutdown.take() {
@@ -1011,6 +1051,7 @@ impl<Exe: Executor> Drop for Connection<Exe> {
     }
 }
 
+#[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
 fn extract_message<T: Debug, F>(message: Message, extract: F) -> Result<T, ConnectionError>
 where
     F: FnOnce(Message) -> Option<T>,
@@ -1043,6 +1084,7 @@ pub(crate) mod messages {
     };
     use crate::producer::{self, ProducerOptions};
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn connect(auth: Option<Authentication>, proxy_to_broker_url: Option<String>) -> Message {
         let (auth_method_name, auth_data) = match auth {
             Some(auth) => (Some(auth.name), Some(auth.data)),
@@ -1066,6 +1108,7 @@ pub(crate) mod messages {
         }
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn ping() -> Message {
         Message {
             command: proto::BaseCommand {
@@ -1077,6 +1120,7 @@ pub(crate) mod messages {
         }
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn pong() -> Message {
         Message {
             command: proto::BaseCommand {
@@ -1088,6 +1132,7 @@ pub(crate) mod messages {
         }
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn create_producer(
         topic: String,
         producer_name: Option<String>,
@@ -1122,6 +1167,7 @@ pub(crate) mod messages {
         }
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn get_topics_of_namespace(
         request_id: u64,
         namespace: String,
@@ -1142,6 +1188,7 @@ pub(crate) mod messages {
         }
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub(crate) fn send(
         producer_id: u64,
         producer_name: String,
@@ -1190,6 +1237,7 @@ pub(crate) mod messages {
         }
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn lookup_topic(topic: String, authoritative: bool, request_id: u64) -> Message {
         Message {
             command: proto::BaseCommand {
@@ -1206,6 +1254,7 @@ pub(crate) mod messages {
         }
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn lookup_partitioned_topic(topic: String, request_id: u64) -> Message {
         Message {
             command: proto::BaseCommand {
@@ -1221,6 +1270,7 @@ pub(crate) mod messages {
         }
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn consumer_stats(request_id: u64, consumer_id: u64) -> Message {
         Message {
             command: proto::BaseCommand {
@@ -1234,6 +1284,8 @@ pub(crate) mod messages {
             payload: None,
         }
     }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn get_last_message_id(consumer_id: u64, request_id: u64) -> Message {
         Message {
             command: proto::BaseCommand {
@@ -1248,6 +1300,7 @@ pub(crate) mod messages {
         }
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn close_producer(producer_id: u64, request_id: u64) -> Message {
         Message {
             command: proto::BaseCommand {
@@ -1262,6 +1315,7 @@ pub(crate) mod messages {
         }
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn subscribe(
         topic: String,
         subscription: String,
@@ -1303,6 +1357,7 @@ pub(crate) mod messages {
         }
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn flow(consumer_id: u64, message_permits: u32) -> Message {
         Message {
             command: proto::BaseCommand {
@@ -1317,6 +1372,7 @@ pub(crate) mod messages {
         }
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn ack(
         consumer_id: u64,
         message_id: Vec<proto::MessageIdData>,
@@ -1343,6 +1399,7 @@ pub(crate) mod messages {
         }
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn redeliver_unacknowleged_messages(
         consumer_id: u64,
         message_ids: Vec<proto::MessageIdData>,
@@ -1363,6 +1420,7 @@ pub(crate) mod messages {
         }
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn close_consumer(consumer_id: u64, request_id: u64) -> Message {
         Message {
             command: proto::BaseCommand {
@@ -1377,6 +1435,7 @@ pub(crate) mod messages {
         }
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn seek(
         consumer_id: u64,
         request_id: u64,
@@ -1398,6 +1457,7 @@ pub(crate) mod messages {
         }
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn unsubscribe(consumer_id: u64, request_id: u64) -> Message {
         Message {
             command: proto::BaseCommand {

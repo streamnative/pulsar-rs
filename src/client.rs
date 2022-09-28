@@ -32,6 +32,7 @@ pub trait DeserializeMessage {
 impl DeserializeMessage for Vec<u8> {
     type Output = Self;
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn deserialize_message(payload: &Payload) -> Self::Output {
         payload.data.to_vec()
     }
@@ -40,6 +41,7 @@ impl DeserializeMessage for Vec<u8> {
 impl DeserializeMessage for String {
     type Output = Result<String, FromUtf8Error>;
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn deserialize_message(payload: &Payload) -> Self::Output {
         String::from_utf8(payload.data.to_vec())
     }
@@ -52,12 +54,14 @@ pub trait SerializeMessage {
 }
 
 impl SerializeMessage for producer::Message {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn serialize_message(input: Self) -> Result<producer::Message, Error> {
         Ok(input)
     }
 }
 
 impl SerializeMessage for () {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn serialize_message(_input: Self) -> Result<producer::Message, Error> {
         Ok(producer::Message {
             ..Default::default()
@@ -66,6 +70,7 @@ impl SerializeMessage for () {
 }
 
 impl<'a> SerializeMessage for &'a [u8] {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn serialize_message(input: Self) -> Result<producer::Message, Error> {
         Ok(producer::Message {
             payload: input.to_vec(),
@@ -75,6 +80,7 @@ impl<'a> SerializeMessage for &'a [u8] {
 }
 
 impl SerializeMessage for Vec<u8> {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn serialize_message(input: Self) -> Result<producer::Message, Error> {
         Ok(producer::Message {
             payload: input,
@@ -84,6 +90,7 @@ impl SerializeMessage for Vec<u8> {
 }
 
 impl SerializeMessage for String {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn serialize_message(input: Self) -> Result<producer::Message, Error> {
         let payload = input.into_bytes();
         Ok(producer::Message {
@@ -94,6 +101,7 @@ impl SerializeMessage for String {
 }
 
 impl<'a> SerializeMessage for &'a String {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn serialize_message(input: Self) -> Result<producer::Message, Error> {
         let payload = input.as_bytes().to_vec();
         Ok(producer::Message {
@@ -104,6 +112,7 @@ impl<'a> SerializeMessage for &'a String {
 }
 
 impl<'a> SerializeMessage for &'a str {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn serialize_message(input: Self) -> Result<producer::Message, Error> {
         let payload = input.as_bytes().to_vec();
         Ok(producer::Message {
@@ -161,6 +170,7 @@ pub struct Pulsar<Exe: Executor> {
 
 impl<Exe: Executor> Pulsar<Exe> {
     /// creates a new client
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub(crate) async fn new<S: Into<String>>(
         url: S,
         auth: Option<Arc<Mutex<Box<dyn crate::authentication::Authentication>>>>,
@@ -234,6 +244,7 @@ impl<Exe: Executor> Pulsar<Exe> {
     /// # Ok(())
     /// # }
     /// ```
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn builder<S: Into<String>>(url: S, executor: Exe) -> PulsarBuilder<Exe> {
         PulsarBuilder {
             url: url.into(),
@@ -263,6 +274,7 @@ impl<Exe: Executor> Pulsar<Exe> {
     /// # Ok(())
     /// # }
     /// ```
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn consumer(&self) -> ConsumerBuilder<Exe> {
         ConsumerBuilder::new(self)
     }
@@ -280,6 +292,7 @@ impl<Exe: Executor> Pulsar<Exe> {
     /// # Ok(())
     /// # }
     /// ```
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn producer(&self) -> ProducerBuilder<Exe> {
         ProducerBuilder::new(self)
     }
@@ -299,6 +312,7 @@ impl<Exe: Executor> Pulsar<Exe> {
     /// # Ok(())
     /// # }
     /// ```
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn reader(&self) -> ConsumerBuilder<Exe> {
         // this makes it exactly the same like the consumer() method though
         ConsumerBuilder::new(self).with_options(
@@ -316,6 +330,7 @@ impl<Exe: Executor> Pulsar<Exe> {
     /// # Ok(())
     /// # }
     /// ```
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn lookup_topic<S: Into<String>>(&self, topic: S) -> Result<BrokerAddress, Error> {
         self.service_discovery
             .lookup_topic(topic)
@@ -331,6 +346,7 @@ impl<Exe: Executor> Pulsar<Exe> {
     /// # Ok(())
     /// # }
     /// ```
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn lookup_partitioned_topic_number<S: Into<String>>(
         &self,
         topic: S,
@@ -351,6 +367,7 @@ impl<Exe: Executor> Pulsar<Exe> {
     /// # Ok(())
     /// # }
     /// ```
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn lookup_partitioned_topic<S: Into<String>>(
         &self,
         topic: S,
@@ -371,6 +388,7 @@ impl<Exe: Executor> Pulsar<Exe> {
     /// # Ok(())
     /// # }
     /// ```
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn get_topics_of_namespace(
         &self,
         namespace: String,
@@ -397,6 +415,7 @@ impl<Exe: Executor> Pulsar<Exe> {
     /// # Ok(())
     /// # }
     /// ```
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn send<S: Into<String>, M: SerializeMessage + Sized>(
         &self,
         topic: S,
@@ -406,6 +425,7 @@ impl<Exe: Executor> Pulsar<Exe> {
         self.send_raw(message, topic).await
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn send_raw<S: Into<String>>(
         &self,
         message: producer::Message,
@@ -437,10 +457,12 @@ pub struct PulsarBuilder<Exe: Executor> {
 
 impl<Exe: Executor> PulsarBuilder<Exe> {
     /// Authentication parameters (JWT, Biscuit, etc)
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_auth(self, auth: Authentication) -> Self {
         self.with_auth_provider(Box::new(auth))
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_auth_provider(
         mut self,
         auth: Box<dyn crate::authentication::Authentication>,
@@ -450,6 +472,7 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
     }
 
     /// Exponential back off parameters for automatic reconnection
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_connection_retry_options(
         mut self,
         connection_retry_options: ConnectionRetryOptions,
@@ -459,6 +482,7 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
     }
 
     /// Retry parameters for Pulsar operations
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_operation_retry_options(
         mut self,
         operation_retry_options: OperationRetryOptions,
@@ -468,6 +492,7 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
     }
 
     /// add a custom certificate chain to authenticate the server in TLS connections
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_certificate_chain(mut self, certificate_chain: Vec<u8>) -> Self {
         match &mut self.tls_options {
             Some(tls) => tls.certificate_chain = Some(certificate_chain),
@@ -481,6 +506,7 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
         self
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_allow_insecure_connection(mut self, allow: bool) -> Self {
         match &mut self.tls_options {
             Some(tls) => tls.allow_insecure_connection = allow,
@@ -494,6 +520,7 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
         self
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_tls_hostname_verification_enabled(mut self, enabled: bool) -> Self {
         match &mut self.tls_options {
             Some(tls) => tls.tls_hostname_verification_enabled = enabled,
@@ -508,6 +535,7 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
     }
 
     /// add a custom certificate chain from a file to authenticate the server in TLS connections
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_certificate_chain_file<P: AsRef<std::path::Path>>(
         self,
         path: P,
@@ -522,6 +550,7 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
     }
 
     /// creates the Pulsar client and connects it
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn build(self) -> Result<Pulsar<Exe>, Error> {
         let PulsarBuilder {
             url,
@@ -550,6 +579,7 @@ struct SendMessage {
     resolver: oneshot::Sender<Result<CommandSendReceipt, Error>>,
 }
 
+#[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
 async fn run_producer<Exe: Executor>(
     client: Pulsar<Exe>,
     mut messages: mpsc::UnboundedReceiver<SendMessage>,
