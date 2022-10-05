@@ -15,6 +15,7 @@ Features:
 - automatic reconnection with exponential back off
 - message batching
 - compression with LZ4, zlib, zstd or Snappy (can be deactivated with Cargo features)
+- telemetry using [tracing](https://github.com/tokio-rs/tracing) crate (can be activated with Cargo features)
 
 ### Getting Started
 Cargo.toml

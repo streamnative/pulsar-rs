@@ -16,8 +16,9 @@ pub enum ExecutorKind {
 /// Wrapper trait abstracting the Tokio and async-std executors
 pub trait Executor: Clone + Send + Sync + 'static {
     /// spawns a new task
-    #[allow(clippy::clippy::result_unit_err)]
+    #[allow(clippy::result_unit_err)]
     fn spawn(&self, f: Pin<Box<dyn Future<Output = ()> + Send>>) -> Result<(), ()>;
+
     /// spawns a new blocking task
     fn spawn_blocking<F, Res>(&self, f: F) -> JoinHandle<Res>
     where
@@ -26,6 +27,7 @@ pub trait Executor: Clone + Send + Sync + 'static {
 
     /// returns a Stream that will produce at regular intervals
     fn interval(&self, duration: std::time::Duration) -> Interval;
+
     /// waits for a configurable time
     fn delay(&self, duration: std::time::Duration) -> Delay;
 
@@ -43,11 +45,13 @@ pub struct TokioExecutor;
 
 #[cfg(feature = "tokio-runtime")]
 impl Executor for TokioExecutor {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn spawn(&self, f: Pin<Box<dyn Future<Output = ()> + Send>>) -> Result<(), ()> {
         tokio::task::spawn(f);
         Ok(())
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn spawn_blocking<F, Res>(&self, f: F) -> JoinHandle<Res>
     where
         F: FnOnce() -> Res + Send + 'static,
@@ -56,14 +60,17 @@ impl Executor for TokioExecutor {
         JoinHandle::Tokio(tokio::task::spawn_blocking(f))
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn interval(&self, duration: std::time::Duration) -> Interval {
         Interval::Tokio(tokio::time::interval(duration))
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn delay(&self, duration: std::time::Duration) -> Delay {
         Delay::Tokio(tokio::time::sleep(duration))
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn kind(&self) -> ExecutorKind {
         ExecutorKind::Tokio
     }
@@ -76,11 +83,13 @@ pub struct AsyncStdExecutor;
 
 #[cfg(feature = "async-std-runtime")]
 impl Executor for AsyncStdExecutor {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn spawn(&self, f: Pin<Box<dyn Future<Output = ()> + Send>>) -> Result<(), ()> {
         async_std::task::spawn(f);
         Ok(())
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn spawn_blocking<F, Res>(&self, f: F) -> JoinHandle<Res>
     where
         F: FnOnce() -> Res + Send + 'static,
@@ -89,25 +98,30 @@ impl Executor for AsyncStdExecutor {
         JoinHandle::AsyncStd(async_std::task::spawn_blocking(f))
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn interval(&self, duration: std::time::Duration) -> Interval {
         Interval::AsyncStd(async_std::stream::interval(duration))
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn delay(&self, duration: std::time::Duration) -> Delay {
         use async_std::prelude::FutureExt;
         Delay::AsyncStd(Box::pin(async_std::future::ready(()).delay(duration)))
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn kind(&self) -> ExecutorKind {
         ExecutorKind::AsyncStd
     }
 }
 
 impl<Exe: Executor> Executor for Arc<Exe> {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn spawn(&self, f: Pin<Box<dyn Future<Output = ()> + Send>>) -> Result<(), ()> {
         self.deref().spawn(f)
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn spawn_blocking<F, Res>(&self, f: F) -> JoinHandle<Res>
     where
         F: FnOnce() -> Res + Send + 'static,
@@ -116,14 +130,17 @@ impl<Exe: Executor> Executor for Arc<Exe> {
         self.deref().spawn_blocking(f)
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn interval(&self, duration: std::time::Duration) -> Interval {
         self.deref().interval(duration)
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn delay(&self, duration: std::time::Duration) -> Delay {
         self.deref().delay(duration)
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn kind(&self) -> ExecutorKind {
         self.deref().kind()
     }
@@ -146,6 +163,7 @@ use std::task::Poll;
 impl<T> Future for JoinHandle<T> {
     type Output = Option<T>;
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context) -> std::task::Poll<Self::Output> {
         match self.get_mut() {
             #[cfg(feature = "tokio-runtime")]
@@ -181,6 +199,7 @@ pub enum Interval {
 impl Stream for Interval {
     type Item = ();
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn poll_next(
         self: Pin<&mut Self>,
         cx: &mut std::task::Context,
@@ -219,6 +238,7 @@ pub enum Delay {
 impl Future for Delay {
     type Output = ();
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context) -> std::task::Poll<Self::Output> {
         unsafe {
             match Pin::get_unchecked_mut(self) {

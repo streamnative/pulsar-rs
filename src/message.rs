@@ -33,6 +33,7 @@ pub struct Message {
 
 impl Message {
     /// returns the message's RequestKey if present
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn request_key(&self) -> Option<RequestKey> {
         match &self.command {
             BaseCommand {
@@ -222,6 +223,7 @@ pub struct Codec;
 impl tokio_util::codec::Encoder<Message> for Codec {
     type Error = ConnectionError;
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn encode(&mut self, item: Message, dst: &mut BytesMut) -> Result<(), ConnectionError> {
         let command_size = item.command.encoded_len();
         let metadata_size = item
@@ -271,6 +273,7 @@ impl tokio_util::codec::Decoder for Codec {
     type Item = Message;
     type Error = ConnectionError;
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Message>, ConnectionError> {
         trace!("Decoder received {} bytes", src.len());
         if src.len() >= 4 {
@@ -326,6 +329,7 @@ impl asynchronous_codec::Encoder for Codec {
     type Item = Message;
     type Error = ConnectionError;
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn encode(&mut self, item: Message, dst: &mut BytesMut) -> Result<(), ConnectionError> {
         let command_size = item.command.encoded_len();
         let metadata_size = item
@@ -375,6 +379,7 @@ impl asynchronous_codec::Decoder for Codec {
     type Item = Message;
     type Error = ConnectionError;
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Message>, ConnectionError> {
         trace!("Decoder received {} bytes", src.len());
         if src.len() >= 4 {
@@ -442,6 +447,7 @@ struct CommandFrame<'a> {
     command: &'a [u8],
 }
 
+#[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
 fn command_frame(i: &[u8]) -> IResult<&[u8], CommandFrame> {
     let (i, total_size) = be_u32(i)?;
     let (i, command_size) = be_u32(i)?;
@@ -467,6 +473,7 @@ struct PayloadFrame<'a> {
     metadata: &'a [u8],
 }
 
+#[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
 fn payload_frame(i: &[u8]) -> IResult<&[u8], PayloadFrame> {
     let (i, magic_number) = be_u16(i)?;
     let (i, checksum) = be_u32(i)?;
@@ -489,6 +496,7 @@ pub(crate) struct BatchedMessage {
     pub payload: Vec<u8>,
 }
 
+#[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
 fn batched_message(i: &[u8]) -> IResult<&[u8], BatchedMessage> {
     let (i, metadata_size) = be_u32(i)?;
     let (i, metadata) = verify(
@@ -508,6 +516,7 @@ fn batched_message(i: &[u8]) -> IResult<&[u8], BatchedMessage> {
     ))
 }
 
+#[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
 pub(crate) fn parse_batched_message(
     count: u32,
     payload: &[u8],
@@ -520,6 +529,7 @@ pub(crate) fn parse_batched_message(
 }
 
 impl BatchedMessage {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub(crate) fn serialize(&self, w: &mut Vec<u8>) {
         w.put_u32(self.metadata.encoded_len() as u32);
         let _ = self.metadata.encode(w);
@@ -527,28 +537,30 @@ impl BatchedMessage {
     }
 }
 
-#[rustfmt::skip]
 pub mod proto {
     include!(concat!(env!("OUT_DIR"), "/pulsar.proto.rs"));
 
     //trait implementations used in Consumer::unacked_messages
     impl std::cmp::Eq for MessageIdData {}
 
+    #[allow(clippy::derive_hash_xor_eq)]
     impl std::hash::Hash for MessageIdData {
-         fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-             self.ledger_id.hash(state);
-             self.entry_id.hash(state);
-             self.partition.hash(state);
-             self.batch_index.hash(state);
-             self.ack_set.hash(state);
-             self.batch_size.hash(state);
-         }
+        #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+        fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+            self.ledger_id.hash(state);
+            self.entry_id.hash(state);
+            self.partition.hash(state);
+            self.batch_index.hash(state);
+            self.ack_set.hash(state);
+            self.batch_size.hash(state);
+        }
     }
 }
 
 impl TryFrom<i32> for proto::base_command::Type {
     type Error = ();
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn try_from(value: i32) -> Result<Self, ()> {
         match value {
             2 => Ok(proto::base_command::Type::Connect),
@@ -591,12 +603,14 @@ impl TryFrom<i32> for proto::base_command::Type {
 }
 
 impl From<prost::EncodeError> for ConnectionError {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn from(e: prost::EncodeError) -> Self {
         ConnectionError::Encoding(e.to_string())
     }
 }
 
 impl From<prost::DecodeError> for ConnectionError {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn from(e: prost::DecodeError) -> Self {
         ConnectionError::Decoding(e.to_string())
     }
