@@ -779,6 +779,11 @@ impl<T: DeserializeMessage, Exe: Executor> Stream for TopicConsumer<T, Exe> {
     }
 }
 
+enum EngineEvent<Exe: Executor> {
+    Message(RawMessage),
+    EngineMessage(EngineMessage<Exe>),
+}
+
 struct ConsumerEngine<Exe: Executor> {
     client: Pulsar<Exe>,
     connection: Arc<Connection<Exe>>,
@@ -790,6 +795,8 @@ struct ConsumerEngine<Exe: Executor> {
     tx: mpsc::Sender<Result<(proto::MessageIdData, Payload), Error>>,
     messages_rx: Option<mpsc::UnboundedReceiver<RawMessage>>,
     engine_rx: Option<mpsc::UnboundedReceiver<EngineMessage<Exe>>>,
+    event_rx: mpsc::UnboundedReceiver<EngineEvent<Exe>>,
+    event_tx: mpsc::UnboundedSender<EngineEvent<Exe>>,
     batch_size: u32,
     remaining_messages: u32,
     unacked_message_redelivery_delay: Option<Duration>,
@@ -825,6 +832,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         options: ConsumerOptions,
         _drop_signal: oneshot::Sender<()>,
     ) -> ConsumerEngine<Exe> {
+        let (event_tx, event_rx) = mpsc::unbounded();
         ConsumerEngine {
             client,
             connection,
@@ -836,6 +844,8 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             tx,
             messages_rx: Some(messages_rx),
             engine_rx: Some(engine_rx),
+            event_rx,
+            event_tx,
             batch_size,
             remaining_messages: batch_size,
             unacked_message_redelivery_delay,
