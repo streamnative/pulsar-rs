@@ -38,6 +38,7 @@ pub struct ConnectionRetryOptions {
 }
 
 impl std::default::Default for ConnectionRetryOptions {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn default() -> Self {
         ConnectionRetryOptions {
             min_backoff: Duration::from_millis(10),
@@ -61,6 +62,7 @@ pub struct OperationRetryOptions {
 }
 
 impl std::default::Default for OperationRetryOptions {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn default() -> Self {
         OperationRetryOptions {
             operation_timeout: Duration::from_secs(30),
@@ -88,6 +90,7 @@ pub struct TlsOptions {
 }
 
 impl Default for TlsOptions {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn default() -> Self {
         Self {
             certificate_chain: None,
@@ -120,6 +123,7 @@ pub struct ConnectionManager<Exe: Executor> {
 }
 
 impl<Exe: Executor> ConnectionManager<Exe> {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn new(
         url: String,
         auth: Option<Arc<Mutex<Box<dyn crate::authentication::Authentication>>>>,
@@ -199,6 +203,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
     /// get an active Connection from a broker address
     ///
     /// creates a connection if not available
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn get_base_connection(&self) -> Result<Arc<Connection<Exe>>, ConnectionError> {
         let broker_address = self.get_base_address();
         self.get_connection(&broker_address).await
@@ -207,6 +212,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
     /// get an active Connection from a broker address
     ///
     /// creates a connection if not available
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn get_connection(
         &self,
         broker: &BrokerAddress,
@@ -239,6 +245,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
         }
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn connect_inner(
         &self,
         broker: &BrokerAddress,
@@ -357,6 +364,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
         Ok(c)
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn connect(
         &self,
         broker: BrokerAddress,
@@ -461,6 +469,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
     }
 
     /// tests that all connections are valid and still used
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub(crate) async fn check_connections(&self) {
         trace!("cleaning invalid or unused connections");
         self.connections

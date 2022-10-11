@@ -29,6 +29,7 @@ pub enum State<T: DeserializeMessage> {
 impl<T: DeserializeMessage + 'static, Exe: Executor> Stream for Reader<T, Exe> {
     type Item = Result<Message<T>, Error>;
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
         match this.state.take().unwrap() {
@@ -88,54 +89,67 @@ impl<T: DeserializeMessage, Exe: Executor> Reader<T, Exe> {
     */
 
     /// test that the connections to the Pulsar brokers are still valid
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn check_connection(&mut self) -> Result<(), Error> {
         self.consumer.check_connection().await
     }
 
     /// returns topic this reader is subscribed on
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn topic(&self) -> String {
         self.consumer.topic()
     }
 
     /// returns a list of broker URLs this reader is connected to
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn connections(&mut self) -> Result<Url, Error> {
         Ok(self.consumer.connection().await?.url().clone())
     }
+
     /// returns the consumer's configuration options
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn options(&self) -> &ConsumerOptions {
         &self.consumer.config.options
     }
 
     // is this necessary?
     /// returns the consumer's dead letter policy options
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn dead_letter_policy(&self) -> Option<&DeadLetterPolicy> {
         self.consumer.dead_letter_policy.as_ref()
     }
 
     /// returns the readers's subscription name
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn subscription(&self) -> &str {
         &self.consumer.config.subscription
     }
+
     /// returns the reader's subscription type
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn sub_type(&self) -> SubType {
         self.consumer.config.sub_type
     }
 
     /// returns the reader's batch size
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn batch_size(&self) -> Option<u32> {
         self.consumer.config.batch_size
     }
 
     /// returns the reader's name
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn reader_name(&self) -> Option<&str> {
         self.consumer.config.consumer_name.as_deref()
     }
 
     /// returns the reader's id
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn reader_id(&self) -> u64 {
         self.consumer.consumer_id
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn seek(
         &mut self,
         message_id: Option<MessageIdData>,
@@ -145,15 +159,18 @@ impl<T: DeserializeMessage, Exe: Executor> Reader<T, Exe> {
     }
 
     /// returns the date of the last message reception
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn last_message_received(&self) -> Option<DateTime<Utc>> {
         self.consumer.last_message_received()
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn get_last_message_id(&mut self) -> Result<MessageIdData, Error> {
         self.consumer.get_last_message_id().await
     }
 
     /// returns the current number of messages received
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn messages_received(&self) -> u64 {
         self.consumer.messages_received()
     }

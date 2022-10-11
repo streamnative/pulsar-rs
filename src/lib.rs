@@ -145,6 +145,7 @@
 //!     Ok(())
 //! }
 //! ```
+#![recursion_limit = "256"]
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::large_enum_variant)]
 extern crate futures;
@@ -176,6 +177,7 @@ pub use message::{
 };
 pub use producer::{MultiTopicProducer, Producer, ProducerOptions};
 
+pub mod authentication;
 mod client;
 mod connection;
 mod connection_manager;
@@ -185,7 +187,6 @@ pub mod executor;
 pub mod message;
 pub mod producer;
 pub mod reader;
-pub mod authentication;
 mod service_discovery;
 
 #[cfg(test)]
@@ -306,8 +307,8 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "tokio-runtime")]
     async fn round_trip() {
-        let _ = log::set_logger(&TEST_LOGGER);
-        let _ = log::set_max_level(LevelFilter::Debug);
+        let _result = log::set_logger(&TEST_LOGGER);
+        log::set_max_level(LevelFilter::Debug);
 
         let addr = "pulsar://127.0.0.1:6650";
         let pulsar: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await.unwrap();
@@ -371,8 +372,8 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "tokio-runtime")]
     async fn unsized_data() {
-        let _ = log::set_logger(&TEST_LOGGER);
-        let _ = log::set_max_level(LevelFilter::Debug);
+        let _result = log::set_logger(&TEST_LOGGER);
+        log::set_max_level(LevelFilter::Debug);
 
         let addr = "pulsar://127.0.0.1:6650";
         let test_id: u16 = rand::random();
@@ -457,8 +458,8 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "tokio-runtime")]
     async fn redelivery() {
-        let _ = log::set_logger(&TEST_LOGGER);
-        let _ = log::set_max_level(LevelFilter::Debug);
+        let _result = log::set_logger(&TEST_LOGGER);
+        log::set_max_level(LevelFilter::Debug);
 
         let addr = "pulsar://127.0.0.1:6650";
         let topic = format!("test_redelivery_{}", rand::random::<u16>());
@@ -503,8 +504,8 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "tokio-runtime")]
     async fn batching() {
-        let _ = log::set_logger(&TEST_LOGGER);
-        let _ = log::set_max_level(LevelFilter::Debug);
+        let _result = log::set_logger(&TEST_LOGGER);
+        log::set_max_level(LevelFilter::Debug);
 
         let addr = "pulsar://127.0.0.1:6650";
         let topic = format!("test_batching_{}", rand::random::<u16>());

@@ -8,7 +8,6 @@ use crate::message::proto::{
 use futures::{future::try_join_all, FutureExt};
 use std::sync::Arc;
 use url::Url;
-use crate::error::ServiceDiscoveryError::NotFound;
 
 /// Look up broker addresses for topics and partitioned topics
 ///
@@ -21,11 +20,13 @@ pub struct ServiceDiscovery<Exe: Executor> {
 }
 
 impl<Exe: Executor> ServiceDiscovery<Exe> {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_manager(manager: Arc<ConnectionManager<Exe>>) -> Self {
         ServiceDiscovery { manager }
     }
 
     /// get the broker address for a topic
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn lookup_topic<S: Into<String>>(
         &self,
         topic: S,
@@ -165,6 +166,7 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
     }
 
     /// get the number of partitions for a partitioned topic
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn lookup_partitioned_topic_number<S: Into<String>>(
         &self,
         topic: S,
@@ -243,6 +245,7 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
 
     /// Lookup a topic, returning a list of the partitions (if partitioned) and addresses
     /// associated with that topic.
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn lookup_partitioned_topic<S: Into<String>>(
         &self,
         topic: S,
@@ -276,6 +279,7 @@ struct LookupResponse {
 }
 
 /// extracts information from a lookup response
+#[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
 fn convert_lookup_response(
     response: &CommandLookupTopicResponse,
 ) -> Result<LookupResponse, ServiceDiscoveryError> {
@@ -285,7 +289,7 @@ fn convert_lookup_response(
         response.response == Some(command_lookup_topic_response::LookupType::Redirect as i32);
 
     let broker_url = match response.broker_service_url.as_ref() {
-        Some(u) => Some(
+        Some(_u) => Some(
             Url::parse(&response.broker_service_url.clone().unwrap()).map_err(|e| {
                 error!("error parsing URL: {:?}", e);
                 ServiceDiscoveryError::NotFound
