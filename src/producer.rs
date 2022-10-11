@@ -1024,11 +1024,21 @@ impl<Exe: Executor> TopicProducer<Exe> {
         // drop_receiver will return, and we can close the producer
         let (_drop_signal, drop_receiver) = oneshot::channel::<()>();
         let batch = batch_size.map(Batch::new).map(Mutex::new);
-        let conn = self.connection.clone();
+        let conn = Arc::downgrade(&self.connection);
+
         let producer_id = self.id;
         let _ = self.client.executor.spawn(Box::pin(async move {
             let _res = drop_receiver.await;
-            let _ = conn.sender().close_producer(producer_id).await;
+
+            match conn.upgrade() {
+                None => {
+                    debug!("Connection already dropped, no weak reference remaining")
+                }
+                Some(connection) => {
+                    debug!("Closing producers of connection {}", connection.id());
+                    let _ = connection.sender().close_producer(producer_id).await;
+                }
+            }
         }));
 
         self.batch = batch;
