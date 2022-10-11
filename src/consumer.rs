@@ -1326,6 +1326,17 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             topic = &self.topic
         )
     }
+
+    #[cfg(feature = "async-std")]
+    async fn timeout<F: Future<Output=O>, O>(fut: F, dur: Duration) -> Result<O, async_std::future::TimeoutError> {
+        use async_std::prelude::FutureExt;
+        fut.timeout(dur).await
+    }
+
+    #[cfg(all(not(feature = "async-std"), feature = "tokio"))]
+    async fn timeout<F: Future<Output=O>, O>(fut: F, dur: Duration) -> Result<O, tokio::time::error::Elapsed> {
+        tokio::time::timeout_at(tokio::time::Instant::now() + dur, fut).await
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
