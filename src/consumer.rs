@@ -856,6 +856,23 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         }
     }
 
+    fn register_source<E, M>(&self, mut rx: mpsc::UnboundedReceiver<E>, mapper: M) -> Result<(), ()>
+        where E: Send + 'static,
+              M: Fn(E) -> EngineEvent<Exe> + Send + Sync + 'static,
+    {
+        let mut event_tx = self.event_tx.clone();
+
+        self.client.executor.spawn(Box::pin(async move {
+            while let Some(msg) = rx.next().await {
+                let r = event_tx.send(mapper(msg)).await;
+                if let Err(err) = r {
+                    log::error!("Error sending event to channel - {err}");
+                }
+            }
+            log::warn!("rx terminated");
+        }))
+    }
+
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn engine(&mut self) -> Result<(), Error> {
         debug!("starting the consumer engine for topic {}", self.topic);
