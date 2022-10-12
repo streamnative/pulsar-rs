@@ -13,8 +13,6 @@ jobs:
       matrix:
         pulsar-version: [ 2.8.4.1, 2.9.3.11, 2.10.1.8 ]
     steps:
-      - name: Install protocol buffer compiler
-        uses: arduino/setup-protoc@v1
       - name: Start Pulsar Standalone Container
         run: docker run --name pulsar -p 6650:6650 -p 8080:8080 -d -e GITHUB_ACTIONS=true -e CI=true streamnative/pulsar:${{ matrix.pulsar-version }} /pulsar/bin/pulsar standalone
       - uses: actions/checkout@v3
