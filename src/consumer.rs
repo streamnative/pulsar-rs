@@ -780,8 +780,8 @@ impl<T: DeserializeMessage, Exe: Executor> Stream for TopicConsumer<T, Exe> {
 }
 
 enum EngineEvent<Exe: Executor> {
-    Message(RawMessage),
-    EngineMessage(EngineMessage<Exe>),
+    Message(Option<RawMessage>),
+    EngineMessage(Option<EngineMessage<Exe>>),
 }
 
 struct ConsumerEngine<Exe: Executor> {
@@ -858,16 +858,20 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
 
     fn register_source<E, M>(&self, mut rx: mpsc::UnboundedReceiver<E>, mapper: M) -> Result<(), ()>
         where E: Send + 'static,
-              M: Fn(E) -> EngineEvent<Exe> + Send + Sync + 'static,
+              M: Fn(Option<E>) -> EngineEvent<Exe> + Send + Sync + 'static,
     {
         let mut event_tx = self.event_tx.clone();
 
         self.client.executor.spawn(Box::pin(async move {
             while let Some(msg) = rx.next().await {
-                let r = event_tx.send(mapper(msg)).await;
+                let r = event_tx.send(mapper(Some(msg))).await;
                 if let Err(err) = r {
                     log::error!("Error sending event to channel - {err}");
                 }
+            }
+            let send_end_res = event_tx.send(mapper(None)).await;
+            if let Err(err) = send_end_res {
+                log::error!("Error sending end event to channel - {err}");
             }
             log::warn!("rx terminated");
         }))
@@ -916,13 +920,13 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             match Self::timeout(self.event_rx.next(), Duration::from_secs(1)).await {
                 Err(_timeout) => {}
                 Ok(Some(EngineEvent::Message(msg))) => {
-                    let out = self.handle_message_opt(Some(msg)).await;
+                    let out = self.handle_message_opt(msg).await;
                     if let Some(res) = out {
                         return res;
                     }
                 }
                 Ok(Some(EngineEvent::EngineMessage(msg))) => {
-                    let continue_loop = self.handle_ack_opt(Some(msg));
+                    let continue_loop = self.handle_ack_opt(msg);
                     if !continue_loop {
                         return Ok(());
                     }
