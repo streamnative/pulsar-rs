@@ -11,8 +11,8 @@ use futures::channel::mpsc::unbounded;
 use futures::task::{Context, Poll};
 use futures::{
     channel::{mpsc, oneshot},
-    future::{select, try_join_all, Either},
-    pin_mut, Future, FutureExt, SinkExt, Stream, StreamExt,
+    future::try_join_all,
+    Future, FutureExt, SinkExt, Stream, StreamExt,
 };
 use regex::Regex;
 
@@ -876,13 +876,23 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn engine(&mut self) -> Result<(), Error> {
         debug!("starting the consumer engine for topic {}", self.topic);
-        let mut messages_or_ack_f = None;
+
         loop {
             if !self.connection.is_valid() {
                 if let Some(err) = self.connection.error() {
                     error!("Consumer: connection {} is not valid: {:?}", self.connection.id(), err);
                     self.reconnect().await?;
                 }
+            }
+
+            if let Some(messages_rx) = self.messages_rx.take() {
+                self.register_source(messages_rx, |msg| EngineEvent::Message(msg))
+                    .map_err(|_| Error::Custom(String::from("Error registering messages_rx source")))?;
+            }
+
+            if let Some(engine_rx) = self.engine_rx.take() {
+                self.register_source(engine_rx, |msg| EngineEvent::EngineMessage(msg))
+                    .map_err(|_| Error::Custom(String::from("Error registering engine_rx source")))?;
             }
 
             if self.remaining_messages < self.batch_size / 2 {
@@ -903,45 +913,38 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 self.remaining_messages = self.batch_size;
             }
 
-            let mut f = match messages_or_ack_f.take() {
-                None => {
-                    // we need these complicated steps to select on two streams of different types,
-                    // while being able to store it in the ConsumerEngine object (biggest issue),
-                    // and replacing messages_rx when we reconnect, and considering that engine_rx is
-                    // not clonable.
-                    // Please, someone find a better solution
-                    let messages_f = self.messages_rx.take().unwrap().into_future();
-                    let ack_f = self.engine_rx.take().unwrap().into_future();
-                    select(messages_f, ack_f)
+            match Self::timeout(self.event_rx.next(), Duration::from_secs(1)).await {
+                Err(_timeout) => {}
+                Ok(Some(EngineEvent::Message(msg))) => {
+                    let out = self.handle_message_opt(Some(msg)).await;
+                    if let Some(res) = out {
+                        return res;
+                    }
                 }
-                Some(f) => f,
-            };
-
-            // we want to wake up regularly to check if the connection is still valid:
-            // if the heartbeat failed, the connection.is_valid() call at the beginning
-            // of the loop should fail, but to get there we must stop waiting on
-            // messages_f and ack_f
-            let delay_f = self.client.executor.delay(Duration::from_secs(1));
-            let f_pin = std::pin::Pin::new(&mut f);
-            pin_mut!(delay_f);
-
-            let f = match select(f_pin, delay_f).await {
-                Either::Left((res, _)) => res,
-                Either::Right((_, _f)) => {
-                    messages_or_ack_f = Some(f);
-                    continue;
+                Ok(Some(EngineEvent::EngineMessage(msg))) => {
+                    let continue_loop = self.handle_ack_opt(Some(msg));
+                    if !continue_loop {
+                        return Ok(());
+                    }
                 }
-            };
+                Ok(None) => {
+                    log::warn!("Event stream is terminated");
+                    return Ok(());
+                }
+            }
+        }
+                }
 
-            match f {
-                Either::Left(((message_opt, messages_rx), engine_rx)) => {
-                    self.messages_rx = Some(messages_rx);
-                    self.engine_rx = engine_rx.into_inner();
+
+    async fn handle_message_opt(&mut self, message_opt: Option<crate::message::Message>) -> Option<Result<(), Error>> {
                     match message_opt {
                         None => {
                             error!("Consumer: messages::next: returning Disconnected");
-                            self.reconnect().await?;
-                            continue;
+                if let Err(err) = self.reconnect().await {
+                    Some(Err(err))
+                } else {
+                    None
+                }
                             //return Err(Error::Consumer(ConsumerError::Connection(ConnectionError::Disconnected)).into());
                         }
                         Some(message) => {
@@ -954,32 +957,35 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
 
                             match self.process_message(message).await {
                                 // Continue
-                                Ok(true) => {}
+                    Ok(true) => {
+                        None
+                    }
                                 // End of Topic
                                 Ok(false) => {
-                                    return Ok(());
+                        Some(Ok(()))
                                 }
                                 Err(e) => {
                                     if let Err(e) = self.tx.send(Err(e)).await {
                                         error!("cannot send a message from the consumer engine to the consumer({}), stopping the engine", self.id);
-                                        return Err(Error::Consumer(e.into()));
+                            Some(Err(Error::Consumer(e.into())))
+                        } else {
+                            None
                                     }
                                 }
                             }
                         }
                     }
                 }
-                Either::Right(((ack_opt, engine_rx), messages_rx)) => {
-                    self.messages_rx = messages_rx.into_inner();
-                    self.engine_rx = Some(engine_rx);
 
+    fn handle_ack_opt(&mut self, ack_opt: Option<EngineMessage<Exe>>) -> bool {
                     match ack_opt {
                         None => {
                             trace!("ack channel was closed");
-                            return Ok(());
+                false
                         }
                         Some(EngineMessage::Ack(message_id, cumulative)) => {
                             self.ack(message_id, cumulative);
+                true
                         }
                         Some(EngineMessage::Nack(message_id)) => {
                             if let Err(e) =
@@ -993,6 +999,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                                     message_id, e
                                 );
                             }
+                true
                         }
                         Some(EngineMessage::UnackedRedelivery) => {
                             let mut h = HashSet::new();
@@ -1019,6 +1026,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                                     }
                                 }
                             }
+                true
                         }
                         Some(EngineMessage::GetConnection(sender)) => {
                             let _ = sender.send(self.connection.clone()).map_err(|_| {
@@ -1027,10 +1035,8 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                                      channel before receiving"
                                 );
                             });
+                true
                         }
-                    }
-                }
-            };
         }
     }
 
