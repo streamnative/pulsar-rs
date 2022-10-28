@@ -11,8 +11,8 @@ use futures::channel::mpsc::unbounded;
 use futures::task::{Context, Poll};
 use futures::{
     channel::{mpsc, oneshot},
-    future::{select, try_join_all, Either},
-    pin_mut, Future, FutureExt, SinkExt, Stream, StreamExt,
+    future::try_join_all,
+    Future, FutureExt, SinkExt, Stream, StreamExt,
 };
 use regex::Regex;
 
@@ -779,6 +779,11 @@ impl<T: DeserializeMessage, Exe: Executor> Stream for TopicConsumer<T, Exe> {
     }
 }
 
+enum EngineEvent<Exe: Executor> {
+    Message(Option<RawMessage>),
+    EngineMessage(Option<EngineMessage<Exe>>),
+}
+
 struct ConsumerEngine<Exe: Executor> {
     client: Pulsar<Exe>,
     connection: Arc<Connection<Exe>>,
@@ -790,6 +795,8 @@ struct ConsumerEngine<Exe: Executor> {
     tx: mpsc::Sender<Result<(proto::MessageIdData, Payload), Error>>,
     messages_rx: Option<mpsc::UnboundedReceiver<RawMessage>>,
     engine_rx: Option<mpsc::UnboundedReceiver<EngineMessage<Exe>>>,
+    event_rx: mpsc::UnboundedReceiver<EngineEvent<Exe>>,
+    event_tx: mpsc::UnboundedSender<EngineEvent<Exe>>,
     batch_size: u32,
     remaining_messages: u32,
     unacked_message_redelivery_delay: Option<Duration>,
@@ -825,6 +832,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         options: ConsumerOptions,
         _drop_signal: oneshot::Sender<()>,
     ) -> ConsumerEngine<Exe> {
+        let (event_tx, event_rx) = mpsc::unbounded();
         ConsumerEngine {
             client,
             connection,
@@ -836,6 +844,8 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             tx,
             messages_rx: Some(messages_rx),
             engine_rx: Some(engine_rx),
+            event_rx,
+            event_tx,
             batch_size,
             remaining_messages: batch_size,
             unacked_message_redelivery_delay,
@@ -846,16 +856,47 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         }
     }
 
+    fn register_source<E, M>(&self, mut rx: mpsc::UnboundedReceiver<E>, mapper: M) -> Result<(), ()>
+        where E: Send + 'static,
+              M: Fn(Option<E>) -> EngineEvent<Exe> + Send + Sync + 'static,
+    {
+        let mut event_tx = self.event_tx.clone();
+
+        self.client.executor.spawn(Box::pin(async move {
+            while let Some(msg) = rx.next().await {
+                let r = event_tx.send(mapper(Some(msg))).await;
+                if let Err(err) = r {
+                    log::error!("Error sending event to channel - {err}");
+                }
+            }
+            let send_end_res = event_tx.send(mapper(None)).await;
+            if let Err(err) = send_end_res {
+                log::error!("Error sending end event to channel - {err}");
+            }
+            log::warn!("rx terminated");
+        }))
+    }
+
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn engine(&mut self) -> Result<(), Error> {
         debug!("starting the consumer engine for topic {}", self.topic);
-        let mut messages_or_ack_f = None;
+
         loop {
             if !self.connection.is_valid() {
                 if let Some(err) = self.connection.error() {
                     error!("Consumer: connection {} is not valid: {:?}", self.connection.id(), err);
                     self.reconnect().await?;
                 }
+            }
+
+            if let Some(messages_rx) = self.messages_rx.take() {
+                self.register_source(messages_rx, |msg| EngineEvent::Message(msg))
+                    .map_err(|_| Error::Custom(String::from("Error registering messages_rx source")))?;
+            }
+
+            if let Some(engine_rx) = self.engine_rx.take() {
+                self.register_source(engine_rx, |msg| EngineEvent::EngineMessage(msg))
+                    .map_err(|_| Error::Custom(String::from("Error registering engine_rx source")))?;
             }
 
             if self.remaining_messages < self.batch_size / 2 {
@@ -876,45 +917,38 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 self.remaining_messages = self.batch_size;
             }
 
-            let mut f = match messages_or_ack_f.take() {
-                None => {
-                    // we need these complicated steps to select on two streams of different types,
-                    // while being able to store it in the ConsumerEngine object (biggest issue),
-                    // and replacing messages_rx when we reconnect, and considering that engine_rx is
-                    // not clonable.
-                    // Please, someone find a better solution
-                    let messages_f = self.messages_rx.take().unwrap().into_future();
-                    let ack_f = self.engine_rx.take().unwrap().into_future();
-                    select(messages_f, ack_f)
+            match Self::timeout(self.event_rx.next(), Duration::from_secs(1)).await {
+                Err(_timeout) => {}
+                Ok(Some(EngineEvent::Message(msg))) => {
+                    let out = self.handle_message_opt(msg).await;
+                    if let Some(res) = out {
+                        return res;
+                    }
                 }
-                Some(f) => f,
-            };
-
-            // we want to wake up regularly to check if the connection is still valid:
-            // if the heartbeat failed, the connection.is_valid() call at the beginning
-            // of the loop should fail, but to get there we must stop waiting on
-            // messages_f and ack_f
-            let delay_f = self.client.executor.delay(Duration::from_secs(1));
-            let f_pin = std::pin::Pin::new(&mut f);
-            pin_mut!(delay_f);
-
-            let f = match select(f_pin, delay_f).await {
-                Either::Left((res, _)) => res,
-                Either::Right((_, _f)) => {
-                    messages_or_ack_f = Some(f);
-                    continue;
+                Ok(Some(EngineEvent::EngineMessage(msg))) => {
+                    let continue_loop = self.handle_ack_opt(msg);
+                    if !continue_loop {
+                        return Ok(());
+                    }
                 }
-            };
+                Ok(None) => {
+                    log::warn!("Event stream is terminated");
+                    return Ok(());
+                }
+            }
+        }
+                }
 
-            match f {
-                Either::Left(((message_opt, messages_rx), engine_rx)) => {
-                    self.messages_rx = Some(messages_rx);
-                    self.engine_rx = engine_rx.into_inner();
+
+    async fn handle_message_opt(&mut self, message_opt: Option<crate::message::Message>) -> Option<Result<(), Error>> {
                     match message_opt {
                         None => {
                             error!("Consumer: messages::next: returning Disconnected");
-                            self.reconnect().await?;
-                            continue;
+                if let Err(err) = self.reconnect().await {
+                    Some(Err(err))
+                } else {
+                    None
+                }
                             //return Err(Error::Consumer(ConsumerError::Connection(ConnectionError::Disconnected)).into());
                         }
                         Some(message) => {
@@ -927,32 +961,35 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
 
                             match self.process_message(message).await {
                                 // Continue
-                                Ok(true) => {}
+                    Ok(true) => {
+                        None
+                    }
                                 // End of Topic
                                 Ok(false) => {
-                                    return Ok(());
+                        Some(Ok(()))
                                 }
                                 Err(e) => {
                                     if let Err(e) = self.tx.send(Err(e)).await {
                                         error!("cannot send a message from the consumer engine to the consumer({}), stopping the engine", self.id);
-                                        return Err(Error::Consumer(e.into()));
+                            Some(Err(Error::Consumer(e.into())))
+                        } else {
+                            None
                                     }
                                 }
                             }
                         }
                     }
                 }
-                Either::Right(((ack_opt, engine_rx), messages_rx)) => {
-                    self.messages_rx = messages_rx.into_inner();
-                    self.engine_rx = Some(engine_rx);
 
+    fn handle_ack_opt(&mut self, ack_opt: Option<EngineMessage<Exe>>) -> bool {
                     match ack_opt {
                         None => {
                             trace!("ack channel was closed");
-                            return Ok(());
+                false
                         }
                         Some(EngineMessage::Ack(message_id, cumulative)) => {
                             self.ack(message_id, cumulative);
+                true
                         }
                         Some(EngineMessage::Nack(message_id)) => {
                             if let Err(e) =
@@ -966,6 +1003,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                                     message_id, e
                                 );
                             }
+                true
                         }
                         Some(EngineMessage::UnackedRedelivery) => {
                             let mut h = HashSet::new();
@@ -992,6 +1030,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                                     }
                                 }
                             }
+                true
                         }
                         Some(EngineMessage::GetConnection(sender)) => {
                             let _ = sender.send(self.connection.clone()).map_err(|_| {
@@ -1000,10 +1039,8 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                                      channel before receiving"
                                 );
                             });
+                true
                         }
-                    }
-                }
-            };
         }
     }
 
@@ -1298,6 +1335,17 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             name = self.name.as_ref().map(|s| format!("({})", s)).unwrap_or_default(),
             topic = &self.topic
         )
+    }
+
+    #[cfg(feature = "async-std")]
+    async fn timeout<F: Future<Output=O>, O>(fut: F, dur: Duration) -> Result<O, async_std::future::TimeoutError> {
+        use async_std::prelude::FutureExt;
+        fut.timeout(dur).await
+    }
+
+    #[cfg(all(not(feature = "async-std"), feature = "tokio"))]
+    async fn timeout<F: Future<Output=O>, O>(fut: F, dur: Duration) -> Result<O, tokio::time::error::Elapsed> {
+        tokio::time::timeout_at(tokio::time::Instant::now() + dur, fut).await
     }
 }
 
