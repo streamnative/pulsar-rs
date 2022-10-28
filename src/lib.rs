@@ -146,8 +146,6 @@
 //! }
 //! ```
 
-#![feature(drain_filter)]
-
 #![recursion_limit = "256"]
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::large_enum_variant)]

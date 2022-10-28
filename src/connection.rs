@@ -788,12 +788,18 @@ impl<Exe: Executor> Connection<Exe> {
             return Ok(Connection { id, url, sender })
         }
 
-        let retryable_errors = errors
-            .drain_filter(|e| e.establish_retryable())
-            .collect::<Vec<ConnectionError>>();
+        let mut fatal_errors = vec![];
+        let mut retryable_errors = vec![];
+        for e in errors.into_iter() {
+            if e.establish_retryable() {
+                retryable_errors.push(e);
+            } else {
+                fatal_errors.push(e);
+            }
+        }
 
         return if retryable_errors.is_empty() {
-            error!("connection error, not retryable: {:?}", errors);
+            error!("connection error, not retryable: {:?}", fatal_errors);
             Err(ConnectionError::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 "fatal error when connecting to the Pulsar server",
