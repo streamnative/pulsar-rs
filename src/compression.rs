@@ -1,5 +1,7 @@
 //! Compression strategy configs
 
+use lz4::block::CompressionMode;
+
 #[derive(Clone, Debug)]
 pub enum Compression {
     None,
@@ -9,9 +11,9 @@ pub enum Compression {
     Snappy,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct CompressionLz4 {
-    pub mode: lz4::block::CompressionMode,
+    pub mode: CompressionMode,
 }
 
 #[derive(Clone, Debug)]
@@ -33,7 +35,7 @@ impl Default for Compression {
 impl Default for CompressionLz4 {
     fn default() -> Self {
         CompressionLz4 {
-            mode: lz4::block::CompressionMode::DEFAULT,
+            mode: CompressionMode::DEFAULT,
         }
     }
 }
@@ -54,3 +56,14 @@ impl Default for CompressionZstd {
     }
 }
 
+impl Clone for CompressionLz4 {
+    fn clone(&self) -> Self {
+        CompressionLz4 {
+            mode: match self.mode {
+                CompressionMode::HIGHCOMPRESSION(i) => CompressionMode::HIGHCOMPRESSION(i),
+                CompressionMode::FAST(i) => CompressionMode::FAST(i),
+                CompressionMode::DEFAULT => CompressionMode::DEFAULT,
+            }
+        }
+    }
+}
