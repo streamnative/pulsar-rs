@@ -16,12 +16,12 @@ pub struct CompressionLz4 {
     pub mode: CompressionMode,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct CompressionZlib {
     pub level: u32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct CompressionZstd {
     pub level: i32,
 }

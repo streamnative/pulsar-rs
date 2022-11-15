@@ -441,7 +441,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
                 #[cfg(not(feature = "zstd"))]
                 return Err(Error::Custom("cannot create a producer with zstd compression because the 'zstd' cargo feature is not active".to_string()));
             }
-            Some(Compression::Snappy(..)) => {
+            Some(Compression::Snappy) => {
                 #[cfg(not(feature = "snap"))]
                 return Err(Error::Custom("cannot create a producer with Snappy compression because the 'snap' cargo feature is not active".to_string()));
             }
@@ -728,7 +728,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
         &mut self,
         mut message: ProducerMessage,
     ) -> Result<proto::CommandSendReceipt, Error> {
-        let compressed_message = match self.compression {
+        let compressed_message = match self.compression.clone() {
             None | Some(Compression::None) => message,
             Some(Compression::Lz4(compression)) => {
                 #[cfg(not(feature = "lz4"))]
