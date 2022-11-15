@@ -129,8 +129,6 @@ pub struct ProducerOptions {
     pub batch_size: Option<u32>,
     /// algorithm used to compress the messages
     pub compression: Option<Compression>,
-    /// desired compression level if using the [zstd](http://facebook.github.io/zstd/zstd_manual.html) algorithm
-    pub compression_level: Option<i32>,
     /// producer access mode: shared = 0, exclusive = 1, waitforexclusive =2, exclusivewithoutfencing =3
     pub access_mode: Option<i32>,
 }
