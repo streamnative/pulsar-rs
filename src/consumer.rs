@@ -1115,12 +1115,23 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         message: CommandMessage,
         mut payload: Payload,
     ) -> Result<(), Error> {
-        let compression = payload.metadata.compression;
+        let compression = match payload.metadata.compression {
+            None => proto::CompressionType::None,
+            Some(compression) => {
+                compression_type = proto::CompressionType::from_i32(compression)
+                    .ok_or_else(|| {
+                        error!("unknown compression type: {}", compression);
+                        return Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!("unknown compression type: {}", i),
+                        ))));
+                    })?
+            }
+        };
 
         let payload = match compression {
-            None | Some(0) => payload,
-            // LZ4
-            Some(1) => {
+            proto::CompressionType::None => payload,
+            proto::CompressionType::Lz4 => {
                 #[cfg(not(feature = "lz4"))]
                 {
                     return Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
@@ -1142,8 +1153,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                     payload
                 }
             }
-            // zlib
-            Some(2) => {
+            proto::CompressionType::Zlib => {
                 #[cfg(not(feature = "flate2"))]
                 {
                     return Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
@@ -1166,8 +1176,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                     payload
                 }
             }
-            // zstd
-            Some(3) => {
+            proto::CompressionType::Zstd => {
                 #[cfg(not(feature = "zstd"))]
                 {
                     return Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
@@ -1186,8 +1195,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                     payload
                 }
             }
-            // Snappy
-            Some(4) => {
+            proto::CompressionType::Snappy => {
                 #[cfg(not(feature = "snap"))]
                 {
                     return Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
@@ -1208,13 +1216,6 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                     payload.data = decompressed_payload;
                     payload
                 }
-            }
-            Some(i) => {
-                error!("unknown compression type: {}", i);
-                return Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("unknown compression type: {}", i),
-                ))));
             }
         };
 
