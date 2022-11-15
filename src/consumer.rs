@@ -1118,13 +1118,13 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         let compression = match payload.metadata.compression {
             None => proto::CompressionType::None,
             Some(compression) => {
-                compression_type = proto::CompressionType::from_i32(compression)
+                proto::CompressionType::from_i32(compression)
                     .ok_or_else(|| {
                         error!("unknown compression type: {}", compression);
-                        return Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
+                        Error::Consumer(ConsumerError::Io(std::io::Error::new(
                             std::io::ErrorKind::Other,
-                            format!("unknown compression type: {}", i),
-                        ))));
+                            format!("unknown compression type: {}", compression),
+                        )))
                     })?
             }
         };
