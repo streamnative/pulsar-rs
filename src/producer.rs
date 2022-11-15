@@ -10,11 +10,12 @@ use crate::client::SerializeMessage;
 use crate::connection::{Connection, SerialId};
 use crate::error::{ConnectionError, ProducerError};
 use crate::executor::Executor;
-use crate::message::proto::{self, CommandSendReceipt, CompressionType, EncryptionKeys, Schema};
+use crate::message::proto::{self, CommandSendReceipt, EncryptionKeys, Schema};
 use crate::message::BatchedMessage;
 use crate::{Error, Pulsar};
 use futures::task::{Context, Poll};
 use futures::Future;
+use crate::compression::{Compression};
 
 type ProducerId = u64;
 type ProducerName = String;
@@ -127,7 +128,7 @@ pub struct ProducerOptions {
     /// batch message size
     pub batch_size: Option<u32>,
     /// algorithm used to compress the messages
-    pub compression: Option<proto::CompressionType>,
+    pub compression: Option<Compression>,
     /// desired compression level if using the [zstd](http://facebook.github.io/zstd/zstd_manual.html) algorithm
     pub compression_level: Option<i32>,
     /// producer access mode: shared = 0, exclusive = 1, waitforexclusive =2, exclusivewithoutfencing =3
@@ -404,8 +405,7 @@ struct TopicProducer<Exe: Executor> {
     //putting it in a mutex because we must send multiple messages at once
     // while we might be pushing more messages from elsewhere
     batch: Option<Mutex<Batch>>,
-    compression: Option<proto::CompressionType>,
-    compression_level: Option<i32>,
+    compression: Option<Compression>,
     drop_signal: oneshot::Sender<()>,
     options: ProducerOptions,
 }
@@ -425,26 +425,26 @@ impl<Exe: Executor> TopicProducer<Exe> {
 
         let topic = topic.clone();
         let batch_size = options.batch_size;
-        let compression = options.compression;
+        let compression = options.compression.clone();
 
         match compression {
-            None | Some(CompressionType::None) => {}
-            Some(CompressionType::Lz4) => {
+            None | Some(Compression::None) => {}
+            Some(Compression::Lz4(..)) => {
                 #[cfg(not(feature = "lz4"))]
                 return Err(Error::Custom("cannot create a producer with LZ4 compression because the 'lz4' cargo feature is not active".to_string()));
             }
-            Some(CompressionType::Zlib) => {
+            Some(Compression::Zlib(..)) => {
                 #[cfg(not(feature = "flate2"))]
                 return Err(Error::Custom("cannot create a producer with zlib compression because the 'flate2' cargo feature is not active".to_string()));
             }
-            Some(CompressionType::Zstd) => {
+            Some(Compression::Zstd(..)) => {
                 #[cfg(not(feature = "zstd"))]
                 return Err(Error::Custom("cannot create a producer with zstd compression because the 'zstd' cargo feature is not active".to_string()));
             }
-            Some(CompressionType::Snappy) => {
+            Some(Compression::Snappy(..)) => {
                 #[cfg(not(feature = "snap"))]
                 return Err(Error::Custom("cannot create a producer with Snappy compression because the 'snap' cargo feature is not active".to_string()));
-            } //Some() => unimplemented!(),
+            }
         };
 
         let producer_name: ProducerName;
@@ -599,7 +599,6 @@ impl<Exe: Executor> TopicProducer<Exe> {
             message_id: sequence_ids,
             batch: batch_size.map(Batch::new).map(Mutex::new),
             compression,
-            compression_level: options.compression_level,
             drop_signal: _drop_signal,
             options,
         })
@@ -730,15 +729,15 @@ impl<Exe: Executor> TopicProducer<Exe> {
         mut message: ProducerMessage,
     ) -> Result<proto::CommandSendReceipt, Error> {
         let compressed_message = match self.compression {
-            None | Some(CompressionType::None) => message,
-            Some(CompressionType::Lz4) => {
+            None | Some(Compression::None) => message,
+            Some(Compression::Lz4(compression)) => {
                 #[cfg(not(feature = "lz4"))]
                 return unimplemented!();
 
                 #[cfg(feature = "lz4")]
                 {
                     let compressed_payload: Vec<u8> =
-                        lz4::block::compress(&message.payload[..], None, false)
+                        lz4::block::compress(&message.payload[..], Some(compression.mode), false)
                             .map_err(ProducerError::Io)?;
 
                     message.uncompressed_size = Some(message.payload.len() as u32);
@@ -747,14 +746,14 @@ impl<Exe: Executor> TopicProducer<Exe> {
                     message
                 }
             }
-            Some(CompressionType::Zlib) => {
+            Some(Compression::Zlib(compression)) => {
                 #[cfg(not(feature = "flate2"))]
                 return unimplemented!();
 
                 #[cfg(feature = "flate2")]
                 {
                     let mut e =
-                        flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+                        flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(compression.level));
                     e.write_all(&message.payload[..])
                         .map_err(ProducerError::Io)?;
                     let compressed_payload = e.finish().map_err(ProducerError::Io)?;
@@ -765,22 +764,21 @@ impl<Exe: Executor> TopicProducer<Exe> {
                     message
                 }
             }
-            Some(CompressionType::Zstd) => {
+            Some(Compression::Zstd(compression)) => {
                 #[cfg(not(feature = "zstd"))]
                 return unimplemented!();
 
                 #[cfg(feature = "zstd")]
                 {
-                    let compression_level = self.compression_level.unwrap_or(0);
                     let compressed_payload =
-                        zstd::encode_all(&message.payload[..], compression_level).map_err(ProducerError::Io)?;
+                        zstd::encode_all(&message.payload[..], compression.level).map_err(ProducerError::Io)?;
                     message.uncompressed_size = Some(message.payload.len() as u32);
                     message.payload = compressed_payload;
                     message.compression = Some(3);
                     message
                 }
             }
-            Some(CompressionType::Snappy) => {
+            Some(Compression::Snappy) => {
                 #[cfg(not(feature = "snap"))]
                 return unimplemented!();
 
