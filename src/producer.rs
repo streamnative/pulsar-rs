@@ -128,6 +128,8 @@ pub struct ProducerOptions {
     pub batch_size: Option<u32>,
     /// algorithm used to compress the messages
     pub compression: Option<proto::CompressionType>,
+    /// desired compression level if using the [zstd](http://facebook.github.io/zstd/zstd_manual.html) algorithm
+    pub compression_level: Option<i32>,
     /// producer access mode: shared = 0, exclusive = 1, waitforexclusive =2, exclusivewithoutfencing =3
     pub access_mode: Option<i32>,
 }
@@ -403,6 +405,7 @@ struct TopicProducer<Exe: Executor> {
     // while we might be pushing more messages from elsewhere
     batch: Option<Mutex<Batch>>,
     compression: Option<proto::CompressionType>,
+    compression_level: Option<i32>,
     drop_signal: oneshot::Sender<()>,
     options: ProducerOptions,
 }
@@ -596,6 +599,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
             message_id: sequence_ids,
             batch: batch_size.map(Batch::new).map(Mutex::new),
             compression,
+            compression_level: options.compression_level,
             drop_signal: _drop_signal,
             options,
         })
@@ -767,8 +771,9 @@ impl<Exe: Executor> TopicProducer<Exe> {
 
                 #[cfg(feature = "zstd")]
                 {
+                    let compression_level = self.compression_level.unwrap_or(0);
                     let compressed_payload =
-                        zstd::encode_all(&message.payload[..], 0).map_err(ProducerError::Io)?;
+                        zstd::encode_all(&message.payload[..], compression_level).map_err(ProducerError::Io)?;
                     message.uncompressed_size = Some(message.payload.len() as u32);
                     message.payload = compressed_payload;
                     message.compression = Some(3);
