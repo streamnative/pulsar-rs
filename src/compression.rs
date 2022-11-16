@@ -2,6 +2,7 @@
 
 use lz4::block::CompressionMode;
 
+/// Wrapper of supported compression algorithms
 #[derive(Clone, Debug)]
 pub enum Compression {
     None,
@@ -11,18 +12,24 @@ pub enum Compression {
     Snappy,
 }
 
+/// Options of the [lz4](https://lz4.github.io/lz4/) algorithm
 #[derive(Debug)]
 pub struct CompressionLz4 {
+    /// compression mode of lz4 to be used
     pub mode: CompressionMode,
 }
 
+/// Options of the [zlib](https://www.zlib.net/) algorithm
 #[derive(Default, Clone, Copy, Debug)]
 pub struct CompressionZlib {
+    /// compression level of zlib to be used (0-9)
     pub level: flate2::Compression,
 }
 
+/// Options of the [zstd](http://facebook.github.io/zstd/zstd_manual.html) algorithm
 #[derive(Clone, Copy, Debug)]
 pub struct CompressionZstd {
+    /// compression level of zstd to be used ([`zstd::compression_level_range()`])
     pub level: i32,
 }
 
