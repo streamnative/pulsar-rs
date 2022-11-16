@@ -16,9 +16,9 @@ pub struct CompressionLz4 {
     pub mode: CompressionMode,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Default, Clone, Copy, Debug)]
 pub struct CompressionZlib {
-    pub level: u32,
+    pub level: flate2::Compression,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -36,14 +36,6 @@ impl Default for CompressionLz4 {
     fn default() -> Self {
         CompressionLz4 {
             mode: CompressionMode::DEFAULT,
-        }
-    }
-}
-
-impl Default for CompressionZlib {
-    fn default() -> Self {
-        CompressionZlib {
-            level: flate2::Compression::default().level(),
         }
     }
 }

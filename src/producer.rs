@@ -751,7 +751,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
                 #[cfg(feature = "flate2")]
                 {
                     let mut e =
-                        flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(compression.level));
+                        flate2::write::ZlibEncoder::new(Vec::new(), compression.level);
                     e.write_all(&message.payload[..])
                         .map_err(ProducerError::Io)?;
                     let compressed_payload = e.finish().map_err(ProducerError::Io)?;
