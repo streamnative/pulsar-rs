@@ -39,9 +39,9 @@ async fn main() -> Result<(), pulsar::Error> {
         .with_name("my-producer2".to_string())
         .with_options(producer::ProducerOptions {
             batch_size: Some(4),
-            // compression: Some(compression::Compression::Lz4(compression::CompressionLz4::default())),
-            // compression: Some(compression::Compression::Zlib(compression::CompressionZlib::default())),
-            // compression: Some(compression::Compression::Zstd(compression::CompressionZstd::default())),
+            // compression: Some(compression::Compression::Lz4 { mode: lz4::block::CompressionMode::DEFAULT }),
+            // compression: Some(compression::Compression::Zlib { level: flate2::Compression::default() }),
+            // compression: Some(compression::Compression::Zstd { level: zstd::DEFAULT_COMPRESSION_LEVEL }),
             compression: Some(compression::Compression::Snappy),
             ..Default::default()
         })
