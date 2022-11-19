@@ -91,6 +91,17 @@ pub enum ConnectionError {
     Shutdown,
 }
 
+impl ConnectionError {
+    pub fn establish_retryable(&self) -> bool {
+        match self {
+            ConnectionError::Io(e) =>
+                e.kind() == io::ErrorKind::ConnectionRefused ||
+                    e.kind() == io::ErrorKind::TimedOut,
+            _ => false,
+        }
+    }
+}
+
 impl From<io::Error> for ConnectionError {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn from(err: io::Error) -> Self {

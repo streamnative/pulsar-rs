@@ -304,15 +304,9 @@ impl<Exe: Executor> ConnectionManager<Exe> {
             .await
             {
                 Ok(c) => break c,
-                Err(ConnectionError::Io(e)) => {
-                    if e.kind() != std::io::ErrorKind::ConnectionRefused
-                        && e.kind() != std::io::ErrorKind::TimedOut
-                    {
-                        return Err(ConnectionError::Io(e));
-                    }
-
-                    if current_retries == self.connection_retry_options.max_retries {
-                        return Err(ConnectionError::Io(e));
+                Err(e) if e.establish_retryable() => {
+                    if current_retries >= self.connection_retry_options.max_retries {
+                        return Err(e);
                     }
 
                     let jitter = rand::thread_rng().gen_range(0..10);
@@ -337,7 +331,6 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                     self.executor.delay(current_backoff).await;
                 }
                 Err(e) => {
-                    error!("connection error, not retryable: {:?}", e);
                     return Err(e);
                 }
             }

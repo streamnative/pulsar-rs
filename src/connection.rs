@@ -1,37 +1,39 @@
-use native_tls::Certificate;
-use proto::MessageIdData;
-use rand::{thread_rng, Rng};
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 use std::time::Duration;
 
+use async_trait::async_trait;
 use futures::{
     self,
     channel::{mpsc, oneshot},
-    future::{select, Either},
-    pin_mut,
-    task::{Context, Poll},
-    Future, FutureExt, Sink, SinkExt, Stream, StreamExt,
+    future::{Either, select},
+    Future,
+    FutureExt,
+    pin_mut, Sink, SinkExt, Stream, StreamExt, task::{Context, Poll},
 };
+use futures::lock::Mutex;
+use native_tls::Certificate;
+use rand::thread_rng;
+use rand::seq::SliceRandom;
 use url::Url;
 use uuid::Uuid;
+
+use proto::MessageIdData;
 
 use crate::consumer::ConsumerOptions;
 use crate::error::{AuthenticationError, ConnectionError, SharedError};
 use crate::executor::{Executor, ExecutorKind};
 use crate::message::{
-    proto::{self, command_subscribe::SubType},
-    BaseCommand, Codec, Message,
+    BaseCommand,
+    Codec, Message, proto::{self, command_subscribe::SubType},
 };
 use crate::producer::{self, ProducerOptions};
-use async_trait::async_trait;
-use futures::lock::Mutex;
 
 pub(crate) enum Register {
     Request {
@@ -721,7 +723,7 @@ impl<Exe: Executor> Connection<Exe> {
         };
 
         let u = url.clone();
-        let address: SocketAddr = match executor
+        let addresses: Vec<SocketAddr> = match executor
             .spawn_blocking(move || {
                 u.socket_addrs(|| match u.scheme() {
                     "pulsar" => Some(6650),
@@ -733,56 +735,79 @@ impl<Exe: Executor> Connection<Exe> {
                     e
                 })
                 .ok()
-                .and_then(|v| {
-                    let mut rng = thread_rng();
-                    let index: usize = rng.gen_range(0..v.len());
-                    v.get(index).copied()
+                .map(|mut v| {
+                    v.shuffle(&mut thread_rng());
+                    v
                 })
             })
             .await
         {
-            Some(Some(address)) => address,
-            _ =>
-            //return Err(Error::Custom(format!("could not query address: {}", url))),
-            {
-                return Err(ConnectionError::NotFound)
-            }
+            Some(Some(addresses)) if !addresses.is_empty() => addresses,
+            _ => return Err(ConnectionError::NotFound)
         };
-
-        let hostname = hostname.unwrap_or_else(|| address.ip().to_string());
 
         let id = Uuid::new_v4();
-        debug!("Connecting to {}: {}, as {}", url, address, id);
-        let sender_prepare = Connection::prepare_stream(
-            id,
-            address,
-            hostname,
-            tls,
-            auth_data,
-            proxy_to_broker_url,
-            certificate_chain,
-            allow_insecure_connection,
-            tls_hostname_verification_enabled,
-            executor.clone(),
-            operation_timeout,
-        );
-        let delay_f = executor.delay(connection_timeout);
+        let mut errors = vec![];
+        for address in addresses {
+            let hostname = hostname.clone().unwrap_or_else(|| address.ip().to_string());
+            debug!("Connecting to {}: {}, as {}", url, address, id);
+            let sender_prepare = Connection::prepare_stream(
+                id,
+                address,
+                hostname,
+                tls,
+                auth_data.clone(),
+                proxy_to_broker_url.clone(),
+                certificate_chain,
+                allow_insecure_connection,
+                tls_hostname_verification_enabled,
+                executor.clone(),
+                operation_timeout,
+            );
+            let delay_f = executor.delay(connection_timeout);
 
-        pin_mut!(sender_prepare);
-        pin_mut!(delay_f);
+            pin_mut!(sender_prepare);
+            pin_mut!(delay_f);
 
-        let sender = match select(sender_prepare, delay_f).await {
-            Either::Left((res, _)) => res?,
-            Either::Right(_) => {
-                warn!("TimedOut connecting to the pulsar server {}", line!());
-                return Err(ConnectionError::Io(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "timeout connecting to the Pulsar server",
-                )));
+            let sender;
+            match select(sender_prepare, delay_f).await {
+                Either::Left((Ok(res), _)) => sender = res,
+                Either::Left((Err(err), _)) => {
+                    errors.push(err);
+                    continue;
+                }
+                Either::Right(_) => {
+                    errors.push(ConnectionError::Io(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "timeout connecting to the Pulsar server",
+                    )));
+                    continue;
+                }
+            };
+
+            return Ok(Connection { id, url, sender })
+        }
+
+        let mut fatal_errors = vec![];
+        let mut retryable_errors = vec![];
+        for e in errors.into_iter() {
+            if e.establish_retryable() {
+                retryable_errors.push(e);
+            } else {
+                fatal_errors.push(e);
             }
-        };
+        }
 
-        Ok(Connection { id, url, sender })
+        return if retryable_errors.is_empty() {
+            error!("connection error, not retryable: {:?}", fatal_errors);
+            Err(ConnectionError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "fatal error when connecting to the Pulsar server",
+            )))
+        } else {
+            warn!("retry establish connection on: {:?}", retryable_errors);
+            Err(retryable_errors.into_iter().next().unwrap())
+        }
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
@@ -1074,13 +1099,14 @@ where
 
 pub(crate) mod messages {
     use chrono::Utc;
+
     use proto::MessageIdData;
 
     use crate::connection::Authentication;
     use crate::consumer::ConsumerOptions;
     use crate::message::{
-        proto::{self, base_command::Type as CommandType, command_subscribe::SubType},
-        Message, Payload,
+        Message,
+        Payload, proto::{self, base_command::Type as CommandType, command_subscribe::SubType},
     };
     use crate::producer::{self, ProducerOptions};
 
