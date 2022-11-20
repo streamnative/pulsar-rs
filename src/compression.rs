@@ -3,13 +3,14 @@
 use lz4::block::CompressionMode;
 
 /// Wrapper of supported compression algorithms
-#[derive(Clone, Debug)]
+#[derive(Default, Clone, Debug)]
 pub enum Compression {
+    #[default]
     None,
     Lz4(CompressionLz4),
     Zlib(CompressionZlib),
     Zstd(CompressionZstd),
-    Snappy,
+    Snappy(CompressionSnappy),
 }
 
 /// Options of the [lz4](https://lz4.github.io/lz4/) algorithm
@@ -33,10 +34,10 @@ pub struct CompressionZstd {
     pub level: i32,
 }
 
-impl Default for Compression {
-    fn default() -> Self {
-        Compression::None
-    }
+/// Options of the [snappy](http://google.github.io/snappy/) algorithm
+#[derive(Default, Clone, Copy, Debug)]
+pub struct CompressionSnappy {
+    // empty for extensions
 }
 
 impl Default for CompressionLz4 {

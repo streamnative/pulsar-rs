@@ -42,7 +42,7 @@ async fn main() -> Result<(), pulsar::Error> {
             // compression: Some(compression::Compression::Lz4(compression::CompressionLz4::default())),
             // compression: Some(compression::Compression::Zlib(compression::CompressionZlib::default())),
             // compression: Some(compression::Compression::Zstd(compression::CompressionZstd::default())),
-            compression: Some(compression::Compression::Snappy),
+            compression: Some(compression::Compression::Snappy(compression::CompressionSnappy::default())),
             ..Default::default()
         })
         .build()
