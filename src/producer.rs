@@ -427,15 +427,15 @@ impl<Exe: Executor> TopicProducer<Exe> {
 
         match compression {
             None | Some(Compression::None) => {}
-            Some(Compression::Lz4 { .. }) => {
+            Some(Compression::Lz4(..)) => {
                 #[cfg(not(feature = "lz4"))]
                 return Err(Error::Custom("cannot create a producer with LZ4 compression because the 'lz4' cargo feature is not active".to_string()));
             }
-            Some(Compression::Zlib { .. }) => {
+            Some(Compression::Zlib(..)) => {
                 #[cfg(not(feature = "flate2"))]
                 return Err(Error::Custom("cannot create a producer with zlib compression because the 'flate2' cargo feature is not active".to_string()));
             }
-            Some(Compression::Zstd { .. }) => {
+            Some(Compression::Zstd(..)) => {
                 #[cfg(not(feature = "zstd"))]
                 return Err(Error::Custom("cannot create a producer with zstd compression because the 'zstd' cargo feature is not active".to_string()));
             }
@@ -728,14 +728,14 @@ impl<Exe: Executor> TopicProducer<Exe> {
     ) -> Result<proto::CommandSendReceipt, Error> {
         let compressed_message = match self.compression.clone() {
             None | Some(Compression::None) => message,
-            Some(Compression::Lz4 { mode }) => {
+            Some(Compression::Lz4(compression)) => {
                 #[cfg(not(feature = "lz4"))]
                 return unimplemented!();
 
                 #[cfg(feature = "lz4")]
                 {
                     let compressed_payload: Vec<u8> =
-                        lz4::block::compress(&message.payload[..], Some(mode), false)
+                        lz4::block::compress(&message.payload[..], Some(compression.mode), false)
                             .map_err(ProducerError::Io)?;
 
                     message.uncompressed_size = Some(message.payload.len() as u32);
@@ -744,13 +744,14 @@ impl<Exe: Executor> TopicProducer<Exe> {
                     message
                 }
             }
-            Some(Compression::Zlib { level}) => {
+            Some(Compression::Zlib(compression)) => {
                 #[cfg(not(feature = "flate2"))]
                 return unimplemented!();
 
                 #[cfg(feature = "flate2")]
                 {
-                    let mut e = flate2::write::ZlibEncoder::new(Vec::new(), level);
+                    let mut e =
+                        flate2::write::ZlibEncoder::new(Vec::new(), compression.level);
                     e.write_all(&message.payload[..])
                         .map_err(ProducerError::Io)?;
                     let compressed_payload = e.finish().map_err(ProducerError::Io)?;
@@ -761,14 +762,14 @@ impl<Exe: Executor> TopicProducer<Exe> {
                     message
                 }
             }
-            Some(Compression::Zstd { level }) => {
+            Some(Compression::Zstd(compression)) => {
                 #[cfg(not(feature = "zstd"))]
                 return unimplemented!();
 
                 #[cfg(feature = "zstd")]
                 {
                     let compressed_payload =
-                        zstd::encode_all(&message.payload[..], level).map_err(ProducerError::Io)?;
+                        zstd::encode_all(&message.payload[..], compression.level).map_err(ProducerError::Io)?;
                     message.uncompressed_size = Some(message.payload.len() as u32);
                     message.payload = compressed_payload;
                     message.compression = Some(3);
