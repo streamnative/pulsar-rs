@@ -716,7 +716,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
 
                 message.uncompressed_size = Some(message.payload.len() as u32);
                 message.payload = compressed_payload;
-                message.compression = Some(1);
+                message.compression = Some(proto::CompressionType::Lz4.into());
                 message
             }
             #[cfg(feature = "flate2")]
@@ -729,7 +729,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
 
                 message.uncompressed_size = Some(message.payload.len() as u32);
                 message.payload = compressed_payload;
-                message.compression = Some(2);
+                message.compression = Some(proto::CompressionType::Zlib.into());
                 message
             }
             #[cfg(feature = "zstd")]
@@ -738,7 +738,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
                     zstd::encode_all(&message.payload[..], compression.level).map_err(ProducerError::Io)?;
                 message.uncompressed_size = Some(message.payload.len() as u32);
                 message.payload = compressed_payload;
-                message.compression = Some(3);
+                message.compression = Some(proto::CompressionType::Zstd.into());
                 message
             }
             #[cfg(feature = "snap")]
@@ -761,7 +761,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
 
                 message.uncompressed_size = Some(message.payload.len() as u32);
                 message.payload = compressed_payload;
-                message.compression = Some(4);
+                message.compression = Some(proto::CompressionType::Snappy.into());
                 message
             }
         };
