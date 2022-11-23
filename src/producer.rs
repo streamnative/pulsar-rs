@@ -10,11 +10,12 @@ use crate::client::SerializeMessage;
 use crate::connection::{Connection, SerialId};
 use crate::error::{ConnectionError, ProducerError};
 use crate::executor::Executor;
-use crate::message::proto::{self, CommandSendReceipt, CompressionType, EncryptionKeys, Schema};
+use crate::message::proto::{self, CommandSendReceipt, EncryptionKeys, Schema};
 use crate::message::BatchedMessage;
 use crate::{Error, Pulsar};
 use futures::task::{Context, Poll};
 use futures::Future;
+use crate::compression::{Compression};
 
 type ProducerId = u64;
 type ProducerName = String;
@@ -127,7 +128,7 @@ pub struct ProducerOptions {
     /// batch message size
     pub batch_size: Option<u32>,
     /// algorithm used to compress the messages
-    pub compression: Option<proto::CompressionType>,
+    pub compression: Option<Compression>,
     /// producer access mode: shared = 0, exclusive = 1, waitforexclusive =2, exclusivewithoutfencing =3
     pub access_mode: Option<i32>,
 }
@@ -402,7 +403,7 @@ struct TopicProducer<Exe: Executor> {
     //putting it in a mutex because we must send multiple messages at once
     // while we might be pushing more messages from elsewhere
     batch: Option<Mutex<Batch>>,
-    compression: Option<proto::CompressionType>,
+    compression: Option<Compression>,
     drop_signal: oneshot::Sender<()>,
     options: ProducerOptions,
 }
@@ -422,27 +423,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
 
         let topic = topic.clone();
         let batch_size = options.batch_size;
-        let compression = options.compression;
-
-        match compression {
-            None | Some(CompressionType::None) => {}
-            Some(CompressionType::Lz4) => {
-                #[cfg(not(feature = "lz4"))]
-                return Err(Error::Custom("cannot create a producer with LZ4 compression because the 'lz4' cargo feature is not active".to_string()));
-            }
-            Some(CompressionType::Zlib) => {
-                #[cfg(not(feature = "flate2"))]
-                return Err(Error::Custom("cannot create a producer with zlib compression because the 'flate2' cargo feature is not active".to_string()));
-            }
-            Some(CompressionType::Zstd) => {
-                #[cfg(not(feature = "zstd"))]
-                return Err(Error::Custom("cannot create a producer with zstd compression because the 'zstd' cargo feature is not active".to_string()));
-            }
-            Some(CompressionType::Snappy) => {
-                #[cfg(not(feature = "snap"))]
-                return Err(Error::Custom("cannot create a producer with Snappy compression because the 'snap' cargo feature is not active".to_string()));
-            } //Some() => unimplemented!(),
-        };
+        let compression = options.compression.clone();
 
         let producer_name: ProducerName;
         let mut current_retries = 0u32;
@@ -725,83 +706,63 @@ impl<Exe: Executor> TopicProducer<Exe> {
         &mut self,
         mut message: ProducerMessage,
     ) -> Result<proto::CommandSendReceipt, Error> {
-        let compressed_message = match self.compression {
-            None | Some(CompressionType::None) => message,
-            Some(CompressionType::Lz4) => {
-                #[cfg(not(feature = "lz4"))]
-                return unimplemented!();
-
-                #[cfg(feature = "lz4")]
-                {
-                    let compressed_payload: Vec<u8> =
-                        lz4::block::compress(&message.payload[..], None, false)
-                            .map_err(ProducerError::Io)?;
-
-                    message.uncompressed_size = Some(message.payload.len() as u32);
-                    message.payload = compressed_payload;
-                    message.compression = Some(1);
-                    message
-                }
-            }
-            Some(CompressionType::Zlib) => {
-                #[cfg(not(feature = "flate2"))]
-                return unimplemented!();
-
-                #[cfg(feature = "flate2")]
-                {
-                    let mut e =
-                        flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
-                    e.write_all(&message.payload[..])
-                        .map_err(ProducerError::Io)?;
-                    let compressed_payload = e.finish().map_err(ProducerError::Io)?;
-
-                    message.uncompressed_size = Some(message.payload.len() as u32);
-                    message.payload = compressed_payload;
-                    message.compression = Some(2);
-                    message
-                }
-            }
-            Some(CompressionType::Zstd) => {
-                #[cfg(not(feature = "zstd"))]
-                return unimplemented!();
-
-                #[cfg(feature = "zstd")]
-                {
-                    let compressed_payload =
-                        zstd::encode_all(&message.payload[..], 0).map_err(ProducerError::Io)?;
-                    message.uncompressed_size = Some(message.payload.len() as u32);
-                    message.payload = compressed_payload;
-                    message.compression = Some(3);
-                    message
-                }
-            }
-            Some(CompressionType::Snappy) => {
-                #[cfg(not(feature = "snap"))]
-                return unimplemented!();
-
-                #[cfg(feature = "snap")]
-                {
-                    let compressed_payload: Vec<u8> = Vec::new();
-                    let mut encoder = snap::write::FrameEncoder::new(compressed_payload);
-                    encoder
-                        .write(&message.payload[..])
-                        .map_err(ProducerError::Io)?;
-                    let compressed_payload = encoder
-                        .into_inner()
-                        //FIXME
-                        .map_err(|e| {
-                            std::io::Error::new(
-                                std::io::ErrorKind::Other,
-                                format!("Snappy compression error: {:?}", e),
-                            )
-                        })
+        let compressed_message = match self.compression.clone() {
+            None | Some(Compression::None) => message,
+            #[cfg(feature = "lz4")]
+            Some(Compression::Lz4(compression)) => {
+                let compressed_payload: Vec<u8> =
+                    lz4::block::compress(&message.payload[..], Some(compression.mode), false)
                         .map_err(ProducerError::Io)?;
 
-                    message.uncompressed_size = Some(message.payload.len() as u32);
-                    message.payload = compressed_payload;
-                    message.compression = Some(4);
-                    message
-                }
+                message.uncompressed_size = Some(message.payload.len() as u32);
+                message.payload = compressed_payload;
+                message.compression = Some(proto::CompressionType::Lz4.into());
+                message
+            }
+            #[cfg(feature = "flate2")]
+            Some(Compression::Zlib(compression)) => {
+                let mut e =
+                    flate2::write::ZlibEncoder::new(Vec::new(), compression.level);
+                e.write_all(&message.payload[..])
+                    .map_err(ProducerError::Io)?;
+                let compressed_payload = e.finish().map_err(ProducerError::Io)?;
+
+                message.uncompressed_size = Some(message.payload.len() as u32);
+                message.payload = compressed_payload;
+                message.compression = Some(proto::CompressionType::Zlib.into());
+                message
+            }
+            #[cfg(feature = "zstd")]
+            Some(Compression::Zstd(compression)) => {
+                let compressed_payload =
+                    zstd::encode_all(&message.payload[..], compression.level).map_err(ProducerError::Io)?;
+                message.uncompressed_size = Some(message.payload.len() as u32);
+                message.payload = compressed_payload;
+                message.compression = Some(proto::CompressionType::Zstd.into());
+                message
+            }
+            #[cfg(feature = "snap")]
+            Some(Compression::Snappy(..)) => {
+                let compressed_payload: Vec<u8> = Vec::new();
+                let mut encoder = snap::write::FrameEncoder::new(compressed_payload);
+                encoder
+                    .write(&message.payload[..])
+                    .map_err(ProducerError::Io)?;
+                let compressed_payload = encoder
+                    .into_inner()
+                    //FIXME
+                    .map_err(|e| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!("Snappy compression error: {:?}", e),
+                        )
+                    })
+                    .map_err(ProducerError::Io)?;
+
+                message.uncompressed_size = Some(message.payload.len() as u32);
+                message.payload = compressed_payload;
+                message.compression = Some(proto::CompressionType::Snappy.into());
+                message
             }
         };
 

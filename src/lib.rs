@@ -180,6 +180,7 @@ pub use producer::{MultiTopicProducer, Producer, ProducerOptions};
 
 pub mod authentication;
 mod client;
+pub mod compression;
 mod connection;
 mod connection_manager;
 pub mod consumer;
