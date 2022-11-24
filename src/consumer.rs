@@ -2009,15 +2009,14 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
             }
 
             // 2. lookup partitioned topic
-            let topics: Vec<_> = try_join_all(
+            let topics = try_join_all(
                 topics
                     .into_iter()
                     .map(|topic| pulsar.lookup_partitioned_topic(topic)),
             )
             .await?
             .into_iter()
-            .flatten()
-            .collect();
+            .flatten();
 
             // 3. create consumers
             let consumers = try_join_all(

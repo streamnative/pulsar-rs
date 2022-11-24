@@ -771,9 +771,8 @@ impl<Exe: Executor> Connection<Exe> {
             pin_mut!(sender_prepare);
             pin_mut!(delay_f);
 
-            let sender;
-            match select(sender_prepare, delay_f).await {
-                Either::Left((Ok(res), _)) => sender = res,
+            let sender = match select(sender_prepare, delay_f).await {
+                Either::Left((Ok(res), _)) => res,
                 Either::Left((Err(err), _)) => {
                     errors.push(err);
                     continue;
@@ -800,7 +799,7 @@ impl<Exe: Executor> Connection<Exe> {
             }
         }
 
-        return if retryable_errors.is_empty() {
+        if retryable_errors.is_empty() {
             error!("connection error, not retryable: {:?}", fatal_errors);
             Err(ConnectionError::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
@@ -809,7 +808,7 @@ impl<Exe: Executor> Connection<Exe> {
         } else {
             warn!("retry establish connection on: {:?}", retryable_errors);
             Err(retryable_errors.into_iter().next().unwrap())
-        };
+        }
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
