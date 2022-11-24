@@ -538,6 +538,7 @@ impl BatchedMessage {
 }
 
 pub mod proto {
+    #![allow(clippy::all)]
     include!(concat!(env!("OUT_DIR"), "/pulsar.proto.rs"));
 
     //trait implementations used in Consumer::unacked_messages
