@@ -17,7 +17,7 @@ jobs:
       - name: Build
         run: cargo build
       - name: Check format
-        run: cargo format --all -- --check
+        run: cargo +nightly fmt --all -- --check
       - name: Check Clippy
         run: cargo clippy --tests --all-features -- -D warnings
 

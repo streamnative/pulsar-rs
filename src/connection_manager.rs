@@ -1,14 +1,11 @@
-use crate::connection::Connection;
-use crate::error::ConnectionError;
-use crate::executor::Executor;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use futures::{channel::oneshot, lock::Mutex};
 use native_tls::Certificate;
 use rand::Rng;
 use url::Url;
+
+use crate::{connection::Connection, error::ConnectionError, executor::Executor};
 
 /// holds connection information for a broker
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]

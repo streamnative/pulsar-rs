@@ -1,38 +1,42 @@
 //! Topic subscriptions
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-use std::fmt::Debug;
-use std::marker::PhantomData;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use core::iter;
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
+    convert::TryFrom,
+    fmt::Debug,
+    marker::PhantomData,
+    pin::Pin,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use chrono::{DateTime, Utc};
-use futures::channel::mpsc::unbounded;
-use futures::task::{Context, Poll};
 use futures::{
-    channel::{mpsc, oneshot},
+    channel::{mpsc, mpsc::unbounded, oneshot},
     future::try_join_all,
+    task::{Context, Poll},
     Future, FutureExt, SinkExt, Stream, StreamExt,
 };
+use rand::{distributions::Alphanumeric, Rng};
 use regex::Regex;
-
-use crate::connection::Connection;
-use crate::error::{ConnectionError, ConsumerError, Error};
-use crate::executor::Executor;
-use crate::message::proto::CommandMessage;
-use crate::message::{
-    parse_batched_message,
-    proto::{self, command_subscribe::SubType, MessageIdData, MessageMetadata, Schema},
-    BatchedMessage, Message as RawMessage, Metadata, Payload,
-};
-use crate::proto::{BaseCommand, CommandCloseConsumer, CommandConsumerStatsResponse};
-use crate::reader::{Reader, State};
-use crate::{BrokerAddress, DeserializeMessage, Pulsar};
-use core::iter;
-use rand::distributions::Alphanumeric;
-use rand::Rng;
-use std::convert::TryFrom;
 use url::Url;
+
+use crate::{
+    connection::Connection,
+    error::{ConnectionError, ConsumerError, Error},
+    executor::Executor,
+    message::{
+        parse_batched_message,
+        proto::{
+            self, command_subscribe::SubType, CommandMessage, MessageIdData, MessageMetadata,
+            Schema,
+        },
+        BatchedMessage, Message as RawMessage, Metadata, Payload,
+    },
+    proto::{BaseCommand, CommandCloseConsumer, CommandConsumerStatsResponse},
+    reader::{Reader, State},
+    BrokerAddress, DeserializeMessage, Pulsar,
+};
 
 /// Configuration options for consumers
 #[derive(Clone, Default, Debug)]
@@ -109,7 +113,8 @@ impl ConsumerOptions {
 
 #[derive(Debug, Clone)]
 pub struct DeadLetterPolicy {
-    /// Maximum number of times that a message will be redelivered before being sent to the dead letter queue.
+    /// Maximum number of times that a message will be redelivered before being sent to the dead
+    /// letter queue.
     pub max_redeliver_count: usize,
     /// Name of the dead topic where the failing messages will be sent.
     pub dead_letter_topic: String,
@@ -1226,8 +1231,9 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
 
                 #[cfg(feature = "flate2")]
                 {
-                    use flate2::read::ZlibDecoder;
                     use std::io::Read;
+
+                    use flate2::read::ZlibDecoder;
 
                     let mut d = ZlibDecoder::new(&payload.data[..]);
                     let mut decompressed_payload = Vec::new();
@@ -2219,18 +2225,19 @@ impl<T: 'static + DeserializeMessage, Exe: Executor> Stream for MultiTopicConsum
 mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use futures::{StreamExt, TryStreamExt};
+    use futures::{
+        future::{select, Either},
+        StreamExt, TryStreamExt,
+    };
     use log::LevelFilter;
     use regex::Regex;
     #[cfg(feature = "tokio-runtime")]
     use tokio::time::timeout;
 
+    use super::*;
     #[cfg(feature = "tokio-runtime")]
     use crate::executor::TokioExecutor;
     use crate::{producer, tests::TEST_LOGGER, Pulsar, SerializeMessage};
-
-    use super::*;
-    use futures::future::{select, Either};
 
     #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
     pub struct TestData {

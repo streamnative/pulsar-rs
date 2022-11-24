@@ -42,7 +42,8 @@
 //!
 //! impl SerializeMessage for TestData {
 //!     fn serialize_message(input: Self) -> Result<producer::Message, PulsarError> {
-//!         let payload = serde_json::to_vec(&input).map_err(|e| PulsarError::Custom(e.to_string()))?;
+//!         let payload =
+//!             serde_json::to_vec(&input).map_err(|e| PulsarError::Custom(e.to_string()))?;
 //!         Ok(producer::Message {
 //!             payload,
 //!             ..Default::default()
@@ -89,8 +90,8 @@
 //! ```rust,no_run
 //! use futures::TryStreamExt;
 //! use pulsar::{
-//!     message::proto::command_subscribe::SubType, message::Payload, Consumer, DeserializeMessage,
-//!     Pulsar, TokioExecutor,
+//!     message::{proto::command_subscribe::SubType, Payload},
+//!     Consumer, DeserializeMessage, Pulsar, TokioExecutor,
 //! };
 //! use serde::{Deserialize, Serialize};
 //!
@@ -171,9 +172,8 @@ pub use executor::AsyncStdExecutor;
 pub use executor::Executor;
 #[cfg(feature = "tokio-runtime")]
 pub use executor::TokioExecutor;
-pub use message::proto::command_subscribe::SubType;
 pub use message::{
-    proto::{self, CommandSendReceipt},
+    proto::{self, command_subscribe::SubType, CommandSendReceipt},
     Payload,
 };
 pub use producer::{MultiTopicProducer, Producer, ProducerOptions};
@@ -193,24 +193,25 @@ mod service_discovery;
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        collections::BTreeSet,
+        time::{Duration, Instant},
+    };
+
     use futures::{future::try_join_all, StreamExt};
     use log::{LevelFilter, Metadata, Record};
-    use std::collections::BTreeSet;
-    use std::time::{Duration, Instant};
-
     #[cfg(feature = "tokio-runtime")]
     use tokio::time::timeout;
 
+    use super::*;
     #[cfg(feature = "tokio-runtime")]
     use crate::executor::TokioExecutor;
-
-    use crate::client::SerializeMessage;
-    use crate::consumer::{InitialPosition, Message};
-    use crate::message::proto::command_subscribe::SubType;
-    use crate::message::Payload;
-    use crate::Error as PulsarError;
-
-    use super::*;
+    use crate::{
+        client::SerializeMessage,
+        consumer::{InitialPosition, Message},
+        message::{proto::command_subscribe::SubType, Payload},
+        Error as PulsarError,
+    };
 
     #[derive(Debug, Serialize, Deserialize)]
     struct TestData {

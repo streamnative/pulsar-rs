@@ -1,39 +1,41 @@
-use std::collections::BTreeMap;
-use std::fmt::Debug;
-use std::net::SocketAddr;
-use std::pin::Pin;
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
+use std::{
+    collections::BTreeMap,
+    fmt::Debug,
+    net::SocketAddr,
+    pin::Pin,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration,
 };
-use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::lock::Mutex;
 use futures::{
     self,
     channel::{mpsc, oneshot},
     future::{select, Either},
+    lock::Mutex,
     pin_mut,
     task::{Context, Poll},
     Future, FutureExt, Sink, SinkExt, Stream, StreamExt,
 };
 use native_tls::Certificate;
-use rand::seq::SliceRandom;
-use rand::thread_rng;
+use proto::MessageIdData;
+use rand::{seq::SliceRandom, thread_rng};
 use url::Url;
 use uuid::Uuid;
 
-use proto::MessageIdData;
-
-use crate::consumer::ConsumerOptions;
-use crate::error::{AuthenticationError, ConnectionError, SharedError};
-use crate::executor::{Executor, ExecutorKind};
-use crate::message::{
-    proto::{self, command_subscribe::SubType},
-    BaseCommand, Codec, Message,
+use crate::{
+    consumer::ConsumerOptions,
+    error::{AuthenticationError, ConnectionError, SharedError},
+    executor::{Executor, ExecutorKind},
+    message::{
+        proto::{self, command_subscribe::SubType},
+        BaseCommand, Codec, Message,
+    },
+    producer::{self, ProducerOptions},
 };
-use crate::producer::{self, ProducerOptions};
 
 pub(crate) enum Register {
     Request {
@@ -1099,16 +1101,17 @@ where
 
 pub(crate) mod messages {
     use chrono::Utc;
-
     use proto::MessageIdData;
 
-    use crate::connection::Authentication;
-    use crate::consumer::ConsumerOptions;
-    use crate::message::{
-        proto::{self, base_command::Type as CommandType, command_subscribe::SubType},
-        Message, Payload,
+    use crate::{
+        connection::Authentication,
+        consumer::ConsumerOptions,
+        message::{
+            proto::{self, base_command::Type as CommandType, command_subscribe::SubType},
+            Message, Payload,
+        },
+        producer::{self, ProducerOptions},
     };
-    use crate::producer::{self, ProducerOptions};
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn connect(auth: Option<Authentication>, proxy_to_broker_url: Option<String>) -> Message {

@@ -1,11 +1,12 @@
 #[macro_use]
 extern crate serde;
+use std::env;
+
 use futures::TryStreamExt;
 use pulsar::{
     consumer::ConsumerOptions, proto::Schema, reader::Reader, Authentication, DeserializeMessage,
     Payload, Pulsar, TokioExecutor,
 };
-use std::env;
 
 #[derive(Serialize, Deserialize)]
 struct TestData {

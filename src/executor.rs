@@ -2,8 +2,9 @@
 //!
 //! this crate is compatible with Tokio and async-std, by assembling  them
 //! under the [Executor] trait
-use futures::{Future, Stream};
 use std::{ops::Deref, pin::Pin, sync::Arc};
+
+use futures::{Future, Stream};
 
 /// indicates which executor is used
 pub enum ExecutorKind {

@@ -1,11 +1,11 @@
 #[macro_use]
 extern crate serde;
-use pulsar::authentication::oauth2::OAuth2Authentication;
-use pulsar::{
-    message::proto, producer, Authentication, Error as PulsarError, Pulsar, SerializeMessage,
-    TokioExecutor,
-};
 use std::env;
+
+use pulsar::{
+    authentication::oauth2::OAuth2Authentication, message::proto, producer, Authentication,
+    Error as PulsarError, Pulsar, SerializeMessage, TokioExecutor,
+};
 
 #[derive(Serialize, Deserialize)]
 struct TestData {

@@ -1,6 +1,6 @@
 //! low level structures used to send and process raw messages
-use crate::connection::RequestKey;
-use crate::error::ConnectionError;
+use std::{convert::TryFrom, io::Cursor};
+
 use bytes::{Buf, BufMut, BytesMut};
 use nom::{
     bytes::streaming::take,
@@ -9,15 +9,13 @@ use nom::{
     IResult,
 };
 use prost::{self, Message as ImplProtobuf};
-use std::convert::TryFrom;
-use std::io::Cursor;
+
+use crate::{connection::RequestKey, error::ConnectionError};
 
 const CRC_CASTAGNOLI: crc::Crc<u32> = crc::Crc::<u32>::new(&crc::CRC_32_ISCSI);
 
-pub use self::proto::BaseCommand;
-pub use self::proto::MessageMetadata as Metadata;
-
 use self::proto::*;
+pub use self::proto::{BaseCommand, MessageMetadata as Metadata};
 
 /// Pulsar binary message
 ///
@@ -278,7 +276,8 @@ impl tokio_util::codec::Decoder for Codec {
         trace!("Decoder received {} bytes", src.len());
         if src.len() >= 4 {
             let mut buf = Cursor::new(src);
-            // `messageSize` refers only to _remaining_ message size, so we add 4 to get total frame size
+            // `messageSize` refers only to _remaining_ message size, so we add 4 to get total frame
+            // size
             let message_size = buf.get_u32() as usize + 4;
             let src = buf.into_inner();
             if src.len() >= message_size {
@@ -384,7 +383,8 @@ impl asynchronous_codec::Decoder for Codec {
         trace!("Decoder received {} bytes", src.len());
         if src.len() >= 4 {
             let mut buf = Cursor::new(src);
-            // `messageSize` refers only to _remaining_ message size, so we add 4 to get total frame size
+            // `messageSize` refers only to _remaining_ message size, so we add 4 to get total frame
+            // size
             let message_size = buf.get_u32() as usize + 4;
             let src = buf.into_inner();
             if src.len() >= message_size {
@@ -618,10 +618,12 @@ impl From<prost::DecodeError> for ConnectionError {
 
 #[cfg(test)]
 mod tests {
-    use crate::message::Codec;
-    use bytes::BytesMut;
     use std::convert::TryFrom;
+
+    use bytes::BytesMut;
     use tokio_util::codec::{Decoder, Encoder};
+
+    use crate::message::Codec;
 
     #[test]
     fn parse_simple_command() {

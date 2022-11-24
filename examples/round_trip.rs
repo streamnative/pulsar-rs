@@ -3,8 +3,9 @@
 extern crate serde;
 use futures::TryStreamExt;
 use pulsar::{
-    message::proto, message::proto::command_subscribe::SubType, message::Payload, producer,
-    Consumer, DeserializeMessage, Error as PulsarError, Pulsar, SerializeMessage, TokioExecutor,
+    message::{proto, proto::command_subscribe::SubType, Payload},
+    producer, Consumer, DeserializeMessage, Error as PulsarError, Pulsar, SerializeMessage,
+    TokioExecutor,
 };
 
 #[derive(Serialize, Deserialize)]
