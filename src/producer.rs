@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::client::SerializeMessage;
+use crate::compression::Compression;
 use crate::connection::{Connection, SerialId};
 use crate::error::{ConnectionError, ProducerError};
 use crate::executor::Executor;
@@ -15,7 +16,6 @@ use crate::message::BatchedMessage;
 use crate::{Error, Pulsar};
 use futures::task::{Context, Poll};
 use futures::Future;
-use crate::compression::{Compression};
 
 type ProducerId = u64;
 type ProducerName = String;
@@ -721,8 +721,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
             }
             #[cfg(feature = "flate2")]
             Some(Compression::Zlib(compression)) => {
-                let mut e =
-                    flate2::write::ZlibEncoder::new(Vec::new(), compression.level);
+                let mut e = flate2::write::ZlibEncoder::new(Vec::new(), compression.level);
                 e.write_all(&message.payload[..])
                     .map_err(ProducerError::Io)?;
                 let compressed_payload = e.finish().map_err(ProducerError::Io)?;
@@ -734,8 +733,8 @@ impl<Exe: Executor> TopicProducer<Exe> {
             }
             #[cfg(feature = "zstd")]
             Some(Compression::Zstd(compression)) => {
-                let compressed_payload =
-                    zstd::encode_all(&message.payload[..], compression.level).map_err(ProducerError::Io)?;
+                let compressed_payload = zstd::encode_all(&message.payload[..], compression.level)
+                    .map_err(ProducerError::Io)?;
                 message.uncompressed_size = Some(message.payload.len() as u32);
                 message.payload = compressed_payload;
                 message.compression = Some(proto::CompressionType::Zstd.into());

@@ -94,9 +94,9 @@ pub enum ConnectionError {
 impl ConnectionError {
     pub fn establish_retryable(&self) -> bool {
         match self {
-            ConnectionError::Io(e) =>
-                e.kind() == io::ErrorKind::ConnectionRefused ||
-                    e.kind() == io::ErrorKind::TimedOut,
+            ConnectionError::Io(e) => {
+                e.kind() == io::ErrorKind::ConnectionRefused || e.kind() == io::ErrorKind::TimedOut
+            }
             _ => false,
         }
     }

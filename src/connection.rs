@@ -3,24 +3,24 @@ use std::fmt::Debug;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::{
-    Arc,
     atomic::{AtomicUsize, Ordering},
+    Arc,
 };
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures::lock::Mutex;
 use futures::{
     self,
     channel::{mpsc, oneshot},
-    future::{Either, select},
-    Future,
-    FutureExt,
-    pin_mut, Sink, SinkExt, Stream, StreamExt, task::{Context, Poll},
+    future::{select, Either},
+    pin_mut,
+    task::{Context, Poll},
+    Future, FutureExt, Sink, SinkExt, Stream, StreamExt,
 };
-use futures::lock::Mutex;
 use native_tls::Certificate;
-use rand::thread_rng;
 use rand::seq::SliceRandom;
+use rand::thread_rng;
 use url::Url;
 use uuid::Uuid;
 
@@ -30,8 +30,8 @@ use crate::consumer::ConsumerOptions;
 use crate::error::{AuthenticationError, ConnectionError, SharedError};
 use crate::executor::{Executor, ExecutorKind};
 use crate::message::{
-    BaseCommand,
-    Codec, Message, proto::{self, command_subscribe::SubType},
+    proto::{self, command_subscribe::SubType},
+    BaseCommand, Codec, Message,
 };
 use crate::producer::{self, ProducerOptions};
 
@@ -743,7 +743,7 @@ impl<Exe: Executor> Connection<Exe> {
             .await
         {
             Some(Some(addresses)) if !addresses.is_empty() => addresses,
-            _ => return Err(ConnectionError::NotFound)
+            _ => return Err(ConnectionError::NotFound),
         };
 
         let id = Uuid::new_v4();
@@ -785,7 +785,7 @@ impl<Exe: Executor> Connection<Exe> {
                 }
             };
 
-            return Ok(Connection { id, url, sender })
+            return Ok(Connection { id, url, sender });
         }
 
         let mut fatal_errors = vec![];
@@ -807,7 +807,7 @@ impl<Exe: Executor> Connection<Exe> {
         } else {
             warn!("retry establish connection on: {:?}", retryable_errors);
             Err(retryable_errors.into_iter().next().unwrap())
-        }
+        };
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
@@ -1105,8 +1105,8 @@ pub(crate) mod messages {
     use crate::connection::Authentication;
     use crate::consumer::ConsumerOptions;
     use crate::message::{
-        Message,
-        Payload, proto::{self, base_command::Type as CommandType, command_subscribe::SubType},
+        proto::{self, base_command::Type as CommandType, command_subscribe::SubType},
+        Message, Payload,
     };
     use crate::producer::{self, ProducerOptions};
 

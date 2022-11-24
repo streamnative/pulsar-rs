@@ -2,7 +2,10 @@
 #[macro_use]
 extern crate serde;
 use futures::{future::join_all, TryStreamExt};
-use pulsar::{message::proto::command_subscribe::SubType, message::Payload, producer, Consumer, DeserializeMessage, Error as PulsarError, Pulsar, SerializeMessage, TokioExecutor, compression};
+use pulsar::{
+    compression, message::proto::command_subscribe::SubType, message::Payload, producer, Consumer,
+    DeserializeMessage, Error as PulsarError, Pulsar, SerializeMessage, TokioExecutor,
+};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct TestData {
@@ -42,7 +45,9 @@ async fn main() -> Result<(), pulsar::Error> {
             // compression: Some(compression::Compression::Lz4(compression::CompressionLz4::default())),
             // compression: Some(compression::Compression::Zlib(compression::CompressionZlib::default())),
             // compression: Some(compression::Compression::Zstd(compression::CompressionZstd::default())),
-            compression: Some(compression::Compression::Snappy(compression::CompressionSnappy::default())),
+            compression: Some(compression::Compression::Snappy(
+                compression::CompressionSnappy::default(),
+            )),
             ..Default::default()
         })
         .build()
