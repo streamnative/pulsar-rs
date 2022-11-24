@@ -16,10 +16,12 @@ jobs:
       - uses: Swatinem/rust-cache@v1
       - name: Build
         run: cargo build
-      - name: Check format
-        run: cargo +nightly fmt --all -- --check
       - name: Check Clippy
         run: cargo clippy --tests --all-features -- -D warnings
+      - name: Install nightly rustfmt
+        run: rustup component add rustfmt --toolchain nightly
+      - name: Check format
+        run: cargo +nightly fmt --all --check
 
   test:
     runs-on: ubuntu-latest
