@@ -12,7 +12,7 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use futures::{
-    channel::{mpsc, mpsc::unbounded, oneshot},
+    channel::{mpsc, oneshot},
     future::try_join_all,
     task::{Context, Poll},
     Future, FutureExt, SinkExt, Stream, StreamExt,
@@ -466,7 +466,7 @@ enum InnerConsumer<T: DeserializeMessage, Exe: Executor> {
     Multi(MultiTopicConsumer<T, Exe>),
 }
 
-type MessageIdDataReceiver = mpsc::Receiver<Result<(proto::MessageIdData, Payload), Error>>;
+type MessageIdDataReceiver = mpsc::Receiver<Result<(MessageIdData, Payload), Error>>;
 
 // this is entirely public for use in reader.rs
 pub(crate) struct TopicConsumer<T: DeserializeMessage, Exe: Executor> {
@@ -506,7 +506,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
 
         let mut connection = client.manager.get_connection(&addr).await?;
         let mut current_retries = 0u32;
-        let start = std::time::Instant::now();
+        let start = Instant::now();
         let operation_retry_options = client.operation_retry_options.clone();
 
         loop {
@@ -525,7 +525,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
             {
                 Ok(_) => {
                     if current_retries > 0 {
-                        let dur = (std::time::Instant::now() - start).as_secs();
+                        let dur = (Instant::now() - start).as_secs();
                         log::info!(
                             "subscribe({}) success after {} retries over {} seconds",
                             topic,
@@ -587,12 +587,11 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
             })
             .map_err(|e| Error::Consumer(ConsumerError::Connection(e)))?;
 
-        let (engine_tx, engine_rx) = unbounded();
+        let (engine_tx, engine_rx) = mpsc::unbounded();
         // drop_signal will be dropped when Consumer is dropped, then
         // drop_receiver will return, and we can close the consumer
         let (_drop_signal, drop_receiver) = oneshot::channel::<()>();
         let conn = connection.clone();
-        //let ack_sender = nack_handler.clone();
         let name = consumer_name.clone();
         let topic_name = topic.clone();
         let _ = client.executor.spawn(Box::pin(async move {
@@ -783,7 +782,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    fn create_message(&self, message_id: proto::MessageIdData, payload: Payload) -> Message<T> {
+    fn create_message(&self, message_id: MessageIdData, payload: Payload) -> Message<T> {
         Message {
             topic: self.topic.clone(),
             message_id: MessageData {
@@ -827,7 +826,7 @@ struct ConsumerEngine<Exe: Executor> {
     sub_type: SubType,
     id: u64,
     name: Option<String>,
-    tx: mpsc::Sender<Result<(proto::MessageIdData, Payload), Error>>,
+    tx: mpsc::Sender<Result<(MessageIdData, Payload), Error>>,
     messages_rx: Option<mpsc::UnboundedReceiver<RawMessage>>,
     engine_rx: Option<mpsc::UnboundedReceiver<EngineMessage<Exe>>>,
     event_rx: mpsc::UnboundedReceiver<EngineEvent<Exe>>,
@@ -858,7 +857,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         sub_type: SubType,
         id: u64,
         name: Option<String>,
-        tx: mpsc::Sender<Result<(proto::MessageIdData, Payload), Error>>,
+        tx: mpsc::Sender<Result<(MessageIdData, Payload), Error>>,
         messages_rx: mpsc::UnboundedReceiver<RawMessage>,
         engine_rx: mpsc::UnboundedReceiver<EngineMessage<Exe>>,
         batch_size: u32,
@@ -1444,13 +1443,13 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct MessageData {
-    pub id: proto::MessageIdData,
+    pub id: MessageIdData,
     batch_size: Option<i32>,
 }
 
 struct BatchedMessageIterator {
     messages: std::vec::IntoIter<BatchedMessage>,
-    message_id: proto::MessageIdData,
+    message_id: MessageIdData,
     metadata: Metadata,
     total_messages: u32,
     current_index: u32,
@@ -1458,7 +1457,7 @@ struct BatchedMessageIterator {
 
 impl BatchedMessageIterator {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    fn new(message_id: proto::MessageIdData, payload: Payload) -> Result<Self, ConnectionError> {
+    fn new(message_id: MessageIdData, payload: Payload) -> Result<Self, ConnectionError> {
         let total_messages = payload
             .metadata
             .num_messages_in_batch
@@ -1476,7 +1475,7 @@ impl BatchedMessageIterator {
 }
 
 impl Iterator for BatchedMessageIterator {
-    type Item = (proto::MessageIdData, Payload);
+    type Item = (MessageIdData, Payload);
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn next(&mut self) -> Option<Self::Item> {
@@ -1487,7 +1486,7 @@ impl Iterator for BatchedMessageIterator {
         let index = self.current_index;
         self.current_index += 1;
         if let Some(batched_message) = self.messages.next() {
-            let id = proto::MessageIdData {
+            let id = MessageIdData {
                 batch_index: Some(index as i32),
                 ..self.message_id.clone()
             };
@@ -2124,7 +2123,7 @@ impl<T> Message<T> {
 
     /// Get Pulsar message id for the message
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub fn message_id(&self) -> &proto::MessageIdData {
+    pub fn message_id(&self) -> &MessageIdData {
         &self.message_id.id
     }
 
@@ -2372,7 +2371,7 @@ mod tests {
         let client: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await.unwrap();
 
         let message = TestData {
-            topic: std::iter::repeat(())
+            topic: iter::repeat(())
                 .map(|()| rand::thread_rng().sample(Alphanumeric) as char)
                 .take(8)
                 .map(|c| c as char)
@@ -2472,7 +2471,7 @@ mod tests {
 
         let dead_letter_topic = format!("{}_dlq", topic);
 
-        let dead_letter_policy = crate::consumer::DeadLetterPolicy {
+        let dead_letter_policy = DeadLetterPolicy {
             max_redeliver_count: 1,
             dead_letter_topic: dead_letter_topic.clone(),
         };

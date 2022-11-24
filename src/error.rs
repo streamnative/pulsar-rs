@@ -7,6 +7,8 @@ use std::{
     },
 };
 
+use crate::{message::proto::ServerError, producer::SendFuture};
+
 #[derive(Debug)]
 pub enum Error {
     Connection(ConnectionError),
@@ -426,8 +428,6 @@ impl SharedError {
         self.error_set.store(true, Ordering::Release);
     }
 }
-
-use crate::{message::proto::ServerError, producer::SendFuture};
 
 #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
 pub(crate) fn server_error(i: i32) -> Option<ServerError> {
