@@ -19,7 +19,7 @@ jobs:
       - name: Check Clippy
         run: cargo clippy --tests --all-features -- -D warnings
       - name: Install nightly rustfmt
-        run: rustup component add rustfmt --toolchain nightly
+        run: rustup toolchain install nightly --component rustfmt
       - name: Check format
         run: cargo +nightly fmt --all --check
 
