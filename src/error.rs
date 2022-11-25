@@ -1,9 +1,13 @@
 //! Error types
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+use std::{
+    fmt, io,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
-use std::{fmt, io};
+
+use crate::{message::proto::ServerError, producer::SendFuture};
 
 #[derive(Debug)]
 pub enum Error {
@@ -94,9 +98,9 @@ pub enum ConnectionError {
 impl ConnectionError {
     pub fn establish_retryable(&self) -> bool {
         match self {
-            ConnectionError::Io(e) =>
-                e.kind() == io::ErrorKind::ConnectionRefused ||
-                    e.kind() == io::ErrorKind::TimedOut,
+            ConnectionError::Io(e) => {
+                e.kind() == io::ErrorKind::ConnectionRefused || e.kind() == io::ErrorKind::TimedOut
+            }
             _ => false,
         }
     }
@@ -230,7 +234,8 @@ pub enum ProducerError {
     PartialSend(Vec<Result<SendFuture, Error>>),
     /// Indiciates the error was part of sending a batch, and thus shared across the batch
     Batch(Arc<Error>),
-    /// Indicates this producer has lost exclusive access to the topic. Client can decided whether to recreate or not
+    /// Indicates this producer has lost exclusive access to the topic. Client can decided whether
+    /// to recreate or not
     Fenced,
 }
 
@@ -423,9 +428,6 @@ impl SharedError {
         self.error_set.store(true, Ordering::Release);
     }
 }
-
-use crate::message::proto::ServerError;
-use crate::producer::SendFuture;
 
 #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
 pub(crate) fn server_error(i: i32) -> Option<ServerError> {

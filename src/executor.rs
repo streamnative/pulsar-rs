@@ -2,8 +2,9 @@
 //!
 //! this crate is compatible with Tokio and async-std, by assembling  them
 //! under the [Executor] trait
+use std::{ops::Deref, pin::Pin, sync::Arc, task::Poll};
+
 use futures::{Future, Stream};
-use std::{ops::Deref, pin::Pin, sync::Arc};
 
 /// indicates which executor is used
 pub enum ExecutorKind {
@@ -159,7 +160,6 @@ pub enum JoinHandle<T> {
     PlaceHolder(T),
 }
 
-use std::task::Poll;
 impl<T> Future for JoinHandle<T> {
     type Output = Option<T>;
 

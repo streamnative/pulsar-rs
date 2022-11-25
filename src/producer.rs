@@ -1,21 +1,32 @@
 //! Message publication
-use futures::{channel::oneshot, future::try_join_all, lock::Mutex};
-use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::io::Write;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{
+    collections::{BTreeMap, HashMap, VecDeque},
+    io::Write,
+    pin::Pin,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
-use crate::client::SerializeMessage;
-use crate::connection::{Connection, SerialId};
-use crate::error::{ConnectionError, ProducerError};
-use crate::executor::Executor;
-use crate::message::proto::{self, CommandSendReceipt, EncryptionKeys, Schema};
-use crate::message::BatchedMessage;
-use crate::{Error, Pulsar};
-use futures::task::{Context, Poll};
-use futures::Future;
-use crate::compression::{Compression};
+use futures::{
+    channel::oneshot,
+    future::try_join_all,
+    lock::Mutex,
+    task::{Context, Poll},
+    Future,
+};
+
+use crate::{
+    client::SerializeMessage,
+    compression::Compression,
+    connection::{Connection, SerialId},
+    error::{ConnectionError, ProducerError},
+    executor::Executor,
+    message::{
+        proto::{self, CommandSendReceipt, EncryptionKeys, Schema},
+        BatchedMessage,
+    },
+    Error, Pulsar,
+};
 
 type ProducerId = u64;
 type ProducerName = String;
@@ -129,7 +140,8 @@ pub struct ProducerOptions {
     pub batch_size: Option<u32>,
     /// algorithm used to compress the messages
     pub compression: Option<Compression>,
-    /// producer access mode: shared = 0, exclusive = 1, waitforexclusive =2, exclusivewithoutfencing =3
+    /// producer access mode: shared = 0, exclusive = 1, waitforexclusive =2,
+    /// exclusivewithoutfencing =3
     pub access_mode: Option<i32>,
 }
 
@@ -142,9 +154,7 @@ pub struct ProducerOptions {
 /// # let topic = "topic";
 /// # let message = "data".to_owned();
 /// let pulsar: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await?;
-/// let mut producer = pulsar.producer()
-///     .with_name("name")
-///     .build_multi_topic();
+/// let mut producer = pulsar.producer().with_name("name").build_multi_topic();
 /// let send_1 = producer.send(topic, &message).await?;
 /// let send_2 = producer.send(topic, &message).await?;
 /// send_1.await?;
@@ -226,8 +236,9 @@ impl<Exe: Executor> MultiTopicProducer<Exe> {
         for msg in messages {
             sends.push(self.send(&topic, msg).await);
         }
-        // TODO determine whether to keep this approach or go with the partial send, but more mem friendly lazy approach.
-        // serialize all messages before sending to avoid a partial send
+        // TODO determine whether to keep this approach or go with the partial send, but more mem
+        // friendly lazy approach. serialize all messages before sending to avoid a partial
+        // send
         if sends.iter().all(|s| s.is_ok()) {
             Ok(sends.into_iter().map(|s| s.unwrap()).collect())
         } else {
@@ -721,8 +732,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
             }
             #[cfg(feature = "flate2")]
             Some(Compression::Zlib(compression)) => {
-                let mut e =
-                    flate2::write::ZlibEncoder::new(Vec::new(), compression.level);
+                let mut e = flate2::write::ZlibEncoder::new(Vec::new(), compression.level);
                 e.write_all(&message.payload[..])
                     .map_err(ProducerError::Io)?;
                 let compressed_payload = e.finish().map_err(ProducerError::Io)?;
@@ -734,8 +744,8 @@ impl<Exe: Executor> TopicProducer<Exe> {
             }
             #[cfg(feature = "zstd")]
             Some(Compression::Zstd(compression)) => {
-                let compressed_payload =
-                    zstd::encode_all(&message.payload[..], compression.level).map_err(ProducerError::Io)?;
+                let compressed_payload = zstd::encode_all(&message.payload[..], compression.level)
+                    .map_err(ProducerError::Io)?;
                 message.uncompressed_size = Some(message.payload.len() as u32);
                 message.payload = compressed_payload;
                 message.compression = Some(proto::CompressionType::Zstd.into());

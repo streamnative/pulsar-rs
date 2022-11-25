@@ -1,11 +1,12 @@
 #[macro_use]
 extern crate serde;
-use futures::TryStreamExt;
-use pulsar::authentication::oauth2::OAuth2Authentication;
-use pulsar::{
-    Authentication, Consumer, DeserializeMessage, Payload, Pulsar, SubType, TokioExecutor,
-};
 use std::env;
+
+use futures::TryStreamExt;
+use pulsar::{
+    authentication::oauth2::OAuth2Authentication, Authentication, Consumer, DeserializeMessage,
+    Payload, Pulsar, SubType, TokioExecutor,
+};
 
 #[derive(Serialize, Deserialize)]
 struct TestData {

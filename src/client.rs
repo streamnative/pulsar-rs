@@ -1,24 +1,26 @@
-use std::string::FromUtf8Error;
-use std::sync::Arc;
+use std::{string::FromUtf8Error, sync::Arc};
 
-use futures::channel::{mpsc, oneshot};
-
-use crate::connection::Authentication;
-use crate::connection_manager::{
-    BrokerAddress, ConnectionManager, ConnectionRetryOptions, OperationRetryOptions, TlsOptions,
-};
-use crate::consumer::{ConsumerBuilder, ConsumerOptions, InitialPosition};
-use crate::error::ConnectionError;
-use crate::error::Error;
-use crate::executor::Executor;
-use crate::message::proto::{self, CommandSendReceipt};
-use crate::message::Payload;
-use crate::producer::{self, ProducerBuilder, SendFuture};
-use crate::service_discovery::ServiceDiscovery;
 use futures::{
+    channel::{mpsc, oneshot},
     future::{select, Either},
     lock::Mutex,
     pin_mut, StreamExt,
+};
+
+use crate::{
+    connection::Authentication,
+    connection_manager::{
+        BrokerAddress, ConnectionManager, ConnectionRetryOptions, OperationRetryOptions, TlsOptions,
+    },
+    consumer::{ConsumerBuilder, ConsumerOptions, InitialPosition},
+    error::{ConnectionError, Error},
+    executor::Executor,
+    message::{
+        proto::{self, CommandSendReceipt},
+        Payload,
+    },
+    producer::{self, ProducerBuilder, SendFuture},
+    service_discovery::ServiceDiscovery,
 };
 
 /// Helper trait for consumer deserialization
@@ -238,9 +240,7 @@ impl<Exe: Executor> Pulsar<Exe> {
     /// # async fn run() -> Result<(), pulsar::Error> {
     /// let addr = "pulsar://127.0.0.1:6650";
     /// // you can indicate which executor you use as the return type of client creation
-    /// let pulsar: Pulsar<_> = Pulsar::builder(addr, TokioExecutor)
-    ///     .build()
-    ///     .await?;
+    /// let pulsar: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await?;
     /// # Ok(())
     /// # }
     /// ```

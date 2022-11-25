@@ -44,7 +44,7 @@ impl Clone for CompressionLz4 {
                 CompressionMode::HIGHCOMPRESSION(i) => CompressionMode::HIGHCOMPRESSION(i),
                 CompressionMode::FAST(i) => CompressionMode::FAST(i),
                 CompressionMode::DEFAULT => CompressionMode::DEFAULT,
-            }
+            },
         }
     }
 }

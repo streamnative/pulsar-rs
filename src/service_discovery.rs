@@ -1,13 +1,17 @@
-use crate::connection_manager::{BrokerAddress, ConnectionManager};
-use crate::error::{ConnectionError, ServiceDiscoveryError};
-use crate::executor::Executor;
-use crate::message::proto::{
-    command_lookup_topic_response, command_partitioned_topic_metadata_response,
-    CommandLookupTopicResponse,
-};
-use futures::{future::try_join_all, FutureExt};
 use std::sync::Arc;
+
+use futures::{future::try_join_all, FutureExt};
 use url::Url;
+
+use crate::{
+    connection_manager::{BrokerAddress, ConnectionManager},
+    error::{ConnectionError, ServiceDiscoveryError},
+    executor::Executor,
+    message::proto::{
+        command_lookup_topic_response, command_partitioned_topic_metadata_response,
+        CommandLookupTopicResponse,
+    },
+};
 
 /// Look up broker addresses for topics and partitioned topics
 ///

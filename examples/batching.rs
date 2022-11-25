@@ -1,8 +1,14 @@
 #![recursion_limit = "256"]
 #[macro_use]
 extern crate serde;
+
 use futures::{future::join_all, TryStreamExt};
-use pulsar::{message::proto::command_subscribe::SubType, message::Payload, producer, Consumer, DeserializeMessage, Error as PulsarError, Pulsar, SerializeMessage, TokioExecutor, compression};
+use pulsar::{
+    compression::*,
+    message::{proto::command_subscribe::SubType, Payload},
+    producer, Consumer, DeserializeMessage, Error as PulsarError, Pulsar, SerializeMessage,
+    TokioExecutor,
+};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct TestData {
@@ -39,10 +45,10 @@ async fn main() -> Result<(), pulsar::Error> {
         .with_name("my-producer2".to_string())
         .with_options(producer::ProducerOptions {
             batch_size: Some(4),
-            // compression: Some(compression::Compression::Lz4(compression::CompressionLz4::default())),
-            // compression: Some(compression::Compression::Zlib(compression::CompressionZlib::default())),
-            // compression: Some(compression::Compression::Zstd(compression::CompressionZstd::default())),
-            compression: Some(compression::Compression::Snappy(compression::CompressionSnappy::default())),
+            // compression: Some(Compression::Lz4(CompressionLz4::default())),
+            // compression: Some(Compression::Zlib(CompressionZlib::default())),
+            // compression: Some(Compression::Zstd(CompressionZstd::default())),
+            compression: Some(Compression::Snappy(CompressionSnappy::default())),
             ..Default::default()
         })
         .build()
