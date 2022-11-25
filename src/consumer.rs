@@ -2315,7 +2315,7 @@ mod tests {
         let consumer_1: Consumer<TestData, _> = builder
             .clone()
             .with_subscription("consumer_1")
-            .with_topics(&[&topic1, &topic2])
+            .with_topics([&topic1, &topic2])
             .build()
             .await
             .unwrap();

@@ -148,7 +148,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
             None => vec![],
             Some(certificate_chain) => {
                 let mut v = vec![];
-                for cert in pem::parse_many(&certificate_chain)
+                for cert in pem::parse_many(certificate_chain)
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
                     .iter()
                     .rev()
