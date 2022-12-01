@@ -24,7 +24,7 @@ pub struct BrokerAddress {
 pub struct ConnectionRetryOptions {
     /// minimum delay between connection retries
     pub min_backoff: Duration,
-    /// maximum delay between rconnection etries
+    /// maximum delay between reconnection retries
     pub max_backoff: Duration,
     /// maximum number of connection retries
     pub max_retries: u32,
