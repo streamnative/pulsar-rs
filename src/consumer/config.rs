@@ -1,7 +1,9 @@
-use crate::consumer::data::DeadLetterPolicy;
-use crate::consumer::options::ConsumerOptions;
-use crate::message::proto::command_subscribe::SubType;
 use std::time::Duration;
+
+use crate::{
+    consumer::{data::DeadLetterPolicy, options::ConsumerOptions},
+    message::proto::command_subscribe::SubType,
+};
 
 /// the complete configuration of a consumer
 #[derive(Debug, Clone, Default)]

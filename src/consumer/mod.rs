@@ -17,16 +17,14 @@ use std::{
     time::Duration,
 };
 
+pub use builder::ConsumerBuilder;
 use chrono::{DateTime, Utc};
+pub use data::{DeadLetterPolicy, EngineMessage};
 use futures::{
     future::try_join_all,
     task::{Context, Poll},
     Stream, StreamExt,
 };
-
-pub use builder::ConsumerBuilder;
-pub use data::DeadLetterPolicy;
-pub use data::EngineMessage;
 pub use initial_position::InitialPosition;
 pub use message::Message;
 use multi::MultiTopicConsumer;
@@ -364,9 +362,11 @@ impl<T: DeserializeMessage + 'static, Exe: Executor> Stream for Consumer<T, Exe>
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-    use std::iter;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::{
+        collections::HashSet,
+        iter,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     use futures::{
         future::{select, Either},
@@ -378,10 +378,12 @@ mod tests {
     use tokio::time::timeout;
 
     use super::*;
-    use crate::consumer::initial_position::InitialPosition;
     #[cfg(feature = "tokio-runtime")]
     use crate::executor::TokioExecutor;
-    use crate::{producer, tests::TEST_LOGGER, Payload, Pulsar, SerializeMessage};
+    use crate::{
+        consumer::initial_position::InitialPosition, producer, tests::TEST_LOGGER, Payload, Pulsar,
+        SerializeMessage,
+    };
 
     #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
     pub struct TestData {

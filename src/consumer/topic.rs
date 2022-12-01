@@ -1,21 +1,32 @@
-use crate::connection::Connection;
-use crate::consumer::config::ConsumerConfig;
-use crate::consumer::data::{DeadLetterPolicy, EngineMessage, MessageData, MessageIdDataReceiver};
-use crate::consumer::engine::ConsumerEngine;
-use crate::consumer::message::Message;
-use crate::error::{ConnectionError, ConsumerError};
-use crate::message::proto::MessageIdData;
-use crate::proto::CommandConsumerStatsResponse;
-use crate::{proto, BrokerAddress, DeserializeMessage, Error, Executor, Payload, Pulsar};
+use std::{
+    marker::PhantomData,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+    time::{Duration, Instant},
+};
+
 use async_std::prelude::Stream;
 use chrono::{DateTime, Utc};
-use futures::channel::{mpsc, oneshot};
-use futures::{FutureExt, SinkExt, StreamExt};
-use std::marker::PhantomData;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll};
-use std::time::{Duration, Instant};
+use futures::{
+    channel::{mpsc, oneshot},
+    FutureExt, SinkExt, StreamExt,
+};
+
+use crate::{
+    connection::Connection,
+    consumer::{
+        config::ConsumerConfig,
+        data::{DeadLetterPolicy, EngineMessage, MessageData, MessageIdDataReceiver},
+        engine::ConsumerEngine,
+        message::Message,
+    },
+    error::{ConnectionError, ConsumerError},
+    message::proto::MessageIdData,
+    proto,
+    proto::CommandConsumerStatsResponse,
+    BrokerAddress, DeserializeMessage, Error, Executor, Payload, Pulsar,
+};
 
 // this is entirely public for use in reader.rs
 pub struct TopicConsumer<T: DeserializeMessage, Exe: Executor> {

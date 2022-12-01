@@ -1,19 +1,21 @@
-use crate::consumer::config::ConsumerConfig;
-use crate::consumer::data::DeadLetterPolicy;
-use crate::consumer::multi::MultiTopicConsumer;
-use crate::consumer::options::ConsumerOptions;
-use crate::consumer::topic::TopicConsumer;
-use crate::consumer::InnerConsumer;
-use crate::message::proto::command_subscribe::SubType;
-use crate::reader::{Reader, State};
-use crate::{BrokerAddress, Consumer, DeserializeMessage, Error, Executor, Pulsar};
-use futures::future::try_join_all;
-use futures::StreamExt;
-use rand::distributions::Alphanumeric;
-use rand::Rng;
+use std::{
+    collections::{BTreeMap, VecDeque},
+    time::Duration,
+};
+
+use futures::{future::try_join_all, StreamExt};
+use rand::{distributions::Alphanumeric, Rng};
 use regex::Regex;
-use std::collections::{BTreeMap, VecDeque};
-use std::time::Duration;
+
+use crate::{
+    consumer::{
+        config::ConsumerConfig, data::DeadLetterPolicy, multi::MultiTopicConsumer,
+        options::ConsumerOptions, topic::TopicConsumer, InnerConsumer,
+    },
+    message::proto::command_subscribe::SubType,
+    reader::{Reader, State},
+    BrokerAddress, Consumer, DeserializeMessage, Error, Executor, Pulsar,
+};
 
 /// Builder structure for consumers
 ///

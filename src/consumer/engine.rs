@@ -1,18 +1,31 @@
-use crate::connection::Connection;
-use crate::consumer::batched_message_iterator::BatchedMessageIterator;
-use crate::consumer::data::{DeadLetterPolicy, EngineEvent, EngineMessage, MessageData};
-use crate::consumer::options::ConsumerOptions;
-use crate::error::{ConnectionError, ConsumerError};
-use crate::message::proto::{command_subscribe::SubType, MessageIdData};
-use crate::message::Message as RawMessage;
-use crate::proto::{BaseCommand, CommandCloseConsumer, CommandMessage};
-use crate::{proto, Error, Executor, Payload, Pulsar};
-use futures::channel::{mpsc, oneshot};
-use futures::{SinkExt, StreamExt};
-use std::collections::{HashMap, HashSet};
-use std::future::Future;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    future::Future,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+use futures::{
+    channel::{mpsc, oneshot},
+    SinkExt, StreamExt,
+};
+
+use crate::{
+    connection::Connection,
+    consumer::{
+        batched_message_iterator::BatchedMessageIterator,
+        data::{DeadLetterPolicy, EngineEvent, EngineMessage, MessageData},
+        options::ConsumerOptions,
+    },
+    error::{ConnectionError, ConsumerError},
+    message::{
+        proto::{command_subscribe::SubType, MessageIdData},
+        Message as RawMessage,
+    },
+    proto,
+    proto::{BaseCommand, CommandCloseConsumer, CommandMessage},
+    Error, Executor, Payload, Pulsar,
+};
 
 pub struct ConsumerEngine<Exe: Executor> {
     client: Pulsar<Exe>,

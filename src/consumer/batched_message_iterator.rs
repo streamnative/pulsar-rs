@@ -1,8 +1,8 @@
-use crate::error::ConnectionError;
-use crate::message::proto::MessageIdData;
-use crate::message::Metadata;
-use crate::message::{parse_batched_message, BatchedMessage};
-use crate::Payload;
+use crate::{
+    error::ConnectionError,
+    message::{parse_batched_message, proto::MessageIdData, BatchedMessage, Metadata},
+    Payload,
+};
 
 pub struct BatchedMessageIterator {
     messages: std::vec::IntoIter<BatchedMessage>,

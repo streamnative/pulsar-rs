@@ -1,6 +1,9 @@
-use crate::consumer::initial_position::InitialPosition;
-use crate::message::proto::{MessageIdData, Schema};
 use std::collections::BTreeMap;
+
+use crate::{
+    consumer::initial_position::InitialPosition,
+    message::proto::{MessageIdData, Schema},
+};
 
 /// Configuration options for consumers
 #[derive(Clone, Default, Debug)]

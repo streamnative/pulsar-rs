@@ -1,9 +1,12 @@
-use crate::connection::Connection;
-use crate::message::proto::MessageIdData;
-use crate::message::Message as RawMessage;
-use crate::{Error, Executor, Payload};
-use futures::channel::{mpsc, oneshot};
 use std::sync::Arc;
+
+use futures::channel::{mpsc, oneshot};
+
+use crate::{
+    connection::Connection,
+    message::{proto::MessageIdData, Message as RawMessage},
+    Error, Executor, Payload,
+};
 
 pub type MessageIdDataReceiver = mpsc::Receiver<Result<(MessageIdData, Payload), Error>>;
 

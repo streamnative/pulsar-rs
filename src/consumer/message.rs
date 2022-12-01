@@ -1,7 +1,10 @@
-use crate::consumer::data::MessageData;
-use crate::message::proto::{MessageIdData, MessageMetadata};
-use crate::{DeserializeMessage, Payload};
 use std::marker::PhantomData;
+
+use crate::{
+    consumer::data::MessageData,
+    message::proto::{MessageIdData, MessageMetadata},
+    DeserializeMessage, Payload,
+};
 
 /// a message received by a consumer
 ///

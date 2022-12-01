@@ -1,20 +1,25 @@
-use crate::consumer::config::ConsumerConfig;
-use crate::consumer::message::Message;
-use crate::consumer::topic::TopicConsumer;
-use crate::error::{ConnectionError, ConsumerError};
-use crate::message::proto::MessageIdData;
-use crate::proto::CommandConsumerStatsResponse;
-use crate::{proto, DeserializeMessage, Error, Executor, Pulsar};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    fmt::Debug,
+    future::Future,
+    iter,
+    pin::Pin,
+    task::{Context, Poll},
+};
+
 use async_std::prelude::Stream;
 use chrono::{DateTime, Utc};
 use futures::future::try_join_all;
 use regex::Regex;
-use std::collections::{BTreeMap, VecDeque};
-use std::fmt::Debug;
-use std::future::Future;
-use std::iter;
-use std::pin::Pin;
-use std::task::{Context, Poll};
+
+use crate::{
+    consumer::{config::ConsumerConfig, message::Message, topic::TopicConsumer},
+    error::{ConnectionError, ConsumerError},
+    message::proto::MessageIdData,
+    proto,
+    proto::CommandConsumerStatsResponse,
+    DeserializeMessage, Error, Executor, Pulsar,
+};
 
 /// A consumer that can subscribe on multiple topics, from a regex matching
 /// topic names
