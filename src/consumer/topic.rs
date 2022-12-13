@@ -38,13 +38,13 @@ pub struct TopicConsumer<T: DeserializeMessage, Exe: Executor> {
     #[allow(unused)]
     data_type: PhantomData<fn(Payload) -> T::Output>,
     pub(crate) dead_letter_policy: Option<DeadLetterPolicy>,
-    pub(crate) last_message_received: Option<DateTime<Utc>>,
-    pub(crate) messages_received: u64,
+    pub(super) last_message_received: Option<DateTime<Utc>>,
+    pub(super) messages_received: u64,
 }
 
 impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub async fn new(
+    pub(super) async fn new(
         client: Pulsar<Exe>,
         topic: String,
         mut addr: BrokerAddress,

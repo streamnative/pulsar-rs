@@ -16,7 +16,7 @@ pub struct Message<T> {
     pub payload: Payload,
     /// contains the message's id and batch size data
     pub message_id: MessageData,
-    pub(crate) _phantom: PhantomData<T>,
+    pub(super) _phantom: PhantomData<T>,
 }
 
 impl<T> Message<T> {
