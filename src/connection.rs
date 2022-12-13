@@ -465,6 +465,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    /// Try to subscribe a consumer to a given topic
     pub async fn subscribe(
         &self,
         resolver: mpsc::UnboundedSender<Message>,

@@ -1,4 +1,5 @@
 use std::{
+    io::ErrorKind,
     marker::PhantomData,
     pin::Pin,
     sync::Arc,
@@ -95,44 +96,90 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
                     }
                     break;
                 }
-                Err(ConnectionError::PulsarError(
-                    Some(proto::ServerError::ServiceNotReady),
-                    text,
-                )) => {
-                    if operation_retry_options.max_retries.is_none()
-                        || operation_retry_options.max_retries.unwrap() > current_retries
-                    {
-                        error!("subscribe({}) answered ServiceNotReady, retrying request after {}ms (max_retries = {:?}): {}",
-                        topic, operation_retry_options.retry_delay.as_millis(),
-                        operation_retry_options.max_retries, text.unwrap_or_default());
+                Err(ConnectionError::PulsarError(Some(err), text)) => {
+                    if matches!(
+                        err,
+                        proto::ServerError::ServiceNotReady | proto::ServerError::ConsumerBusy
+                    ) {
+                        // Pulsar retryable error
+                        match operation_retry_options.max_retries {
+                            Some(max_retries) if current_retries < max_retries => {
+                                error!("subscribe({}) answered {}, retrying request after {}ms (max_retries = {:?}): {}",
+                                topic, err.as_str_name(), operation_retry_options.retry_delay.as_millis(),
+                                operation_retry_options.max_retries, text.unwrap_or_default());
 
-                        current_retries += 1;
-                        client
-                            .executor
-                            .delay(operation_retry_options.retry_delay)
-                            .await;
+                                current_retries += 1;
+                                client
+                                    .executor
+                                    .delay(operation_retry_options.retry_delay)
+                                    .await;
 
-                        // we need to look up again the topic's address
-                        let prev = addr;
-                        addr = client.lookup_topic(&topic).await?;
-                        if prev != addr {
-                            info!(
-                                "topic {} moved: previous = {:?}, new = {:?}",
-                                topic, prev, addr
-                            );
+                                // we need to look up again the topic's address
+                                let prev = addr;
+                                addr = client.lookup_topic(&topic).await?;
+                                if prev != addr {
+                                    info!(
+                                        "topic {} moved: previous = {:?}, new = {:?}",
+                                        topic, prev, addr
+                                    );
+                                }
+
+                                connection = client.manager.get_connection(&addr).await?;
+                                continue;
+                            }
+                            _ => {
+                                error!("subscribe({}) reached max retries", topic);
+
+                                return Err(ConnectionError::PulsarError(
+                                    Some(proto::ServerError::ServiceNotReady),
+                                    text,
+                                )
+                                .into());
+                            }
                         }
-
-                        connection = client.manager.get_connection(&addr).await?;
-                        continue;
-                    } else {
-                        error!("subscribe({}) reached max retries", topic);
-
-                        return Err(ConnectionError::PulsarError(
-                            Some(proto::ServerError::ServiceNotReady),
-                            text,
-                        )
-                        .into());
                     }
+                }
+                Err(ConnectionError::Io(e))
+                    if matches!(
+                        e.kind(),
+                        ErrorKind::ConnectionReset
+                            | ErrorKind::ConnectionAborted
+                            | ErrorKind::NotConnected
+                            | ErrorKind::BrokenPipe
+                            | ErrorKind::TimedOut
+                            | ErrorKind::Interrupted
+                            | ErrorKind::UnexpectedEof
+                    ) =>
+                {
+                    match operation_retry_options.max_retries {
+                        Some(max_retries) if current_retries < max_retries => {
+                            error!(
+                                    "create consumer( {} {}, retrying request after {}ms (max_retries = {:?})",
+                                    topic, e.kind().to_string(), operation_retry_options.retry_delay.as_millis(),
+                                    operation_retry_options.max_retries
+                                );
+
+                            current_retries += 1;
+                            client
+                                .executor
+                                .delay(operation_retry_options.retry_delay)
+                                .await;
+
+                            let addr = client.lookup_topic(&topic).await?;
+                            connection = client.manager.get_connection(&addr).await?;
+
+                            continue;
+                        }
+                        _ => {
+                            // The error was retryable but the number of overall retries
+                            // is exhausted
+                            return Err(ConsumerError::Io(e).into());
+                        }
+                    }
+                }
+                Err(ConnectionError::Io(e)) => {
+                    // The error is not retryable
+                    return Err(ConsumerError::Io(e).into());
                 }
                 Err(e) => return Err(Error::Connection(e)),
             }
