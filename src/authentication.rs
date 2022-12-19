@@ -16,8 +16,7 @@ pub mod token {
 
     use async_trait::async_trait;
 
-    use crate::authentication::Authentication;
-    use crate::error::AuthenticationError;
+    use crate::{authentication::Authentication, error::AuthenticationError};
 
     pub struct TokenAuthentication {
         token: Vec<u8>,
@@ -54,24 +53,26 @@ pub mod token {
 
 #[cfg(feature = "auth-oauth2")]
 pub mod oauth2 {
-    use std::fmt::{Display, Formatter};
-    use std::fs;
-    use std::time::Instant;
+    use std::{
+        fmt::{Display, Formatter},
+        fs,
+        time::Instant,
+    };
 
     use async_trait::async_trait;
     use data_url::DataUrl;
     use nom::lib::std::ops::Add;
-    use oauth2::basic::{BasicClient, BasicTokenResponse};
-    use oauth2::reqwest::async_http_client;
-    use oauth2::AuthType::RequestBody;
-    use oauth2::{AuthUrl, ClientId, ClientSecret, Scope, TokenResponse, TokenUrl};
-    use openidconnect::core::CoreProviderMetadata;
-    use openidconnect::IssuerUrl;
+    use oauth2::{
+        basic::{BasicClient, BasicTokenResponse},
+        reqwest::async_http_client,
+        AuthType::RequestBody,
+        AuthUrl, ClientId, ClientSecret, Scope, TokenResponse, TokenUrl,
+    };
+    use openidconnect::{core::CoreProviderMetadata, IssuerUrl};
     use serde::Deserialize;
     use url::Url;
 
-    use crate::authentication::Authentication;
-    use crate::error::AuthenticationError;
+    use crate::{authentication::Authentication, error::AuthenticationError};
 
     #[derive(Deserialize, Debug)]
     struct OAuth2PrivateParams {

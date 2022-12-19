@@ -1,14 +1,11 @@
-use crate::connection::Connection;
-use crate::error::ConnectionError;
-use crate::executor::Executor;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use futures::{channel::oneshot, lock::Mutex};
 use native_tls::Certificate;
 use rand::Rng;
 use url::Url;
+
+use crate::{connection::Connection, error::ConnectionError, executor::Executor};
 
 /// holds connection information for a broker
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -27,7 +24,7 @@ pub struct BrokerAddress {
 pub struct ConnectionRetryOptions {
     /// minimum delay between connection retries
     pub min_backoff: Duration,
-    /// maximum delay between rconnection etries
+    /// maximum delay between reconnection retries
     pub max_backoff: Duration,
     /// maximum number of connection retries
     pub max_retries: u32,
@@ -37,7 +34,7 @@ pub struct ConnectionRetryOptions {
     pub keep_alive: Duration,
 }
 
-impl std::default::Default for ConnectionRetryOptions {
+impl Default for ConnectionRetryOptions {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn default() -> Self {
         ConnectionRetryOptions {
@@ -61,7 +58,7 @@ pub struct OperationRetryOptions {
     pub max_retries: Option<u32>,
 }
 
-impl std::default::Default for OperationRetryOptions {
+impl Default for OperationRetryOptions {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn default() -> Self {
         OperationRetryOptions {
@@ -119,7 +116,7 @@ pub struct ConnectionManager<Exe: Executor> {
     connection_retry_options: ConnectionRetryOptions,
     pub(crate) operation_retry_options: OperationRetryOptions,
     tls_options: TlsOptions,
-    certificate_chain: Vec<native_tls::Certificate>,
+    certificate_chain: Vec<Certificate>,
 }
 
 impl<Exe: Executor> ConnectionManager<Exe> {
@@ -151,7 +148,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
             None => vec![],
             Some(certificate_chain) => {
                 let mut v = vec![];
-                for cert in pem::parse_many(&certificate_chain)
+                for cert in pem::parse_many(certificate_chain)
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
                     .iter()
                     .rev()

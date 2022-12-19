@@ -1,6 +1,6 @@
 //! low level structures used to send and process raw messages
-use crate::connection::RequestKey;
-use crate::error::ConnectionError;
+use std::{convert::TryFrom, io::Cursor};
+
 use bytes::{Buf, BufMut, BytesMut};
 use nom::{
     bytes::streaming::take,
@@ -9,15 +9,12 @@ use nom::{
     IResult,
 };
 use prost::{self, Message as ImplProtobuf};
-use std::convert::TryFrom;
-use std::io::Cursor;
-
-const CRC_CASTAGNOLI: crc::Crc<u32> = crc::Crc::<u32>::new(&crc::CRC_32_ISCSI);
-
-pub use self::proto::BaseCommand;
-pub use self::proto::MessageMetadata as Metadata;
 
 use self::proto::*;
+pub use self::proto::{BaseCommand, MessageMetadata as Metadata};
+use crate::{connection::RequestKey, error::ConnectionError};
+
+const CRC_CASTAGNOLI: crc::Crc<u32> = crc::Crc::<u32>::new(&crc::CRC_32_ISCSI);
 
 /// Pulsar binary message
 ///
@@ -278,7 +275,8 @@ impl tokio_util::codec::Decoder for Codec {
         trace!("Decoder received {} bytes", src.len());
         if src.len() >= 4 {
             let mut buf = Cursor::new(src);
-            // `messageSize` refers only to _remaining_ message size, so we add 4 to get total frame size
+            // `messageSize` refers only to _remaining_ message size, so we add 4 to get total frame
+            // size
             let message_size = buf.get_u32() as usize + 4;
             let src = buf.into_inner();
             if src.len() >= message_size {
@@ -384,7 +382,8 @@ impl asynchronous_codec::Decoder for Codec {
         trace!("Decoder received {} bytes", src.len());
         if src.len() >= 4 {
             let mut buf = Cursor::new(src);
-            // `messageSize` refers only to _remaining_ message size, so we add 4 to get total frame size
+            // `messageSize` refers only to _remaining_ message size, so we add 4 to get total frame
+            // size
             let message_size = buf.get_u32() as usize + 4;
             let src = buf.into_inner();
             if src.len() >= message_size {
@@ -492,7 +491,7 @@ fn payload_frame(i: &[u8]) -> IResult<&[u8], PayloadFrame> {
 }
 
 pub(crate) struct BatchedMessage {
-    pub metadata: proto::SingleMessageMetadata,
+    pub metadata: SingleMessageMetadata,
     pub payload: Vec<u8>,
 }
 
@@ -500,7 +499,7 @@ pub(crate) struct BatchedMessage {
 fn batched_message(i: &[u8]) -> IResult<&[u8], BatchedMessage> {
     let (i, metadata_size) = be_u32(i)?;
     let (i, metadata) = verify(
-        map_res(take(metadata_size), proto::SingleMessageMetadata::decode),
+        map_res(take(metadata_size), SingleMessageMetadata::decode),
         // payload_size is defined as i32 in protobuf
         |metadata| metadata.payload_size >= 0,
     )(i)?;
@@ -538,10 +537,11 @@ impl BatchedMessage {
 }
 
 pub mod proto {
+    #![allow(clippy::all)]
     include!(concat!(env!("OUT_DIR"), "/pulsar.proto.rs"));
 
     //trait implementations used in Consumer::unacked_messages
-    impl std::cmp::Eq for MessageIdData {}
+    impl Eq for MessageIdData {}
 
     #[allow(clippy::derive_hash_xor_eq)]
     impl std::hash::Hash for MessageIdData {
@@ -557,46 +557,46 @@ pub mod proto {
     }
 }
 
-impl TryFrom<i32> for proto::base_command::Type {
+impl TryFrom<i32> for base_command::Type {
     type Error = ();
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn try_from(value: i32) -> Result<Self, ()> {
         match value {
-            2 => Ok(proto::base_command::Type::Connect),
-            3 => Ok(proto::base_command::Type::Connected),
-            4 => Ok(proto::base_command::Type::Subscribe),
-            5 => Ok(proto::base_command::Type::Producer),
-            6 => Ok(proto::base_command::Type::Send),
-            7 => Ok(proto::base_command::Type::SendReceipt),
-            8 => Ok(proto::base_command::Type::SendError),
-            9 => Ok(proto::base_command::Type::Message),
-            10 => Ok(proto::base_command::Type::Ack),
-            11 => Ok(proto::base_command::Type::Flow),
-            12 => Ok(proto::base_command::Type::Unsubscribe),
-            13 => Ok(proto::base_command::Type::Success),
-            14 => Ok(proto::base_command::Type::Error),
-            15 => Ok(proto::base_command::Type::CloseProducer),
-            16 => Ok(proto::base_command::Type::CloseConsumer),
-            17 => Ok(proto::base_command::Type::ProducerSuccess),
-            18 => Ok(proto::base_command::Type::Ping),
-            19 => Ok(proto::base_command::Type::Pong),
-            20 => Ok(proto::base_command::Type::RedeliverUnacknowledgedMessages),
-            21 => Ok(proto::base_command::Type::PartitionedMetadata),
-            22 => Ok(proto::base_command::Type::PartitionedMetadataResponse),
-            23 => Ok(proto::base_command::Type::Lookup),
-            24 => Ok(proto::base_command::Type::LookupResponse),
-            25 => Ok(proto::base_command::Type::ConsumerStats),
-            26 => Ok(proto::base_command::Type::ConsumerStatsResponse),
-            27 => Ok(proto::base_command::Type::ReachedEndOfTopic),
-            28 => Ok(proto::base_command::Type::Seek),
-            29 => Ok(proto::base_command::Type::GetLastMessageId),
-            30 => Ok(proto::base_command::Type::GetLastMessageIdResponse),
-            31 => Ok(proto::base_command::Type::ActiveConsumerChange),
-            32 => Ok(proto::base_command::Type::GetTopicsOfNamespace),
-            33 => Ok(proto::base_command::Type::GetTopicsOfNamespaceResponse),
-            34 => Ok(proto::base_command::Type::GetSchema),
-            35 => Ok(proto::base_command::Type::GetSchemaResponse),
+            2 => Ok(base_command::Type::Connect),
+            3 => Ok(base_command::Type::Connected),
+            4 => Ok(base_command::Type::Subscribe),
+            5 => Ok(base_command::Type::Producer),
+            6 => Ok(base_command::Type::Send),
+            7 => Ok(base_command::Type::SendReceipt),
+            8 => Ok(base_command::Type::SendError),
+            9 => Ok(base_command::Type::Message),
+            10 => Ok(base_command::Type::Ack),
+            11 => Ok(base_command::Type::Flow),
+            12 => Ok(base_command::Type::Unsubscribe),
+            13 => Ok(base_command::Type::Success),
+            14 => Ok(base_command::Type::Error),
+            15 => Ok(base_command::Type::CloseProducer),
+            16 => Ok(base_command::Type::CloseConsumer),
+            17 => Ok(base_command::Type::ProducerSuccess),
+            18 => Ok(base_command::Type::Ping),
+            19 => Ok(base_command::Type::Pong),
+            20 => Ok(base_command::Type::RedeliverUnacknowledgedMessages),
+            21 => Ok(base_command::Type::PartitionedMetadata),
+            22 => Ok(base_command::Type::PartitionedMetadataResponse),
+            23 => Ok(base_command::Type::Lookup),
+            24 => Ok(base_command::Type::LookupResponse),
+            25 => Ok(base_command::Type::ConsumerStats),
+            26 => Ok(base_command::Type::ConsumerStatsResponse),
+            27 => Ok(base_command::Type::ReachedEndOfTopic),
+            28 => Ok(base_command::Type::Seek),
+            29 => Ok(base_command::Type::GetLastMessageId),
+            30 => Ok(base_command::Type::GetLastMessageIdResponse),
+            31 => Ok(base_command::Type::ActiveConsumerChange),
+            32 => Ok(base_command::Type::GetTopicsOfNamespace),
+            33 => Ok(base_command::Type::GetTopicsOfNamespaceResponse),
+            34 => Ok(base_command::Type::GetSchema),
+            35 => Ok(base_command::Type::GetSchemaResponse),
             _ => Err(()),
         }
     }
@@ -618,10 +618,12 @@ impl From<prost::DecodeError> for ConnectionError {
 
 #[cfg(test)]
 mod tests {
-    use crate::message::Codec;
-    use bytes::BytesMut;
     use std::convert::TryFrom;
+
+    use bytes::BytesMut;
     use tokio_util::codec::{Decoder, Encoder};
+
+    use crate::message::Codec;
 
     #[test]
     fn parse_simple_command() {
@@ -676,7 +678,7 @@ mod tests {
 
     #[test]
     fn base_command_type_parsing() {
-        use super::proto::base_command::Type;
+        use super::base_command::Type;
         let mut successes = 0;
         for i in 0..40 {
             if let Ok(type_) = Type::try_from(i) {

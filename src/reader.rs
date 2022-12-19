@@ -1,14 +1,20 @@
-use crate::client::DeserializeMessage;
-use crate::consumer::{ConsumerOptions, DeadLetterPolicy, EngineMessage, Message, TopicConsumer};
-use crate::error::Error;
-use crate::executor::Executor;
-use crate::message::proto::{command_subscribe::SubType, MessageIdData};
-use chrono::{DateTime, Utc};
-use futures::channel::mpsc::SendError;
-use futures::task::{Context, Poll};
-use futures::{Future, SinkExt, Stream};
 use std::pin::Pin;
+
+use chrono::{DateTime, Utc};
+use futures::{
+    channel::mpsc::SendError,
+    task::{Context, Poll},
+    Future, SinkExt, Stream,
+};
 use url::Url;
+
+use crate::{
+    client::DeserializeMessage,
+    consumer::{ConsumerOptions, DeadLetterPolicy, EngineMessage, Message, TopicConsumer},
+    error::Error,
+    executor::Executor,
+    message::proto::{command_subscribe::SubType, MessageIdData},
+};
 
 /// A client that acknowledges messages systematically
 pub struct Reader<T: DeserializeMessage, Exe: Executor> {

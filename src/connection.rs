@@ -1,39 +1,41 @@
-use std::collections::BTreeMap;
-use std::fmt::Debug;
-use std::net::SocketAddr;
-use std::pin::Pin;
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    collections::BTreeMap,
+    fmt::Debug,
+    net::SocketAddr,
+    pin::Pin,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration,
 };
-use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::{
     self,
     channel::{mpsc, oneshot},
-    future::{Either, select},
-    Future,
-    FutureExt,
-    pin_mut, Sink, SinkExt, Stream, StreamExt, task::{Context, Poll},
+    future::{select, Either},
+    lock::Mutex,
+    pin_mut,
+    task::{Context, Poll},
+    Future, FutureExt, Sink, SinkExt, Stream, StreamExt,
 };
-use futures::lock::Mutex;
 use native_tls::Certificate;
-use rand::thread_rng;
-use rand::seq::SliceRandom;
+use proto::MessageIdData;
+use rand::{seq::SliceRandom, thread_rng};
 use url::Url;
 use uuid::Uuid;
 
-use proto::MessageIdData;
-
-use crate::consumer::ConsumerOptions;
-use crate::error::{AuthenticationError, ConnectionError, SharedError};
-use crate::executor::{Executor, ExecutorKind};
-use crate::message::{
-    BaseCommand,
-    Codec, Message, proto::{self, command_subscribe::SubType},
+use crate::{
+    consumer::ConsumerOptions,
+    error::{AuthenticationError, ConnectionError, SharedError},
+    executor::{Executor, ExecutorKind},
+    message::{
+        proto::{self, command_subscribe::SubType},
+        BaseCommand, Codec, Message,
+    },
+    producer::{self, ProducerOptions},
 };
-use crate::producer::{self, ProducerOptions};
 
 pub(crate) enum Register {
     Request {
@@ -743,7 +745,7 @@ impl<Exe: Executor> Connection<Exe> {
             .await
         {
             Some(Some(addresses)) if !addresses.is_empty() => addresses,
-            _ => return Err(ConnectionError::NotFound)
+            _ => return Err(ConnectionError::NotFound),
         };
 
         let id = Uuid::new_v4();
@@ -769,9 +771,8 @@ impl<Exe: Executor> Connection<Exe> {
             pin_mut!(sender_prepare);
             pin_mut!(delay_f);
 
-            let sender;
-            match select(sender_prepare, delay_f).await {
-                Either::Left((Ok(res), _)) => sender = res,
+            let sender = match select(sender_prepare, delay_f).await {
+                Either::Left((Ok(res), _)) => res,
                 Either::Left((Err(err), _)) => {
                     errors.push(err);
                     continue;
@@ -785,7 +786,7 @@ impl<Exe: Executor> Connection<Exe> {
                 }
             };
 
-            return Ok(Connection { id, url, sender })
+            return Ok(Connection { id, url, sender });
         }
 
         let mut fatal_errors = vec![];
@@ -798,7 +799,7 @@ impl<Exe: Executor> Connection<Exe> {
             }
         }
 
-        return if retryable_errors.is_empty() {
+        if retryable_errors.is_empty() {
             error!("connection error, not retryable: {:?}", fatal_errors);
             Err(ConnectionError::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
@@ -1099,16 +1100,17 @@ where
 
 pub(crate) mod messages {
     use chrono::Utc;
-
     use proto::MessageIdData;
 
-    use crate::connection::Authentication;
-    use crate::consumer::ConsumerOptions;
-    use crate::message::{
-        Message,
-        Payload, proto::{self, base_command::Type as CommandType, command_subscribe::SubType},
+    use crate::{
+        connection::Authentication,
+        consumer::ConsumerOptions,
+        message::{
+            proto::{self, base_command::Type as CommandType, command_subscribe::SubType},
+            Message, Payload,
+        },
+        producer::{self, ProducerOptions},
     };
-    use crate::producer::{self, ProducerOptions};
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn connect(auth: Option<Authentication>, proxy_to_broker_url: Option<String>) -> Message {
