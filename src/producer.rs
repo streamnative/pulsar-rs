@@ -381,6 +381,13 @@ impl<Exe: Executor> Producer<Exe> {
             ProducerInner::Partitioned(p) => p.next().send_raw(message).await,
         }
     }
+
+    pub fn close(&mut self) -> bool {
+        match &mut self.inner {
+            ProducerInner::Single(producer) => producer.close(),
+            ProducerInner::Partitioned(_) => unimplemented!(),
+        }
+    }
 }
 
 enum ProducerInner<Exe: Executor> {
@@ -1017,6 +1024,15 @@ impl<Exe: Executor> TopicProducer<Exe> {
 
         Ok(())
     }
+
+    pub fn close(&mut self) -> bool {
+        let (drop_signal, _) = oneshot::channel::<()>();
+        // swap the previous drop_signal with a new one
+        let old_signal = std::mem::replace(&mut self.drop_signal, drop_signal);
+        // Call the drop signal to kill the producer
+        let result = old_signal.send(());
+        result.is_ok()
+    }
 }
 
 /// Helper structure to prepare a producer
@@ -1089,7 +1105,7 @@ impl<Exe: Executor> ProducerBuilder<Exe> {
                         let producer =
                             TopicProducer::from_connection(pulsar, conn, topic, name, options)
                                 .await?;
-                        Ok::<_, Error>(producer)
+                        Ok::<TopicProducer<Exe>, Error>(producer)
                     }
                 }),
         )
