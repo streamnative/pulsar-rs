@@ -382,10 +382,12 @@ impl<Exe: Executor> Producer<Exe> {
         }
     }
 
-    pub fn close(&mut self) -> bool {
+    pub async fn close(&mut self) -> Result<(), Error> {
         match &mut self.inner {
-            ProducerInner::Single(producer) => producer.close(),
-            ProducerInner::Partitioned(_) => unimplemented!(),
+            ProducerInner::Single(producer) => producer.close().await,
+            ProducerInner::Partitioned(p) => try_join_all(p.producers.iter().map(|p| p.close()))
+                .await
+                .map(drop),
         }
     }
 }
@@ -1025,13 +1027,28 @@ impl<Exe: Executor> TopicProducer<Exe> {
         Ok(())
     }
 
-    pub fn close(&mut self) -> bool {
-        let (drop_signal, _) = oneshot::channel::<()>();
-        // swap the previous drop_signal with a new one
-        let old_signal = std::mem::replace(&mut self.drop_signal, drop_signal);
-        // Call the drop signal to kill the producer
-        let result = old_signal.send(());
-        result.is_ok()
+    pub async fn close(&self) -> Result<(), Error> {
+        let connection = Arc::downgrade(&self.connection);
+
+        match connection.upgrade() {
+            None => {
+                info!("Connection already gone");
+                Ok(())
+            }
+            Some(connection) => {
+                info!(
+                    "Closing connection #{} of producer[{}]",
+                    self.connection.id(),
+                    self.name
+                );
+                connection
+                    .sender()
+                    .close_producer(self.id)
+                    .await
+                    .map(|_| ())
+                    .map_err(Error::Connection)
+            }
+        }
     }
 }
 
