@@ -47,7 +47,7 @@ pub struct ConsumerEngine<Exe: Executor> {
     unacked_messages: HashMap<MessageIdData, Instant>,
     dead_letter_policy: Option<DeadLetterPolicy>,
     options: ConsumerOptions,
-    drop_signal: oneshot::Sender<()>,
+    drop_signal: Option<oneshot::Sender<()>>,
 }
 
 impl<Exe: Executor> ConsumerEngine<Exe> {
@@ -89,7 +89,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             unacked_messages: HashMap::new(),
             dead_letter_policy,
             options,
-            drop_signal,
+            drop_signal: Some(drop_signal),
         }
     }
 
@@ -688,11 +688,6 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                         }
                     }
                 }
-            Err(ConnectionError::Io(e)) => {
-                // Non retryable IO Error
-                error!("reconnection got io error: {:?}", e);
-                return Err(Err(ConsumerError::Connection(ConnectionError::Io(e)).into()));
-            }
             Err(e) => {
                 error!("reconnect error [{:?}]: {:?}", line!(), e);
                 return Err(Err(Error::Connection(e)));
@@ -705,14 +700,10 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn reconnect(&mut self) -> Result<(), Error> {
         debug!("reconnecting consumer for topic: {}", self.topic);
-        // Sender::send() method consumes the sender
-        // as the sender is hold by the ConsumerEngine, there is no way to call send method
-        // The lines below take the pointed sender and replace it by a new one bound to nothing
-        // but as the TopicProducer sender is recreate below, there is no worry
-        let (drop_signal, _) = oneshot::channel::<()>();
-        let old_signal = std::mem::replace(&mut self.drop_signal, drop_signal);
-        // This line ask for kill the previous errored consumer
-        let _ = old_signal.send(());
+        if let Some(prev_single) = std::mem::replace(&mut self.drop_signal, None) {
+            // kill the previous errored consumer
+            drop(prev_single);
+        }
 
         let broker_address = self.client.lookup_topic(&self.topic).await?;
         let conn = self.client.manager.get_connection(&broker_address).await?;
@@ -784,12 +775,9 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 }
             }
         }));
-        let old_signal = std::mem::replace(&mut self.drop_signal, drop_signal);
-        if let Err(e) = old_signal.send(()) {
-            error!(
-                "could not send the drop signal to the old consumer(id={}): {:?}",
-                id, e
-            );
+
+        if let Some(prev_single) = std::mem::replace(&mut self.drop_signal, Some(drop_signal)) {
+            drop(prev_single);
         }
 
         Ok(())
