@@ -165,7 +165,16 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
                                 .delay(operation_retry_options.retry_delay)
                                 .await;
 
+                            let prev = addr.clone();
                             let addr = client.lookup_topic(&topic).await?;
+
+                            if prev != addr {
+                                info!(
+                                    "topic {} moved: previous = {:?}, new = {:?}",
+                                    topic, prev, addr
+                                );
+                            }
+
                             connection = client.manager.get_connection(&addr).await?;
 
                             continue;
