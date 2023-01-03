@@ -382,6 +382,7 @@ impl<Exe: Executor> Producer<Exe> {
         }
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn close(&mut self) -> Result<(), Error> {
         match &mut self.inner {
             ProducerInner::Single(producer) => producer.close().await,
@@ -1027,6 +1028,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
         Ok(())
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn close(&self) -> Result<(), Error> {
         let connection = Arc::downgrade(&self.connection);
 
@@ -1045,7 +1047,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
                     .sender()
                     .close_producer(self.id)
                     .await
-                    .map(|_| ())
+                    .map(drop)
                     .map_err(Error::Connection)
             }
         }
