@@ -212,6 +212,15 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    /// Unsubscribe the topic then close the connection
+    pub async fn close(&mut self) -> Result<(), Error> {
+        match &mut self.inner {
+            InnerConsumer::Single(c) => c.close().await,
+            InnerConsumer::Multi(c) => c.close().await,
+        }
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn get_last_message_id(&mut self) -> Result<Vec<MessageIdData>, Error> {
         match &mut self.inner {
             InnerConsumer::Single(c) => Ok(vec![c.get_last_message_id().await?]),
