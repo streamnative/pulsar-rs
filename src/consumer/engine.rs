@@ -1,12 +1,13 @@
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
+    io::ErrorKind,
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use futures::{
-    channel::{mpsc, oneshot},
+    channel::{mpsc, mpsc::UnboundedSender, oneshot},
     SinkExt, StreamExt,
 };
 
@@ -24,7 +25,7 @@ use crate::{
     },
     proto,
     proto::{BaseCommand, CommandCloseConsumer, CommandMessage},
-    Error, Executor, Payload, Pulsar,
+    BrokerAddress, Error, Executor, Payload, Pulsar,
 };
 
 pub struct ConsumerEngine<Exe: Executor> {
@@ -39,14 +40,14 @@ pub struct ConsumerEngine<Exe: Executor> {
     messages_rx: Option<mpsc::UnboundedReceiver<RawMessage>>,
     engine_rx: Option<mpsc::UnboundedReceiver<EngineMessage<Exe>>>,
     event_rx: mpsc::UnboundedReceiver<EngineEvent<Exe>>,
-    event_tx: mpsc::UnboundedSender<EngineEvent<Exe>>,
+    event_tx: UnboundedSender<EngineEvent<Exe>>,
     batch_size: u32,
     remaining_messages: u32,
     unacked_message_redelivery_delay: Option<Duration>,
     unacked_messages: HashMap<MessageIdData, Instant>,
     dead_letter_policy: Option<DeadLetterPolicy>,
     options: ConsumerOptions,
-    _drop_signal: oneshot::Sender<()>,
+    drop_signal: Option<oneshot::Sender<()>>,
 }
 
 impl<Exe: Executor> ConsumerEngine<Exe> {
@@ -66,7 +67,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         unacked_message_redelivery_delay: Option<Duration>,
         dead_letter_policy: Option<DeadLetterPolicy>,
         options: ConsumerOptions,
-        _drop_signal: oneshot::Sender<()>,
+        drop_signal: oneshot::Sender<()>,
     ) -> ConsumerEngine<Exe> {
         let (event_tx, event_rx) = mpsc::unbounded();
         ConsumerEngine {
@@ -88,7 +89,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             unacked_messages: HashMap::new(),
             dead_letter_policy,
             options,
-            _drop_signal,
+            drop_signal: Some(drop_signal),
         }
     }
 
@@ -389,7 +390,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 proto::CompressionType::from_i32(compression).ok_or_else(|| {
                     error!("unknown compression type: {}", compression);
                     Error::Consumer(ConsumerError::Io(std::io::Error::new(
-                        std::io::ErrorKind::Other,
+                        ErrorKind::Other,
                         format!("unknown compression type: {}", compression),
                     )))
                 })?
@@ -549,20 +550,61 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    async fn reconnect(&mut self) -> Result<(), Error> {
-        debug!("reconnecting consumer for topic: {}", self.topic);
-        let broker_address = self.client.lookup_topic(&self.topic).await?;
-        let conn = self.client.manager.get_connection(&broker_address).await?;
+    async fn retry_with_delay(
+        &mut self,
+        current_retries: &mut u32,
+        error: &str,
+        topic: &String,
+        text: &Option<String>,
+        broker_address: &BrokerAddress,
+    ) -> Result<Arc<Connection<Exe>>, Error> {
+        warn!(
+            "subscribing({}) answered {}, retrying request after {}ms (max_retries = {:?}): {}",
+            topic,
+            error,
+            self.client.operation_retry_options.retry_delay.as_millis(),
+            self.client.operation_retry_options.max_retries,
+            text.as_deref().unwrap_or_default()
+        );
 
-        self.connection = conn;
+        *current_retries += 1;
+        self.client
+            .executor
+            .delay(self.client.operation_retry_options.retry_delay)
+            .await;
 
-        let topic = self.topic.clone();
-        let (resolver, messages) = mpsc::unbounded();
+        let addr = self.client.lookup_topic(topic).await?;
+        let connection = self.client.manager.get_connection(&addr).await?;
+        self.connection = connection.clone();
 
-        self.connection
+        warn!(
+            "Retry #{} -> reconnecting consumer {:#} using connection {:#} to broker {:#} to topic {:#}",
+            current_retries,
+            self.id,
+            self.connection.id(),
+            broker_address.url,
+            self.topic
+        );
+
+        Ok(connection)
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    async fn subscribe_topic(
+        &mut self,
+        resolver: UnboundedSender<crate::message::Message>,
+        topic: &String,
+        current_retries: &mut u32,
+        broker_address: &BrokerAddress,
+    ) -> Result<(), Result<(), Error>> {
+        let start = Instant::now();
+        let operation_retry_options = self.client.operation_retry_options.clone();
+
+        match self
+            .connection
             .sender()
             .subscribe(
-                resolver,
+                resolver.clone(),
                 topic.clone(),
                 self.subscription.clone(),
                 self.sub_type,
@@ -571,40 +613,171 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 self.options.clone(),
             )
             .await
-            .map_err(Error::Connection)?;
+        {
+            Ok(_success) => {
+                if *current_retries > 0 {
+                    let dur = (Instant::now() - start).as_secs();
+                    log::info!(
+                        "subscribing({}) success after {} retries over {} seconds",
+                        topic,
+                        *current_retries + 1,
+                        dur
+                    );
+                }
+            }
+            Err(ConnectionError::PulsarError(Some(err), text)) => {
+                return match err {
+                    proto::ServerError::ServiceNotReady | proto::ServerError::ConsumerBusy => {
+                        match operation_retry_options.max_retries {
+                            Some(max_retries) if *current_retries < max_retries => {
+                                self.retry_with_delay(
+                                    current_retries,
+                                    err.as_str_name(),
+                                    topic,
+                                    &text,
+                                    broker_address,
+                                )
+                                    .await
+                                    .map_err(Err)?;
 
-        self.connection
-            .sender()
-            .send_flow(self.id, self.batch_size)
-            .map_err(|e| Error::Consumer(ConsumerError::Connection(e)))?;
+                                Err(Ok(()))
+                            }
+                            _ => {
+                                error!("subscribe topic({}) reached max retries", topic);
+
+                                Err(Err(ConnectionError::PulsarError(Some(err), text).into()))
+                            }
+                        }
+                    }
+                    _ => Err(Err(Error::Connection(ConnectionError::PulsarError(
+                        Some(err),
+                        text,
+                    )))),
+                }
+            }
+            Err(ConnectionError::Io(e))
+            // Retryable IO Error
+            if matches!(
+                    e.kind(),
+                    ErrorKind::BrokenPipe
+                        | ErrorKind::ConnectionAborted
+                        | ErrorKind::ConnectionReset
+                        | ErrorKind::Interrupted
+                        | ErrorKind::NotConnected
+                        | ErrorKind::TimedOut
+                        | ErrorKind::UnexpectedEof
+                ) =>
+                {
+                    return match operation_retry_options.max_retries {
+                        Some(max_retries) if *current_retries < max_retries => {
+                            self.retry_with_delay(
+                                current_retries,
+                                e.kind().to_string().as_str(),
+                                topic,
+                                &None,
+                                broker_address,
+                            )
+                                .await
+                                .map_err(Err)?;
+
+                            Err(Ok(()))
+                        }
+                        _ => {
+                            error!("subscribing({}) reached max retries", topic);
+                            Err(Err(Error::Connection(ConnectionError::Io(e))))
+                        }
+                    }
+                }
+            Err(e) => {
+                error!("reconnect error [{:?}]: {:?}", line!(), e);
+                return Err(Err(Error::Connection(e)));
+            }
+        }
+
+        Ok(())
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    async fn reconnect(&mut self) -> Result<(), Error> {
+        debug!("reconnecting consumer for topic: {}", self.topic);
+        if let Some(prev_single) = std::mem::replace(&mut self.drop_signal, None) {
+            // kill the previous errored consumer
+            drop(prev_single);
+        }
+
+        let broker_address = self.client.lookup_topic(&self.topic).await?;
+        let conn = self.client.manager.get_connection(&broker_address).await?;
+
+        self.connection = conn;
+
+        warn!(
+            "Retry -> reconnecting consumer {:#} using connection {:#} to broker {:#} to topic {:#}",
+            self.id,
+            self.connection.id(),
+            broker_address.url,
+            self.topic
+        );
+
+        let topic = self.topic.clone();
+
+        let mut current_retries = 0u32;
+        let (resolver, messages) = mpsc::unbounded();
+
+        // Reconnection loop
+        // If the error is recoverable
+        // Try to reconnect in the bounds of retry limits
+        loop {
+            match self
+                .subscribe_topic(
+                    resolver.clone(),
+                    &topic,
+                    &mut current_retries,
+                    &broker_address,
+                )
+                .await
+            {
+                // Reconnection went well
+                Ok(()) => break,
+                // An retryable error occurs
+                Err(Ok(())) => continue,
+                // An non-retryable error happens, the connection must die !
+                Err(Err(e)) => return Err(e),
+            }
+        }
 
         self.messages_rx = Some(messages);
 
         // drop_signal will be dropped when Consumer is dropped, then
         // drop_receiver will return, and we can close the consumer
-        let (_drop_signal, drop_receiver) = oneshot::channel::<()>();
-        let conn = self.connection.clone();
+        let (drop_signal, drop_receiver) = oneshot::channel::<()>();
+        let conn = Arc::downgrade(&self.connection);
         let name = self.name.clone();
         let id = self.id;
         let topic = self.topic.clone();
         let _ = self.client.executor.spawn(Box::pin(async move {
             let _res = drop_receiver.await;
             // if we receive a message, it indicates we want to stop this task
-            if _res.is_err() {
-                if let Err(e) = conn.sender().close_consumer(id).await {
-                    error!(
-                        "could not close consumer {:?}({}) for topic {}: {:?}",
-                        name, id, topic, e
-                    );
+
+            match conn.upgrade() {
+                None => {
+                    debug!("Connection already dropped, no weak reference remaining")
+                }
+                Some(connection) => {
+                    debug!("Closing producers of connection {}", connection.id());
+                    let res = connection.sender().close_consumer(id).await;
+
+                    if let Err(e) = res {
+                        error!(
+                            "could not close consumer {:?}({}) for topic {}: {:?}",
+                            name, id, topic, e
+                        );
+                    }
                 }
             }
         }));
-        let old_signal = std::mem::replace(&mut self._drop_signal, _drop_signal);
-        if let Err(e) = old_signal.send(()) {
-            error!(
-                "could not send the drop signal to the old consumer(id={}): {:?}",
-                id, e
-            );
+
+        if let Some(prev_single) = std::mem::replace(&mut self.drop_signal, Some(drop_signal)) {
+            drop(prev_single);
         }
 
         Ok(())
