@@ -371,6 +371,18 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub async fn close(&mut self) -> Result<(), Error> {
+        let consumer_id = self.consumer_id;
+        self.unsubscribe().await?;
+        self.connection()
+            .await?
+            .sender()
+            .close_consumer(consumer_id)
+            .await?;
+        Ok(())
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn get_last_message_id(&mut self) -> Result<MessageIdData, Error> {
         let consumer_id = self.consumer_id;
         let conn = self.connection().await?;
