@@ -531,7 +531,7 @@ mod tests {
             topic: iter::repeat(())
                 .map(|()| rand::thread_rng().sample(Alphanumeric) as char)
                 .take(8)
-                .map(|c| c as char)
+                .map(|c| c)
                 .collect(),
             msg: 1,
         };
