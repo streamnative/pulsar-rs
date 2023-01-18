@@ -8,8 +8,7 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use futures::future::try_join_all;
-use futures::Stream;
+use futures::{future::try_join_all, Stream};
 use regex::Regex;
 
 use crate::{
