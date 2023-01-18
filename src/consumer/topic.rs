@@ -7,11 +7,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use async_std::prelude::Stream;
 use chrono::{DateTime, Utc};
 use futures::{
     channel::{mpsc, oneshot},
-    FutureExt, SinkExt, StreamExt,
+    FutureExt, SinkExt, Stream, StreamExt,
 };
 
 use crate::{
