@@ -7,9 +7,9 @@ use std::{
     task::{Context, Poll},
 };
 
-use async_std::prelude::Stream;
 use chrono::{DateTime, Utc};
 use futures::future::try_join_all;
+use futures::Stream;
 use regex::Regex;
 
 use crate::{
