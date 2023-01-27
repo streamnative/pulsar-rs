@@ -15,7 +15,7 @@ use crate::{
     connection::Connection,
     consumer::{
         batched_message_iterator::BatchedMessageIterator,
-        data::{DeadLetterPolicy, EngineEvent, EngineMessage, MessageData},
+        data::{DeadLetterPolicy, EngineEvent, EngineMessage},
         options::ConsumerOptions,
     },
     error::{ConnectionError, ConsumerError},
@@ -238,7 +238,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 if let Err(e) = self
                     .connection
                     .sender()
-                    .send_redeliver_unacknowleged_messages(self.id, vec![message_id.id.clone()])
+                    .send_redeliver_unacknowleged_messages(self.id, vec![message_id.clone()])
                 {
                     error!(
                         "could not ask for redelivery for message {:?}: {:?}",
@@ -287,13 +287,13 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    fn ack(&mut self, message_id: MessageData, cumulative: bool) {
+    fn ack(&mut self, message_id: MessageIdData, cumulative: bool) {
         // FIXME: this does not handle cumulative acks
-        self.unacked_messages.remove(&message_id.id);
+        self.unacked_messages.remove(&message_id);
         let res = self
             .connection
             .sender()
-            .send_ack(self.id, vec![message_id.id], cumulative);
+            .send_ack(self.id, vec![message_id], cumulative);
         if res.is_err() {
             error!("ack error: {:?}", res);
         }
@@ -512,13 +512,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                                 Error::Custom("DLQ send error".to_string())
                             })?;
 
-                        self.ack(
-                            MessageData {
-                                id: message.message_id,
-                                batch_size: None,
-                            },
-                            false,
-                        );
+                        self.ack(message.message_id, false);
                     } else {
                         self.send_to_consumer(message.message_id, payload).await?
                     }

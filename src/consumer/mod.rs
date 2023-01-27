@@ -117,12 +117,30 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         }
     }
 
+    /// acknowledges a single message with a given ID.
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub async fn ack_with_id(&mut self, topic: &str, msg_id: MessageIdData) -> Result<(), ConsumerError> {
+        match &mut self.inner {
+            InnerConsumer::Single(c) => c.ack_with_id(msg_id).await,
+            InnerConsumer::Multi(c) => c.ack_with_id(topic, msg_id).await,
+        }
+    }
+
     /// acknowledges a message and all the preceding messages
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn cumulative_ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         match &mut self.inner {
             InnerConsumer::Single(c) => c.cumulative_ack(msg).await,
             InnerConsumer::Multi(c) => c.cumulative_ack(msg).await,
+        }
+    }
+
+    /// acknowledges a message and all the preceding messages with a given ID.
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub async fn cumulative_ack_with_id(&mut self, topic: &str, msg_id: MessageIdData) -> Result<(), ConsumerError> {
+        match &mut self.inner {
+            InnerConsumer::Single(c) => c.cumulative_ack_with_id(msg_id).await,
+            InnerConsumer::Multi(c) => c.cumulative_ack_with_id(topic, msg_id).await,
         }
     }
 
@@ -134,6 +152,17 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         match &mut self.inner {
             InnerConsumer::Single(c) => c.nack(msg).await,
             InnerConsumer::Multi(c) => c.nack(msg).await,
+        }
+    }
+
+    /// negative acknowledgement
+    ///
+    /// the message with the given ID will be sent again on the subscription
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub async fn nack_with_id(&mut self, topic: &str, msg_id: MessageIdData) -> Result<(), ConsumerError> {
+        match &mut self.inner {
+            InnerConsumer::Single(c) => c.nack_with_id(msg_id).await,
+            InnerConsumer::Multi(c) => c.nack_with_id(topic, msg_id).await,
         }
     }
 

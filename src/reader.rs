@@ -52,7 +52,7 @@ impl<T: DeserializeMessage + 'static, Exe: Executor> Stream for Reader<T, Exe> {
 
                 Poll::Ready(Some(Ok(msg))) => {
                     let mut acker = this.consumer.acker();
-                    let message_id = msg.message_id.clone();
+                    let message_id = msg.message_id().clone();
                     this.state = Some(State::PollingAck(
                         msg,
                         Box::pin(

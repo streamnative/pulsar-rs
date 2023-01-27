@@ -317,7 +317,15 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         self.engine_tx
-            .send(EngineMessage::Ack(msg.message_id.clone(), false))
+            .send(EngineMessage::Ack(msg.message_id().clone(), false))
+            .await?;
+        Ok(())
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub async fn ack_with_id(&mut self, msg_id: MessageIdData) -> Result<(), ConsumerError> {
+        self.engine_tx
+            .send(EngineMessage::Ack(msg_id, false))
             .await?;
         Ok(())
     }
@@ -330,7 +338,15 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn cumulative_ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         self.engine_tx
-            .send(EngineMessage::Ack(msg.message_id.clone(), true))
+            .send(EngineMessage::Ack(msg.message_id().clone(), true))
+            .await?;
+        Ok(())
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub async fn cumulative_ack_with_id(&mut self, msg_id: MessageIdData) -> Result<(), ConsumerError> {
+        self.engine_tx
+            .send(EngineMessage::Ack(msg_id, true))
             .await?;
         Ok(())
     }
@@ -338,7 +354,15 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn nack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         self.engine_tx
-            .send(EngineMessage::Nack(msg.message_id.clone()))
+            .send(EngineMessage::Nack(msg.message_id().clone()))
+            .await?;
+        Ok(())
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub async fn nack_with_id(&mut self, msg_id: MessageIdData) -> Result<(), ConsumerError> {
+        self.engine_tx
+            .send(EngineMessage::Nack(msg_id))
             .await?;
         Ok(())
     }

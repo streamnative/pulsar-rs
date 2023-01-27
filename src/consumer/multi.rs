@@ -208,11 +208,29 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub async fn ack_with_id(&mut self, topic: &str, msg_id: MessageIdData) -> Result<(), ConsumerError> {
+        if let Some(c) = self.consumers.get_mut(topic) {
+            c.ack_with_id(msg_id).await
+        } else {
+            Err(ConnectionError::Unexpected(format!("no consumer for topic {}", topic)).into())
+        }
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn cumulative_ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         if let Some(c) = self.consumers.get_mut(&msg.topic) {
             c.cumulative_ack(msg).await
         } else {
             Err(ConnectionError::Unexpected(format!("no consumer for topic {}", msg.topic)).into())
+        }
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub async fn cumulative_ack_with_id(&mut self, topic: &str, msg_id: MessageIdData) -> Result<(), ConsumerError> {
+        if let Some(c) = self.consumers.get_mut(topic) {
+            c.cumulative_ack_with_id(msg_id).await
+        } else {
+            Err(ConnectionError::Unexpected(format!("no consumer for topic {}", topic)).into())
         }
     }
 
@@ -223,6 +241,16 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
             Ok(())
         } else {
             Err(ConnectionError::Unexpected(format!("no consumer for topic {}", msg.topic)).into())
+        }
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub async fn nack_with_id(&mut self, topic: &str, msg_id: MessageIdData) -> Result<(), ConsumerError> {
+        if let Some(c) = self.consumers.get_mut(topic) {
+            c.nack_with_id(msg_id).await?;
+            Ok(())
+        } else {
+            Err(ConnectionError::Unexpected(format!("no consumer for topic {}", topic)).into())
         }
     }
 
