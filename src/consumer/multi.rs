@@ -208,7 +208,11 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub async fn ack_with_id(&mut self, topic: &str, msg_id: MessageIdData) -> Result<(), ConsumerError> {
+    pub async fn ack_with_id(
+        &mut self,
+        topic: &str,
+        msg_id: MessageIdData,
+    ) -> Result<(), ConsumerError> {
         if let Some(c) = self.consumers.get_mut(topic) {
             c.ack_with_id(msg_id).await
         } else {
@@ -226,7 +230,11 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub async fn cumulative_ack_with_id(&mut self, topic: &str, msg_id: MessageIdData) -> Result<(), ConsumerError> {
+    pub async fn cumulative_ack_with_id(
+        &mut self,
+        topic: &str,
+        msg_id: MessageIdData,
+    ) -> Result<(), ConsumerError> {
         if let Some(c) = self.consumers.get_mut(topic) {
             c.cumulative_ack_with_id(msg_id).await
         } else {
@@ -245,7 +253,11 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub async fn nack_with_id(&mut self, topic: &str, msg_id: MessageIdData) -> Result<(), ConsumerError> {
+    pub async fn nack_with_id(
+        &mut self,
+        topic: &str,
+        msg_id: MessageIdData,
+    ) -> Result<(), ConsumerError> {
         if let Some(c) = self.consumers.get_mut(topic) {
             c.nack_with_id(msg_id).await?;
             Ok(())
