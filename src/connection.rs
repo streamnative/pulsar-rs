@@ -527,7 +527,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         message_ids: Vec<proto::MessageIdData>,
     ) -> Result<(), ConnectionError> {
         self.tx
-            .unbounded_send(messages::redeliver_unacknowleged_messages(
+            .unbounded_send(messages::redeliver_unacknowledged_messages(
                 consumer_id,
                 message_ids,
             ))
@@ -576,6 +576,20 @@ impl<Exe: Executor> ConnectionSender<Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub async fn new_transaction(
+        &self,
+        coordinator_id: u64,
+        timeout: Duration,
+    ) -> Result<proto::CommandNewTxnResponse, ConnectionError> {
+        let request_id = self.request_id.get();
+        let msg = messages::new_transaction(coordinator_id, timeout, request_id);
+        self.send_message(msg, RequestKey::RequestId(request_id), |resp| {
+            resp.command.new_txn_response
+        })
+        .await
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn send_message<R: Debug, F>(
         &self,
         msg: Message,
@@ -613,26 +627,23 @@ impl<Exe: Executor> ConnectionSender<Exe> {
                 pin_mut!(delay_f);
 
                 match select(response, delay_f).await {
-                    Either::Left((res, _)) => {
-                        // println!("recv msg: {:?}", res);
-                        res
-                    }
+                    Either::Left((res, _)) => res,
                     Either::Right(_) => {
                         warn!(
-                            "connection {} timedout sending message to the Pulsar server",
+                            "connection {} timed out sending message to the Pulsar server",
                             self.connection_id
                         );
                         self.error.set(ConnectionError::Io(std::io::Error::new(
                             std::io::ErrorKind::TimedOut,
                             format!(
-                                " connection {} timedout sending message to the Pulsar server",
+                                "connection {} timed out sending message to the Pulsar server",
                                 self.connection_id
                             ),
                         )));
                         Err(ConnectionError::Io(std::io::Error::new(
                             std::io::ErrorKind::TimedOut,
                             format!(
-                                " connection {} timedout sending message to the Pulsar server",
+                                "connection {} timed out sending message to the Pulsar server",
                                 self.connection_id
                             ),
                         )))
@@ -1099,6 +1110,8 @@ where
 }
 
 pub(crate) mod messages {
+    use std::time::Duration;
+
     use chrono::Utc;
     use proto::MessageIdData;
 
@@ -1428,7 +1441,7 @@ pub(crate) mod messages {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub fn redeliver_unacknowleged_messages(
+    pub fn redeliver_unacknowledged_messages(
         consumer_id: u64,
         message_ids: Vec<proto::MessageIdData>,
     ) -> Message {
@@ -1492,6 +1505,22 @@ pub(crate) mod messages {
                 r#type: CommandType::Unsubscribe as i32,
                 unsubscribe: Some(proto::CommandUnsubscribe {
                     consumer_id,
+                    request_id,
+                }),
+                ..Default::default()
+            },
+            payload: None,
+        }
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn new_transaction(coordinator_id: u64, timeout: Duration, request_id: u64) -> Message {
+        Message {
+            command: proto::BaseCommand {
+                r#type: CommandType::NewTxn as i32,
+                new_txn: Some(proto::CommandNewTxn {
+                    tc_id: Some(coordinator_id),
+                    txn_ttl_seconds: Some(timeout.as_secs()),
                     request_id,
                 }),
                 ..Default::default()

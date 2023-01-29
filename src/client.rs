@@ -21,6 +21,7 @@ use crate::{
     },
     producer::{self, ProducerBuilder, SendFuture},
     service_discovery::ServiceDiscovery,
+    transaction::{TransactionBuilder, TransactionCoordinatorClient},
 };
 
 /// Helper trait for consumer deserialization
@@ -168,6 +169,7 @@ pub struct Pulsar<Exe: Executor> {
     producer: Option<mpsc::UnboundedSender<SendMessage>>,
     pub(crate) operation_retry_options: OperationRetryOptions,
     pub(crate) executor: Arc<Exe>,
+    tc_client: Option<Arc<TransactionCoordinatorClient<Exe>>>,
 }
 
 impl<Exe: Executor> Pulsar<Exe> {
@@ -179,6 +181,7 @@ impl<Exe: Executor> Pulsar<Exe> {
         connection_retry_parameters: Option<ConnectionRetryOptions>,
         operation_retry_parameters: Option<OperationRetryOptions>,
         tls_options: Option<TlsOptions>,
+        enable_transaction: bool,
         executor: Exe,
     ) -> Result<Self, Error> {
         let url: String = url.into();
@@ -223,7 +226,17 @@ impl<Exe: Executor> Pulsar<Exe> {
             producer: None,
             operation_retry_options,
             executor,
+            tc_client: None,
         };
+
+        if enable_transaction {
+            let tc_client = TransactionCoordinatorClient::new(
+                client.manager.clone(),
+                client.service_discovery.clone(),
+            )
+            .await?;
+            client.tc_client = Some(Arc::new(tc_client));
+        }
 
         let _ = client
             .executor
@@ -252,6 +265,7 @@ impl<Exe: Executor> Pulsar<Exe> {
             connection_retry_options: None,
             operation_retry_options: None,
             tls_options: None,
+            enable_transaction: false,
             executor,
         }
     }
@@ -426,6 +440,14 @@ impl<Exe: Executor> Pulsar<Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub async fn new_transaction(&self) -> Result<TransactionBuilder<Exe>, Error> {
+        self.tc_client
+            .as_ref()
+            .ok_or_else(|| Error::Custom("transactions are not enabled".into()))
+            .map(|tc_client| TransactionBuilder::new(tc_client.clone()))
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn send_raw<S: Into<String>>(
         &self,
         message: producer::Message,
@@ -452,6 +474,7 @@ pub struct PulsarBuilder<Exe: Executor> {
     connection_retry_options: Option<ConnectionRetryOptions>,
     operation_retry_options: Option<OperationRetryOptions>,
     tls_options: Option<TlsOptions>,
+    enable_transaction: bool,
     executor: Exe,
 }
 
@@ -549,6 +572,13 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
         Ok(self.with_certificate_chain(v))
     }
 
+    /// if enable transaction, start the transactionCoordinatorClient with pulsar client.
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn with_enable_transaction(mut self, enable_transaction: bool) -> Self {
+        self.enable_transaction = enable_transaction;
+        self
+    }
+
     /// creates the Pulsar client and connects it
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn build(self) -> Result<Pulsar<Exe>, Error> {
@@ -558,6 +588,7 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
             connection_retry_options,
             operation_retry_options,
             tls_options,
+            enable_transaction,
             executor,
         } = self;
 
@@ -567,6 +598,7 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
             connection_retry_options,
             operation_retry_options,
             tls_options,
+            enable_transaction,
             executor,
         )
         .await

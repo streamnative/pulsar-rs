@@ -16,6 +16,7 @@ pub enum Error {
     Producer(ProducerError),
     ServiceDiscovery(ServiceDiscoveryError),
     Authentication(AuthenticationError),
+    Transaction(TransactionError),
     Custom(String),
     Executor,
 }
@@ -48,6 +49,13 @@ impl From<ServiceDiscoveryError> for Error {
     }
 }
 
+impl From<TransactionError> for Error {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    fn from(err: TransactionError) -> Self {
+        Error::Transaction(err)
+    }
+}
+
 impl fmt::Display for Error {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -57,6 +65,7 @@ impl fmt::Display for Error {
             Error::Producer(e) => write!(f, "producer error: {}", e),
             Error::ServiceDiscovery(e) => write!(f, "service discovery error: {}", e),
             Error::Authentication(e) => write!(f, "authentication error: {}", e),
+            Error::Transaction(e) => write!(f, "transaction error: {}", e),
             Error::Custom(e) => write!(f, "error: {}", e),
             Error::Executor => write!(f, "could not spawn task"),
         }
@@ -72,6 +81,7 @@ impl std::error::Error for Error {
             Error::Producer(e) => e.source(),
             Error::ServiceDiscovery(e) => e.source(),
             Error::Authentication(e) => e.source(),
+            Error::Transaction(e) => e.source(),
             Error::Custom(_) => None,
             Error::Executor => None,
         }
@@ -392,6 +402,26 @@ impl fmt::Display for AuthenticationError {
 }
 
 impl std::error::Error for AuthenticationError {}
+
+#[derive(Debug)]
+pub enum TransactionError {
+    CoordinatorNotInitialized,
+    Custom(String),
+}
+
+impl fmt::Display for TransactionError {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TransactionError::CoordinatorNotInitialized => {
+                write!(f, "transaction coordinator not initialized")
+            }
+            TransactionError::Custom(m) => write!(f, "authentication error [{}]", m),
+        }
+    }
+}
+
+impl std::error::Error for TransactionError {}
 
 #[derive(Clone)]
 pub(crate) struct SharedError {
