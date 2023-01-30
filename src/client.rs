@@ -21,7 +21,7 @@ use crate::{
     },
     producer::{self, ProducerBuilder, SendFuture},
     service_discovery::ServiceDiscovery,
-    transaction::{TransactionBuilder, TransactionCoordinatorClient},
+    transactions::{TransactionBuilder, TransactionCoordinatorClient},
 };
 
 /// Helper trait for consumer deserialization

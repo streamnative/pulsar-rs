@@ -61,7 +61,7 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
                         .await?
                 }
                 Err(e) => {
-                    error!("tried to lookup a topic but error occrured: {:?}", e);
+                    error!("tried to lookup a topic but error occurred: {:?}", e);
                     return Err(e.into());
                 }
             };

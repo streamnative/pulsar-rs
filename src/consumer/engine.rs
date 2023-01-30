@@ -259,7 +259,6 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
 
                 let ids: Vec<_> = h.iter().cloned().collect();
                 if !ids.is_empty() {
-                    // info!("will unack ids: {:?}", ids);
                     if let Err(e) = self
                         .connection
                         .sender()
@@ -278,7 +277,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 let _ = sender.send(self.connection.clone()).map_err(|_| {
                     error!(
                         "consumer requested the engine's connection but dropped the \
-                                     channel before receiving"
+                                    channel before receiving"
                     );
                 });
                 true
@@ -294,6 +293,8 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             .connection
             .sender()
             .send_ack(self.id, vec![message_id.id], cumulative);
+        // TODO: abort transaction on conflict
+        // TODO: do not remove pending_ack messages until txn end (see PIP-31)
         if res.is_err() {
             error!("ack error: {:?}", res);
         }

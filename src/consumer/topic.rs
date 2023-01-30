@@ -25,12 +25,14 @@ use crate::{
     message::proto::MessageIdData,
     proto,
     proto::CommandConsumerStatsResponse,
+    transactions::Transaction,
     BrokerAddress, DeserializeMessage, Error, Executor, Payload, Pulsar,
 };
 
 // this is entirely public for use in reader.rs
 pub struct TopicConsumer<T: DeserializeMessage, Exe: Executor> {
     pub(crate) consumer_id: u64,
+    pub(crate) subscription: String,
     pub(crate) config: ConsumerConfig,
     topic: String,
     messages: Pin<Box<MessageIdDataReceiver>>,
@@ -268,6 +270,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
 
         Ok(TopicConsumer {
             consumer_id,
+            subscription,
             config,
             topic,
             messages: Box::pin(rx),
@@ -320,6 +323,14 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
             .send(EngineMessage::Ack(msg.message_id.clone(), false))
             .await?;
         Ok(())
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub async fn ack_txn(&mut self, msg: &Message<T>, txn: &Transaction<Exe>) -> Result<(), Error> {
+        txn.add_subscription(msg.topic.clone(), self.subscription.clone())
+            .await?;
+
+        self.ack(msg).await.map_err(|e| e.into())
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]

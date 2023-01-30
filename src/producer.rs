@@ -25,6 +25,7 @@ use crate::{
         proto::{self, CommandSendReceipt, EncryptionKeys, Schema},
         BatchedMessage,
     },
+    transactions::Transaction,
     Error, Pulsar,
 };
 
@@ -290,7 +291,7 @@ impl<Exe: Executor> Producer<Exe> {
 
     /// creates a message builder
     ///
-    /// the created message will ber sent by this producer in [MessageBuilder::send]
+    /// the created message will be sent by this producer in [MessageBuilder::send]
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn create_message(&mut self) -> MessageBuilder<(), Exe> {
         MessageBuilder::new(self)
@@ -375,10 +376,14 @@ impl<Exe: Executor> Producer<Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub(crate) async fn send_raw(&mut self, message: ProducerMessage) -> Result<SendFuture, Error> {
+    pub(crate) async fn send_raw(
+        &mut self,
+        message: ProducerMessage,
+        txn: Option<Arc<Transaction<Exe>>>,
+    ) -> Result<SendFuture, Error> {
         match &mut self.inner {
-            ProducerInner::Single(p) => p.send_raw(message).await,
-            ProducerInner::Partitioned(p) => p.next().send_raw(message).await,
+            ProducerInner::Single(p) => p.send_raw(message, txn).await,
+            ProducerInner::Partitioned(p) => p.next().send_raw(message, txn).await,
         }
     }
 
@@ -622,7 +627,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn send<T: SerializeMessage + Sized>(&mut self, message: T) -> Result<SendFuture, Error> {
         match T::serialize_message(message) {
-            Ok(message) => self.send_raw(message.into()).await,
+            Ok(message) => self.send_raw(message.into(), None).await,
             Err(e) => Err(e),
         }
     }
@@ -672,7 +677,15 @@ impl<Exe: Executor> TopicProducer<Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub(crate) async fn send_raw(&mut self, message: ProducerMessage) -> Result<SendFuture, Error> {
+    pub(crate) async fn send_raw(
+        &mut self,
+        message: ProducerMessage,
+        txn: Option<Arc<Transaction<Exe>>>,
+    ) -> Result<SendFuture, Error> {
+        if let Some(txn) = txn {
+            txn.add_publish_partition(self.topic().into()).await?;
+        }
+
         let (tx, rx) = oneshot::channel();
         match self.batch.as_ref() {
             None => {
@@ -1244,6 +1257,7 @@ pub struct MessageBuilder<'a, T, Exe: Executor> {
     deliver_at_time: Option<i64>,
     event_time: Option<u64>,
     content: T,
+    txn: Option<Arc<Transaction<Exe>>>,
 }
 
 impl<'a, Exe: Executor> MessageBuilder<'a, (), Exe> {
@@ -1258,6 +1272,7 @@ impl<'a, Exe: Executor> MessageBuilder<'a, (), Exe> {
             deliver_at_time: None,
             event_time: None,
             content: (),
+            txn: None,
         }
     }
 }
@@ -1274,6 +1289,7 @@ impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
             deliver_at_time: self.deliver_at_time,
             event_time: self.event_time,
             content,
+            txn: self.txn,
         }
     }
 
@@ -1334,6 +1350,13 @@ impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
         self.event_time = Some(event_time);
         self
     }
+
+    /// sends the message as a part of a transaction
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn txn(mut self, txn: Arc<Transaction<Exe>>) -> Self {
+        self.txn = Some(txn);
+        self
+    }
 }
 
 impl<'a, T: SerializeMessage + Sized, Exe: Executor> MessageBuilder<'a, T, Exe> {
@@ -1348,6 +1371,7 @@ impl<'a, T: SerializeMessage + Sized, Exe: Executor> MessageBuilder<'a, T, Exe> 
             content,
             deliver_at_time,
             event_time,
+            txn,
         } = self;
 
         let mut message = T::serialize_message(content)?;
@@ -1358,6 +1382,6 @@ impl<'a, T: SerializeMessage + Sized, Exe: Executor> MessageBuilder<'a, T, Exe> 
 
         let mut producer_message: ProducerMessage = message.into();
         producer_message.deliver_at_time = deliver_at_time;
-        producer.send_raw(producer_message).await
+        producer.send_raw(producer_message, txn).await
     }
 }

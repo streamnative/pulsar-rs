@@ -35,6 +35,7 @@ use crate::{
         BaseCommand, Codec, Message,
     },
     producer::{self, ProducerOptions},
+    transactions::TxnID,
 };
 
 pub(crate) enum Register {
@@ -590,6 +591,49 @@ impl<Exe: Executor> ConnectionSender<Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub async fn add_partition_txn(
+        &self,
+        txn_id: &TxnID,
+        partition: String,
+    ) -> Result<proto::CommandAddPartitionToTxnResponse, ConnectionError> {
+        let request_id = self.request_id.get();
+        let msg = messages::add_partition_txn(txn_id, partition, request_id);
+        self.send_message(msg, RequestKey::RequestId(request_id), |resp| {
+            resp.command.add_partition_to_txn_response
+        })
+        .await
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub async fn add_subscription_txn(
+        &self,
+        txn_id: &TxnID,
+        topic: String,
+        subscription: String,
+    ) -> Result<proto::CommandAddSubscriptionToTxnResponse, ConnectionError> {
+        let request_id = self.request_id.get();
+        let msg = messages::add_subscription_txn(txn_id, topic, subscription, request_id);
+        self.send_message(msg, RequestKey::RequestId(request_id), |resp| {
+            resp.command.add_subscription_to_txn_response
+        })
+        .await
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub async fn end_txn(
+        &self,
+        txn_id: &TxnID,
+        action: proto::TxnAction,
+    ) -> Result<proto::CommandEndTxnResponse, ConnectionError> {
+        let request_id = self.request_id.get();
+        let msg = messages::end_txn(txn_id, action, request_id);
+        self.send_message(msg, RequestKey::RequestId(request_id), |resp| {
+            resp.command.end_txn_response
+        })
+        .await
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn send_message<R: Debug, F>(
         &self,
         msg: Message,
@@ -1123,6 +1167,7 @@ pub(crate) mod messages {
             Message, Payload,
         },
         producer::{self, ProducerOptions},
+        transactions::TxnID,
     };
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
@@ -1255,6 +1300,7 @@ pub(crate) mod messages {
             },
             payload: Some(Payload {
                 metadata: proto::MessageMetadata {
+                    // TODO: pass transaction id if present
                     producer_name,
                     sequence_id,
                     properties,
@@ -1430,6 +1476,7 @@ pub(crate) mod messages {
                         proto::command_ack::AckType::Individual as i32
                     },
                     message_id,
+                    // TODO: pass transaction id if present
                     validation_error: None,
                     properties: Vec::new(),
                     ..Default::default()
@@ -1521,6 +1568,65 @@ pub(crate) mod messages {
                 new_txn: Some(proto::CommandNewTxn {
                     tc_id: Some(coordinator_id),
                     txn_ttl_seconds: Some(timeout.as_secs()),
+                    request_id,
+                }),
+                ..Default::default()
+            },
+            payload: None,
+        }
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn add_partition_txn(txn_id: &TxnID, partition: String, request_id: u64) -> Message {
+        Message {
+            command: proto::BaseCommand {
+                r#type: CommandType::AddPartitionToTxn as i32,
+                add_partition_to_txn: Some(proto::CommandAddPartitionToTxn {
+                    txnid_least_bits: Some(txn_id.least_sig_bits),
+                    txnid_most_bits: Some(txn_id.most_sig_bits),
+                    partitions: vec![partition],
+                    request_id,
+                }),
+                ..Default::default()
+            },
+            payload: None,
+        }
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn add_subscription_txn(
+        txn_id: &TxnID,
+        topic: String,
+        subscription: String,
+        request_id: u64,
+    ) -> Message {
+        Message {
+            command: proto::BaseCommand {
+                r#type: CommandType::AddSubscriptionToTxn as i32,
+                add_subscription_to_txn: Some(proto::CommandAddSubscriptionToTxn {
+                    txnid_least_bits: Some(txn_id.least_sig_bits),
+                    txnid_most_bits: Some(txn_id.most_sig_bits),
+                    subscription: vec![proto::Subscription {
+                        topic,
+                        subscription,
+                    }],
+                    request_id,
+                }),
+                ..Default::default()
+            },
+            payload: None,
+        }
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn end_txn(txn_id: &TxnID, action: proto::TxnAction, request_id: u64) -> Message {
+        Message {
+            command: proto::BaseCommand {
+                r#type: CommandType::EndTxn as i32,
+                end_txn: Some(proto::CommandEndTxn {
+                    txnid_least_bits: Some(txn_id.least_sig_bits),
+                    txnid_most_bits: Some(txn_id.most_sig_bits),
+                    txn_action: Some(action as i32),
                     request_id,
                 }),
                 ..Default::default()

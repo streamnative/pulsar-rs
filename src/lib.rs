@@ -177,7 +177,7 @@ pub use message::{
     Payload,
 };
 pub use producer::{MultiTopicProducer, Producer, ProducerOptions};
-pub use transaction::TransactionBuilder;
+pub use transactions::TransactionBuilder;
 
 pub mod authentication;
 mod client;
@@ -191,7 +191,7 @@ pub mod message;
 pub mod producer;
 pub mod reader;
 mod service_discovery;
-mod transaction;
+mod transactions;
 
 #[cfg(test)]
 mod tests {

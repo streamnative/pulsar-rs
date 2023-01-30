@@ -7,7 +7,7 @@ use std::{
     },
 };
 
-use crate::{message::proto::ServerError, producer::SendFuture};
+use crate::{message::proto::ServerError, producer::SendFuture, transactions::TransactionState};
 
 #[derive(Debug)]
 pub enum Error {
@@ -406,6 +406,8 @@ impl std::error::Error for AuthenticationError {}
 #[derive(Debug)]
 pub enum TransactionError {
     CoordinatorNotInitialized,
+    InvalidTransactionState(TransactionState),
+    Server(ServerError),
     Custom(String),
 }
 
@@ -416,6 +418,10 @@ impl fmt::Display for TransactionError {
             TransactionError::CoordinatorNotInitialized => {
                 write!(f, "transaction coordinator not initialized")
             }
+            TransactionError::InvalidTransactionState(s) => {
+                write!(f, "invalid transaction state {}", s)
+            }
+            TransactionError::Server(e) => write!(f, "server error {:?}", e),
             TransactionError::Custom(m) => write!(f, "authentication error [{}]", m),
         }
     }
