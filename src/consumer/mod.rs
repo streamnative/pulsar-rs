@@ -159,6 +159,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
             InnerConsumer::Multi(c) => {
                 c.seek(consumer_ids, message_id, timestamp).await?;
                 let topics = c.topics();
+                let config = c.config().clone();
 
                 //currently, pulsar only supports seek for non partitioned topics
                 let addrs =
@@ -168,7 +169,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
                 let topic_addr_pair = c.topics.iter().cloned().zip(addrs.iter().cloned());
 
                 let consumers = try_join_all(topic_addr_pair.map(|(topic, addr)| {
-                    TopicConsumer::new(client.clone(), topic, addr, c.config().clone())
+                    TopicConsumer::new(client.clone(), topic, addr, config.clone())
                 }))
                 .await?;
 
@@ -804,11 +805,16 @@ mod tests {
 
         // // call seek(timestamp), roll back the consumer to start_time
         log::info!("calling seek method");
-        consumer_1
-            .seek(None, None, Some(start_time), client)
-            .await
-            .unwrap();
-
+        // Seek in a separate task, to verify that the seek future is `Send`. See #255.
+        let mut consumer_1 = tokio::task::spawn(async move {
+            consumer_1
+                .seek(None, None, Some(start_time), client)
+                .await
+                .unwrap();
+            consumer_1
+        })
+        .await
+        .unwrap();
         // let mut consumer_2: Consumer<String, _> = client
         // .consumer()
         // .with_consumer_name("seek")
