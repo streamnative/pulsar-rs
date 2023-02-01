@@ -185,6 +185,10 @@ impl Message {
                 request_id: *request_id,
             }),
             BaseCommand {
+                auth_challenge: Some(CommandAuthChallenge { .. }),
+                ..
+            } => Some(RequestKey::AuthChallenge),
+            BaseCommand {
                 connect: Some(_), ..
             }
             | BaseCommand {
@@ -597,6 +601,8 @@ impl TryFrom<i32> for base_command::Type {
             33 => Ok(base_command::Type::GetTopicsOfNamespaceResponse),
             34 => Ok(base_command::Type::GetSchema),
             35 => Ok(base_command::Type::GetSchemaResponse),
+            36 => Ok(base_command::Type::AuthChallenge),
+            37 => Ok(base_command::Type::AuthResponse),
             _ => Err(()),
         }
     }
@@ -686,6 +692,6 @@ mod tests {
                 assert_eq!(type_ as i32, i);
             }
         }
-        assert_eq!(successes, 34);
+        assert_eq!(successes, 36);
     }
 }

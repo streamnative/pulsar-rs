@@ -58,6 +58,7 @@ pub enum RequestKey {
     ProducerSend { producer_id: u64, sequence_id: u64 },
     Consumer { consumer_id: u64 },
     CloseConsumer { consumer_id: u64, request_id: u64 },
+    AuthChallenge 
 }
 
 /// Authentication parameters
@@ -97,6 +98,7 @@ pub(crate) struct Receiver<S: Stream<Item = Result<Message, ConnectionError>>> {
     registrations: Pin<Box<mpsc::UnboundedReceiver<Register>>>,
     shutdown: Pin<Box<oneshot::Receiver<()>>>,
     ping: Option<oneshot::Sender<()>>,
+    auth_challenge: mpsc::UnboundedSender<()>,
 }
 
 impl<S: Stream<Item = Result<Message, ConnectionError>>> Receiver<S> {
@@ -107,6 +109,7 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Receiver<S> {
         error: SharedError,
         registrations: mpsc::UnboundedReceiver<Register>,
         shutdown: oneshot::Receiver<()>,
+        auth_challenge: mpsc::UnboundedSender<()>,
     ) -> Receiver<S> {
         Receiver {
             inbound: Box::pin(inbound),
@@ -118,6 +121,7 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Receiver<S> {
             registrations: Box::pin(registrations),
             shutdown: Box::pin(shutdown),
             ping: None,
+            auth_challenge
         }
     }
 }
@@ -220,6 +224,10 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> 
                                     error!("ConnectionReceiver: error transmitting message to consumer: {:?}", res);
                                 }
                             }
+                        }
+                        Some(RequestKey::AuthChallenge) => {
+                            debug!("Received AuthChallenge");
+                            let _ = self.auth_challenge.unbounded_send(());
                         }
                         None => {
                             warn!(
@@ -576,6 +584,15 @@ impl<Exe: Executor> ConnectionSender<Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub async fn auth_challenge(
+        &self,
+        auth_data: Authentication
+    ) -> Result<proto::CommandSuccess, ConnectionError> {
+        let msg = messages::auth_challenge(auth_data);
+        self.send_message(msg, RequestKey::AuthChallenge, |resp| {resp.command.success}).await
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn send_message<R: Debug, F>(
         &self,
         msg: Message,
@@ -865,7 +882,7 @@ impl<Exe: Executor> Connection<Exe> {
                     Connection::connect(
                         connection_id,
                         stream,
-                        Self::prepare_auth_data(auth).await?,
+                        auth,
                         proxy_to_broker_url,
                         executor,
                         operation_timeout,
@@ -879,7 +896,7 @@ impl<Exe: Executor> Connection<Exe> {
                     Connection::connect(
                         connection_id,
                         stream,
-                        Self::prepare_auth_data(auth).await?,
+                        auth,
                         proxy_to_broker_url,
                         executor,
                         operation_timeout,
@@ -911,7 +928,7 @@ impl<Exe: Executor> Connection<Exe> {
                     Connection::connect(
                         connection_id,
                         stream,
-                        Self::prepare_auth_data(auth).await?,
+                        auth,
                         proxy_to_broker_url,
                         executor,
                         operation_timeout,
@@ -925,7 +942,7 @@ impl<Exe: Executor> Connection<Exe> {
                     Connection::connect(
                         connection_id,
                         stream,
-                        Self::prepare_auth_data(auth).await?,
+                        auth,
                         proxy_to_broker_url,
                         executor,
                         operation_timeout,
@@ -944,7 +961,7 @@ impl<Exe: Executor> Connection<Exe> {
     pub async fn connect<S>(
         connection_id: Uuid,
         mut stream: S,
-        auth_data: Option<Authentication>,
+        auth: Option<Arc<Mutex<Box<dyn crate::authentication::Authentication>>>>,
         proxy_to_broker_url: Option<String>,
         executor: Arc<Exe>,
         operation_timeout: Duration,
@@ -954,6 +971,7 @@ impl<Exe: Executor> Connection<Exe> {
         S: Sink<Message, Error = ConnectionError>,
         S: Send + std::marker::Unpin + 'static,
     {
+        let auth_data = Self::prepare_auth_data(auth.clone()).await?;      
         stream
             .send({
                 let msg = messages::connect(auth_data, proxy_to_broker_url);
@@ -993,6 +1011,7 @@ impl<Exe: Executor> Connection<Exe> {
         let (registrations_tx, registrations_rx) = mpsc::unbounded();
         let error = SharedError::new();
         let (receiver_shutdown_tx, receiver_shutdown_rx) = oneshot::channel();
+        let (auth_challenge_tx, mut auth_challenge_rx) = mpsc::unbounded();
 
         if executor
             .spawn(Box::pin(
@@ -1002,6 +1021,7 @@ impl<Exe: Executor> Connection<Exe> {
                     error.clone(),
                     registrations_rx,
                     receiver_shutdown_rx,
+                    auth_challenge_tx,
                 )
                 .map(|_| ()),
             ))
@@ -1023,6 +1043,22 @@ impl<Exe: Executor> Connection<Exe> {
         }));
         if res.is_err() {
             error!("the executor could not spawn the Receiver future");
+            return Err(ConnectionError::Shutdown);
+        }
+
+        let mut auth_tx = tx.clone();
+        let auth_clone = auth.clone();
+        let auth_challenge_res = executor.spawn(Box::pin(async move {
+            while auth_challenge_rx.next().await.is_some() {
+                match Self::prepare_auth_data(auth_clone.clone()).await {
+                    Ok(Some(auth_data)) => { let _ = auth_tx.send(messages::auth_challenge(auth_data)).await; },
+                    Ok(None) => (),
+                    _ => {break;}
+                }
+            }
+        }));
+        if auth_challenge_res.is_err() {
+            error!("the executor could not spawn the auth_challenge future");
             return Err(ConnectionError::Shutdown);
         }
 
@@ -1493,6 +1529,24 @@ pub(crate) mod messages {
                 unsubscribe: Some(proto::CommandUnsubscribe {
                     consumer_id,
                     request_id,
+                }),
+                ..Default::default()
+            },
+            payload: None,
+        }
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn auth_challenge(auth: Authentication) -> Message {
+        Message {
+            command: proto::BaseCommand {
+                r#type: CommandType::AuthResponse as i32,
+                auth_response: Some(proto::CommandAuthResponse {
+                    response: Some(proto::AuthData {
+                       auth_method_name: Some(auth.name),
+                       auth_data: Some(auth.data)
+                    }),
+                    ..Default::default()
                 }),
                 ..Default::default()
             },
