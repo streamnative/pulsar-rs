@@ -1049,6 +1049,7 @@ impl<Exe: Executor> Connection<Exe> {
 
         if auth.is_some() {
             let auth_challenge_res = executor.spawn({
+                let err = error.clone();
                 let mut tx = tx.clone();
                 let auth = auth.clone();
                 Box::pin(async move {
@@ -1058,7 +1059,8 @@ impl<Exe: Executor> Connection<Exe> {
                                 let _ = tx.send(messages::auth_challenge(auth_data)).await;
                             }
                             Ok(None) => (),
-                            _ => {
+                            Err(e) => {
+                                err.set(e);
                                 break;
                             }
                         }
