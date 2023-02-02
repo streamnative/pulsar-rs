@@ -16,8 +16,8 @@ pub enum EngineEvent<Exe: Executor> {
 }
 
 pub enum EngineMessage<Exe: Executor> {
-    Ack(MessageData, bool),
-    Nack(MessageData),
+    Ack(MessageIdData, bool),
+    Nack(MessageIdData),
     UnackedRedelivery,
     GetConnection(oneshot::Sender<Arc<Connection<Exe>>>),
 }

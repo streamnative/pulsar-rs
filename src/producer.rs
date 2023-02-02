@@ -381,6 +381,16 @@ impl<Exe: Executor> Producer<Exe> {
             ProducerInner::Partitioned(p) => p.next().send_raw(message).await,
         }
     }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub async fn close(&mut self) -> Result<(), Error> {
+        match &mut self.inner {
+            ProducerInner::Single(producer) => producer.close().await,
+            ProducerInner::Partitioned(p) => try_join_all(p.producers.iter().map(|p| p.close()))
+                .await
+                .map(drop),
+        }
+    }
 }
 
 enum ProducerInner<Exe: Executor> {
@@ -1017,6 +1027,31 @@ impl<Exe: Executor> TopicProducer<Exe> {
 
         Ok(())
     }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub async fn close(&self) -> Result<(), Error> {
+        let connection = Arc::downgrade(&self.connection);
+
+        match connection.upgrade() {
+            None => {
+                info!("Connection already gone");
+                Ok(())
+            }
+            Some(connection) => {
+                info!(
+                    "Closing connection #{} of producer[{}]",
+                    self.connection.id(),
+                    self.name
+                );
+                connection
+                    .sender()
+                    .close_producer(self.id)
+                    .await
+                    .map(drop)
+                    .map_err(Error::Connection)
+            }
+        }
+    }
 }
 
 /// Helper structure to prepare a producer
@@ -1089,7 +1124,7 @@ impl<Exe: Executor> ProducerBuilder<Exe> {
                         let producer =
                             TopicProducer::from_connection(pulsar, conn, topic, name, options)
                                 .await?;
-                        Ok::<_, Error>(producer)
+                        Ok::<TopicProducer<Exe>, Error>(producer)
                     }
                 }),
         )
