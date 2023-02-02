@@ -58,7 +58,7 @@ pub enum RequestKey {
     ProducerSend { producer_id: u64, sequence_id: u64 },
     Consumer { consumer_id: u64 },
     CloseConsumer { consumer_id: u64, request_id: u64 },
-    AuthChallenge 
+    AuthChallenge,
 }
 
 /// Authentication parameters
@@ -121,7 +121,7 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Receiver<S> {
             registrations: Box::pin(registrations),
             shutdown: Box::pin(shutdown),
             ping: None,
-            auth_challenge
+            auth_challenge,
         }
     }
 }
@@ -586,10 +586,11 @@ impl<Exe: Executor> ConnectionSender<Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn auth_challenge(
         &self,
-        auth_data: Authentication
+        auth_data: Authentication,
     ) -> Result<proto::CommandSuccess, ConnectionError> {
         let msg = messages::auth_challenge(auth_data);
-        self.send_message(msg, RequestKey::AuthChallenge, |resp| {resp.command.success}).await
+        self.send_message(msg, RequestKey::AuthChallenge, |resp| resp.command.success)
+            .await
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
@@ -971,7 +972,7 @@ impl<Exe: Executor> Connection<Exe> {
         S: Sink<Message, Error = ConnectionError>,
         S: Send + std::marker::Unpin + 'static,
     {
-        let auth_data = Self::prepare_auth_data(auth.clone()).await?;      
+        let auth_data = Self::prepare_auth_data(auth.clone()).await?;
         stream
             .send({
                 let msg = messages::connect(auth_data, proxy_to_broker_url);
@@ -1046,20 +1047,28 @@ impl<Exe: Executor> Connection<Exe> {
             return Err(ConnectionError::Shutdown);
         }
 
-        let mut auth_tx = tx.clone();
-        let auth_clone = auth.clone();
-        let auth_challenge_res = executor.spawn(Box::pin(async move {
-            while auth_challenge_rx.next().await.is_some() {
-                match Self::prepare_auth_data(auth_clone.clone()).await {
-                    Ok(Some(auth_data)) => { let _ = auth_tx.send(messages::auth_challenge(auth_data)).await; },
-                    Ok(None) => (),
-                    _ => {break;}
-                }
+        if auth.is_some() {
+            let auth_challenge_res = executor.spawn({
+                let mut tx = tx.clone();
+                let auth = auth.clone();
+                Box::pin(async move {
+                    while auth_challenge_rx.next().await.is_some() {
+                        match Self::prepare_auth_data(auth.clone()).await {
+                            Ok(Some(auth_data)) => {
+                                let _ = tx.send(messages::auth_challenge(auth_data)).await;
+                            }
+                            Ok(None) => (),
+                            _ => {
+                                break;
+                            }
+                        }
+                    }
+                })
+            });
+            if auth_challenge_res.is_err() {
+                error!("the executor could not spawn the auth_challenge future");
+                return Err(ConnectionError::Shutdown);
             }
-        }));
-        if auth_challenge_res.is_err() {
-            error!("the executor could not spawn the auth_challenge future");
-            return Err(ConnectionError::Shutdown);
         }
 
         let sender = ConnectionSender::new(
@@ -1543,8 +1552,8 @@ pub(crate) mod messages {
                 r#type: CommandType::AuthResponse as i32,
                 auth_response: Some(proto::CommandAuthResponse {
                     response: Some(proto::AuthData {
-                       auth_method_name: Some(auth.name),
-                       auth_data: Some(auth.data)
+                        auth_method_name: Some(auth.name),
+                        auth_data: Some(auth.data),
                     }),
                     ..Default::default()
                 }),
