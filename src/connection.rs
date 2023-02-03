@@ -1568,23 +1568,23 @@ pub(crate) mod messages {
 
 #[cfg(test)]
 mod tests {
-
     use super::{Connection, Receiver};
-    use crate::authentication::Authentication;
-    use crate::error::{AuthenticationError, SharedError};
-    use crate::message::{BaseCommand, Codec, Message};
-    use crate::proto::{CommandAuthChallenge, CommandConnected};
-    use crate::TokioExecutor;
+    use crate::{
+        authentication::Authentication,
+        error::{AuthenticationError, SharedError},
+        message::{BaseCommand, Codec, Message},
+        proto::{CommandAuthChallenge, CommandConnected},
+        TokioExecutor,
+    };
     use async_trait::async_trait;
-    use futures::channel::mpsc;
-    use futures::channel::oneshot;
-    use futures::lock::Mutex;
-    use futures::stream::StreamExt;
-    use futures::SinkExt;
-    use std::sync::Arc;
-    use std::time::Duration;
-    use tokio::net::TcpListener;
-    use tokio::sync::RwLock;
+    use futures::{
+        channel::{mpsc, oneshot},
+        lock::Mutex,
+        stream::StreamExt,
+        SinkExt,
+    };
+    use std::{sync::Arc, time::Duration};
+    use tokio::{net::TcpListener, sync::RwLock};
     use uuid::Uuid;
 
     #[tokio::test]
