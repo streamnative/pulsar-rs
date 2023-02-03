@@ -133,7 +133,7 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match self.shutdown.as_mut().poll(cx) {
             Poll::Ready(Ok(())) | Poll::Ready(Err(futures::channel::oneshot::Canceled)) => {
-                return Poll::Ready(Err(()))
+                return Poll::Ready(Err(()));
             }
             Poll::Pending => {}
         }
@@ -1563,5 +1563,57 @@ pub(crate) mod messages {
             },
             payload: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    use super::Receiver;
+    use crate::error::SharedError;
+    use crate::message::{BaseCommand, Message};
+    use crate::proto::CommandAuthChallenge;
+    use futures::channel::mpsc;
+    use futures::channel::oneshot;
+    use futures::stream::StreamExt;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn receiver_auth_challenge_test() {
+        let (message_tx, message_rx) = mpsc::unbounded();
+        let (tx, _) = mpsc::unbounded();
+        let (_registrations_tx, registrations_rx) = mpsc::unbounded();
+        let error = SharedError::new();
+        let (_receiver_shutdown_tx, receiver_shutdown_rx) = oneshot::channel();
+        let (auth_challenge_tx, mut auth_challenge_rx) = mpsc::unbounded();
+
+        let _ = message_tx.unbounded_send(Ok(Message {
+            command: BaseCommand {
+                r#type: 36,
+                auth_challenge: Some(CommandAuthChallenge {
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            payload: None,
+        }));
+
+        tokio::spawn(Box::pin(Receiver::new(
+            message_rx,
+            tx,
+            error.clone(),
+            registrations_rx,
+            receiver_shutdown_rx,
+            auth_challenge_tx,
+        )));
+
+        if error.is_set() {
+            panic!("{:?}", error.remove())
+        }
+
+        match tokio::time::timeout(Duration::from_secs(1), auth_challenge_rx.next()).await {
+            Ok(auth) => assert!(auth.is_some()),
+            _ => panic!("operation timeout"),
+        };
     }
 }
