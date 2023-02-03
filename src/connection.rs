@@ -1569,16 +1569,26 @@ pub(crate) mod messages {
 #[cfg(test)]
 mod tests {
 
-    use super::Receiver;
-    use crate::error::SharedError;
-    use crate::message::{BaseCommand, Message};
-    use crate::proto::CommandAuthChallenge;
+    use super::{Connection, Receiver};
+    use crate::authentication::Authentication;
+    use crate::error::{AuthenticationError, SharedError};
+    use crate::message::{BaseCommand, Codec, Message};
+    use crate::proto::{CommandAuthChallenge, CommandConnected};
+    use crate::TokioExecutor;
+    use async_trait::async_trait;
     use futures::channel::mpsc;
     use futures::channel::oneshot;
+    use futures::lock::Mutex;
     use futures::stream::StreamExt;
+    use futures::SinkExt;
+    use std::sync::Arc;
     use std::time::Duration;
+    use tokio::net::TcpListener;
+    use tokio::sync::RwLock;
+    use uuid::Uuid;
 
     #[tokio::test]
+    #[cfg(feature = "tokio-runtime")]
     async fn receiver_auth_challenge_test() {
         let (message_tx, message_rx) = mpsc::unbounded();
         let (tx, _) = mpsc::unbounded();
@@ -1615,5 +1625,89 @@ mod tests {
             Ok(auth) => assert!(auth.is_some()),
             _ => panic!("operation timeout"),
         };
+    }
+
+    struct TestAuthentication {
+        count: Arc<RwLock<usize>>,
+    }
+
+    #[async_trait]
+    impl Authentication for TestAuthentication {
+        fn auth_method_name(&self) -> String {
+            "test_auth".to_string()
+        }
+        async fn initialize(&mut self) -> Result<(), AuthenticationError> {
+            Ok(())
+        }
+        async fn auth_data(&mut self) -> Result<Vec<u8>, AuthenticationError> {
+            *self.count.write().await += 1;
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "tokio-runtime")]
+    async fn connection_auth_challenge_test() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+
+        let stream = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .map(|stream| tokio_util::codec::Framed::new(stream, Codec))
+            .unwrap();
+
+        let mut server_stream = listener
+            .accept()
+            .await
+            .map(|(stream, _)| tokio_util::codec::Framed::new(stream, Codec))
+            .unwrap();
+
+        let auth_count = Arc::new(RwLock::new(0));
+
+        server_stream
+            .send(Message {
+                command: BaseCommand {
+                    connected: Some(CommandConnected {
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                payload: None,
+            })
+            .await
+            .unwrap();
+
+        server_stream
+            .send(Message {
+                command: BaseCommand {
+                    r#type: 36,
+                    auth_challenge: Some(CommandAuthChallenge {
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                payload: None,
+            })
+            .await
+            .unwrap();
+
+        server_stream.flush().await.unwrap();
+
+        let connection = Connection::connect(
+            Uuid::new_v4(),
+            stream,
+            Some(Arc::new(Mutex::new(Box::new(TestAuthentication {
+                count: auth_count.clone(),
+            })))),
+            None,
+            TokioExecutor.into(),
+            Duration::from_secs(10),
+        )
+        .await;
+
+        // We need to sleep to allow time for the messages to be processed
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        assert!(connection.is_ok());
+        assert_eq!(*auth_count.read().await, 2);
     }
 }
