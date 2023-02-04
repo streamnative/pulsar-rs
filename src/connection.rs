@@ -1705,9 +1705,6 @@ mod tests {
         )
         .await;
 
-        // We need to sleep to allow time for the messages to be processed
-        tokio::time::sleep(Duration::from_millis(10)).await;
-
         let _ = server_stream.next().await;
         let auth_challenge = server_stream.next().await.unwrap();
 
