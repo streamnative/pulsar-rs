@@ -1691,8 +1691,6 @@ mod tests {
             .await
             .unwrap();
 
-        server_stream.flush().await.unwrap();
-
         let connection = Connection::connect(
             Uuid::new_v4(),
             stream,
