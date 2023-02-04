@@ -1586,6 +1586,7 @@ mod tests {
     use std::{sync::Arc, time::Duration};
     use tokio::{net::TcpListener, sync::RwLock};
     use uuid::Uuid;
+    use crate::proto::{AuthData, CommandAuthResponse};
 
     #[tokio::test]
     #[cfg(feature = "tokio-runtime")]
@@ -1641,7 +1642,7 @@ mod tests {
         }
         async fn auth_data(&mut self) -> Result<Vec<u8>, AuthenticationError> {
             *self.count.write().await += 1;
-            Ok(Vec::new())
+            Ok("test_auth_data".as_bytes().to_vec())
         }
     }
 
@@ -1707,7 +1708,35 @@ mod tests {
         // We need to sleep to allow time for the messages to be processed
         tokio::time::sleep(Duration::from_millis(10)).await;
 
+        let _ = server_stream.next().await;
+        let auth_challenge = server_stream.next().await.unwrap();
+
         assert!(connection.is_ok());
         assert_eq!(*auth_count.read().await, 2);
+        match auth_challenge {
+            Ok(Message {
+                command:
+                    BaseCommand {
+                        auth_response:
+                            Some(CommandAuthResponse {
+                                response:
+                                    Some(AuthData {
+                                        auth_method_name,
+                                        auth_data,
+                                    }),
+                                ..
+                            }),
+                        ..
+                    },
+                ..
+            }) => {
+                assert_eq!(auth_method_name.unwrap(), "test_auth");
+                assert_eq!(
+                    String::from_utf8(auth_data.unwrap()).unwrap(),
+                    "test_auth_data"
+                );
+            }
+            _ => panic!("Unexpected message"),
+        };
     }
 }
