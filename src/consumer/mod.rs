@@ -117,12 +117,38 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         }
     }
 
+    /// acknowledges a single message with a given ID.
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub async fn ack_with_id(
+        &mut self,
+        topic: &str,
+        msg_id: MessageIdData,
+    ) -> Result<(), ConsumerError> {
+        match &mut self.inner {
+            InnerConsumer::Single(c) => c.ack_with_id(msg_id).await,
+            InnerConsumer::Multi(c) => c.ack_with_id(topic, msg_id).await,
+        }
+    }
+
     /// acknowledges a message and all the preceding messages
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn cumulative_ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         match &mut self.inner {
             InnerConsumer::Single(c) => c.cumulative_ack(msg).await,
             InnerConsumer::Multi(c) => c.cumulative_ack(msg).await,
+        }
+    }
+
+    /// acknowledges a message and all the preceding messages with a given ID.
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub async fn cumulative_ack_with_id(
+        &mut self,
+        topic: &str,
+        msg_id: MessageIdData,
+    ) -> Result<(), ConsumerError> {
+        match &mut self.inner {
+            InnerConsumer::Single(c) => c.cumulative_ack_with_id(msg_id).await,
+            InnerConsumer::Multi(c) => c.cumulative_ack_with_id(topic, msg_id).await,
         }
     }
 
@@ -134,6 +160,21 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         match &mut self.inner {
             InnerConsumer::Single(c) => c.nack(msg).await,
             InnerConsumer::Multi(c) => c.nack(msg).await,
+        }
+    }
+
+    /// negative acknowledgement
+    ///
+    /// the message with the given ID will be sent again on the subscription
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub async fn nack_with_id(
+        &mut self,
+        topic: &str,
+        msg_id: MessageIdData,
+    ) -> Result<(), ConsumerError> {
+        match &mut self.inner {
+            InnerConsumer::Single(c) => c.nack_with_id(msg_id).await,
+            InnerConsumer::Multi(c) => c.nack_with_id(topic, msg_id).await,
         }
     }
 
@@ -209,6 +250,15 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         match &mut self.inner {
             InnerConsumer::Single(c) => c.unsubscribe().await,
             InnerConsumer::Multi(c) => c.unsubscribe().await,
+        }
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    /// Unsubscribe the topic then close the connection
+    pub async fn close(&mut self) -> Result<(), Error> {
+        match &mut self.inner {
+            InnerConsumer::Single(c) => c.close().await,
+            InnerConsumer::Multi(c) => c.close().await,
         }
     }
 
@@ -523,7 +573,6 @@ mod tests {
             topic: iter::repeat(())
                 .map(|()| rand::thread_rng().sample(Alphanumeric) as char)
                 .take(8)
-                .map(|c| c as char)
                 .collect(),
             msg: 1,
         };

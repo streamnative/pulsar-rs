@@ -78,6 +78,11 @@ async fn main() -> Result<(), pulsar::Error> {
         }
         counter += 1;
         log::info!("got {} messages", counter);
+
+        if counter > 10 {
+            consumer.close().await.expect("Unable to close consumer");
+            break;
+        }
     }
 
     Ok(())
