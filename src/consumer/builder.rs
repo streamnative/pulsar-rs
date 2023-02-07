@@ -201,7 +201,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
                 .map(|_| rand::thread_rng().sample(Alphanumeric))
                 .map(|c| c as char)
                 .collect();
-            consumer_name = Some(format!("consumer_{}", s));
+            consumer_name = Some(format!("consumer_{s}"));
         }
 
         if topics.is_none() && topic_regex.is_none() {
@@ -243,7 +243,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
                 .map(|_| rand::thread_rng().sample(Alphanumeric))
                 .map(|c| c as char)
                 .collect();
-            let subscription = format!("sub_{}", s);
+            let subscription = format!("sub_{s}");
             warn!(
                 "Subscription not specified. Using new subscription `{}`.",
                 subscription

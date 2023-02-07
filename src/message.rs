@@ -288,8 +288,7 @@ impl tokio_util::codec::Decoder for Codec {
                     let (buf, command_frame) =
                         command_frame(&src[..message_size]).map_err(|err| {
                             ConnectionError::Decoding(format!(
-                                "Error decoding command frame: {:?}",
-                                err
+                                "Error decoding command frame: {err:?}"
                             ))
                         })?;
                     let command = BaseCommand::decode(command_frame.command)?;
@@ -297,8 +296,7 @@ impl tokio_util::codec::Decoder for Codec {
                     let payload = if !buf.is_empty() {
                         let (buf, payload_frame) = payload_frame(buf).map_err(|err| {
                             ConnectionError::Decoding(format!(
-                                "Error decoding payload frame: {:?}",
-                                err
+                                "Error decoding payload frame: {err:?}"
                             ))
                         })?;
 
@@ -395,8 +393,7 @@ impl asynchronous_codec::Decoder for Codec {
                     let (buf, command_frame) =
                         command_frame(&src[..message_size]).map_err(|err| {
                             ConnectionError::Decoding(format!(
-                                "Error decoding command frame: {:?}",
-                                err
+                                "Error decoding command frame: {err:?}"
                             ))
                         })?;
                     let command = BaseCommand::decode(command_frame.command)?;
@@ -404,8 +401,7 @@ impl asynchronous_codec::Decoder for Codec {
                     let payload = if !buf.is_empty() {
                         let (buf, payload_frame) = payload_frame(buf).map_err(|err| {
                             ConnectionError::Decoding(format!(
-                                "Error decoding payload frame: {:?}",
-                                err
+                                "Error decoding payload frame: {err:?}"
                             ))
                         })?;
 
@@ -526,7 +522,7 @@ pub(crate) fn parse_batched_message(
 ) -> Result<Vec<BatchedMessage>, ConnectionError> {
     let (_, result) =
         nom::multi::count(batched_message, count as usize)(payload).map_err(|err| {
-            ConnectionError::Decoding(format!("Error decoding batched messages: {:?}", err))
+            ConnectionError::Decoding(format!("Error decoding batched messages: {err:?}"))
         })?;
     Ok(result)
 }
