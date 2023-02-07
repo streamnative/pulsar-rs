@@ -273,10 +273,10 @@ mod tests {
     impl std::fmt::Display for Error {
         fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
             match self {
-                Error::Pulsar(e) => write!(f, "{}", e),
-                Error::Timeout(e) => write!(f, "{}", e),
-                Error::Serde(e) => write!(f, "{}", e),
-                Error::Utf8(e) => write!(f, "{}", e),
+                Error::Pulsar(e) => write!(f, "{e}"),
+                Error::Timeout(e) => write!(f, "{e}"),
+                Error::Serde(e) => write!(f, "{e}"),
+                Error::Utf8(e) => write!(f, "{e}"),
             }
         }
     }
@@ -384,7 +384,7 @@ mod tests {
 
         // test &str
         {
-            let topic = format!("test_unsized_data_str_{}", test_id);
+            let topic = format!("test_unsized_data_str_{test_id}");
             let send_data = "some unsized data";
 
             pulsar
@@ -422,7 +422,7 @@ mod tests {
 
         // test &[u8]
         {
-            let topic = format!("test_unsized_data_bytes_{}", test_id);
+            let topic = format!("test_unsized_data_bytes_{test_id}");
             let send_data: &[u8] = &[0, 1, 2, 3];
 
             pulsar

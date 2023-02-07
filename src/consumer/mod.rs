@@ -471,8 +471,8 @@ mod tests {
         let addr = "pulsar://127.0.0.1:6650";
 
         let topic_n: u16 = rand::random();
-        let topic1 = format!("multi_consumer_a_{}", topic_n);
-        let topic2 = format!("multi_consumer_b_{}", topic_n);
+        let topic1 = format!("multi_consumer_a_{topic_n}");
+        let topic2 = format!("multi_consumer_b_{topic_n}");
 
         let data1 = TestData {
             topic: "a".to_owned(),
@@ -521,7 +521,7 @@ mod tests {
 
         let consumer_2: Consumer<TestData, _> = builder
             .with_subscription("consumer_2")
-            .with_topic_regex(Regex::new(&format!("multi_consumer_[ab]_{}", topic_n)).unwrap())
+            .with_topic_regex(Regex::new(&format!("multi_consumer_[ab]_{topic_n}")).unwrap())
             .build()
             .await
             .unwrap();
@@ -659,7 +659,7 @@ mod tests {
         let addr = "pulsar://127.0.0.1:6650";
 
         let test_id: u16 = rand::random();
-        let topic = format!("dead_letter_queue_test_{}", test_id);
+        let topic = format!("dead_letter_queue_test_{test_id}");
         let test_msg: u32 = rand::random();
 
         let message = TestData {
@@ -667,7 +667,7 @@ mod tests {
             msg: test_msg,
         };
 
-        let dead_letter_topic = format!("{}_dlq", topic);
+        let dead_letter_topic = format!("{topic}_dlq");
 
         let dead_letter_policy = DeadLetterPolicy {
             max_redeliver_count: 1,
@@ -763,13 +763,13 @@ mod tests {
             match timeout(Duration::from_secs(2), next).await.unwrap() {
                 Either::Left((msg, pending)) => {
                     consumed_1 += 1;
-                    let _ = consumer_1.ack(&msg.unwrap().unwrap());
+                    drop(consumer_1.ack(&msg.unwrap().unwrap()));
                     pending_1 = Some(consumer_1.next());
                     pending_2 = Some(pending);
                 }
                 Either::Right((msg, pending)) => {
                     consumed_2 += 1;
-                    let _ = consumer_2.ack(&msg.unwrap().unwrap());
+                    drop(consumer_2.ack(&msg.unwrap().unwrap()));
                     pending_1 = Some(pending);
                     pending_2 = Some(consumer_2.next());
                 }
@@ -779,9 +779,8 @@ mod tests {
             (consumed_1, 0) => assert_eq!(consumed_1, msg_count),
             (0, consumed_2) => assert_eq!(consumed_2, msg_count),
             _ => panic!(
-                "Expected one consumer to consume all messages. Message count: {}, consumer_1: {} \
-                 consumer_2: {}",
-                msg_count, consumed_1, consumed_2
+                "Expected one consumer to consume all messages. Message count: {msg_count}, consumer_1: {consumed_1} \
+                 consumer_2: {consumed_2}"
             ),
         }
     }
@@ -806,7 +805,7 @@ mod tests {
 
         std::thread::sleep(Duration::from_secs(2));
 
-        println!("this is the starting time: {}", start_time);
+        println!("this is the starting time: {start_time}");
 
         try_join_all((0..msg_count).map(|i| client.send(&topic, i.to_string())))
             .await

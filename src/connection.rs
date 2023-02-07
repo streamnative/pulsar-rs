@@ -979,8 +979,7 @@ impl<Exe: Executor> Connection<Exe> {
                 trace!("received connection response: {:?}", msg);
                 msg.command.connected.ok_or_else(|| {
                     ConnectionError::Unexpected(format!(
-                        "Unexpected message from pulsar: {:?}",
-                        cmd
+                        "Unexpected message from pulsar: {cmd:?}"
                     ))
                 })
             }
@@ -1093,7 +1092,7 @@ where
             trace!("extracted message: {:?}", extracted);
             Ok(extracted)
         } else {
-            Err(ConnectionError::UnexpectedResponse(format!("{:?}", cmd)))
+            Err(ConnectionError::UnexpectedResponse(format!("{cmd:?}")))
         }
     }
 }

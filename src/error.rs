@@ -52,12 +52,12 @@ impl fmt::Display for Error {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Error::Connection(e) => write!(f, "Connection error: {}", e),
-            Error::Consumer(e) => write!(f, "consumer error: {}", e),
-            Error::Producer(e) => write!(f, "producer error: {}", e),
-            Error::ServiceDiscovery(e) => write!(f, "service discovery error: {}", e),
-            Error::Authentication(e) => write!(f, "authentication error: {}", e),
-            Error::Custom(e) => write!(f, "error: {}", e),
+            Error::Connection(e) => write!(f, "Connection error: {e}"),
+            Error::Consumer(e) => write!(f, "consumer error: {e}"),
+            Error::Producer(e) => write!(f, "producer error: {e}"),
+            Error::ServiceDiscovery(e) => write!(f, "service discovery error: {e}"),
+            Error::Authentication(e) => write!(f, "authentication error: {e}"),
+            Error::Custom(e) => write!(f, "error: {e}"),
             Error::Executor => write!(f, "could not spawn task"),
         }
     }
@@ -131,19 +131,19 @@ impl fmt::Display for ConnectionError {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            ConnectionError::Io(e) => write!(f, "{}", e),
+            ConnectionError::Io(e) => write!(f, "{e}"),
             ConnectionError::Disconnected => write!(f, "Disconnected"),
             ConnectionError::PulsarError(e, s) => {
                 write!(f, "Server error ({:?}): {}", e, s.as_deref().unwrap_or(""))
             }
-            ConnectionError::Unexpected(e) => write!(f, "{}", e),
-            ConnectionError::Decoding(e) => write!(f, "Error decoding message: {}", e),
-            ConnectionError::Encoding(e) => write!(f, "Error encoding message: {}", e),
-            ConnectionError::SocketAddr(e) => write!(f, "Error obtaining socket address: {}", e),
-            ConnectionError::Tls(e) => write!(f, "Error connecting TLS stream: {}", e),
-            ConnectionError::Authentication(e) => write!(f, "Error authentication: {}", e),
+            ConnectionError::Unexpected(e) => write!(f, "{e}"),
+            ConnectionError::Decoding(e) => write!(f, "Error decoding message: {e}"),
+            ConnectionError::Encoding(e) => write!(f, "Error encoding message: {e}"),
+            ConnectionError::SocketAddr(e) => write!(f, "Error obtaining socket address: {e}"),
+            ConnectionError::Tls(e) => write!(f, "Error connecting TLS stream: {e}"),
+            ConnectionError::Authentication(e) => write!(f, "Error authentication: {e}"),
             ConnectionError::UnexpectedResponse(e) => {
-                write!(f, "Unexpected response from pulsar: {}", e)
+                write!(f, "Unexpected response from pulsar: {e}")
             }
             ConnectionError::NotFound => write!(f, "error looking up URL"),
             ConnectionError::Canceled => write!(f, "canceled request"),
@@ -201,9 +201,9 @@ impl fmt::Display for ConsumerError {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            ConsumerError::Connection(e) => write!(f, "Connection error: {}", e),
-            ConsumerError::MissingPayload(s) => write!(f, "Missing payload: {}", s),
-            ConsumerError::Io(s) => write!(f, "Decompression error: {}", s),
+            ConsumerError::Connection(e) => write!(f, "Connection error: {e}"),
+            ConsumerError::MissingPayload(s) => write!(f, "Missing payload: {s}"),
+            ConsumerError::Io(s) => write!(f, "Decompression error: {s}"),
             ConsumerError::ChannelFull => write!(
                 f,
                 "cannot send message to the consumer engine: the channel is full"
@@ -257,10 +257,10 @@ impl fmt::Display for ProducerError {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            ProducerError::Connection(e) => write!(f, "Connection error: {}", e),
-            ProducerError::Io(e) => write!(f, "Compression error: {}", e),
-            ProducerError::Custom(s) => write!(f, "Custom error: {}", s),
-            ProducerError::Batch(e) => write!(f, "Batch error: {}", e),
+            ProducerError::Connection(e) => write!(f, "Connection error: {e}"),
+            ProducerError::Io(e) => write!(f, "Compression error: {e}"),
+            ProducerError::Custom(s) => write!(f, "Custom error: {s}"),
+            ProducerError::Batch(e) => write!(f, "Batch error: {e}"),
             ProducerError::PartialSend(e) => {
                 let (successes, failures) = e.iter().fold((0, 0), |(s, f), r| match r {
                     Ok(_) => (s + 1, f),
@@ -268,8 +268,7 @@ impl fmt::Display for ProducerError {
                 });
                 write!(
                     f,
-                    "Partial send error - {} successful, {} failed",
-                    successes, failures
+                    "Partial send error - {successes} successful, {failures} failed"
                 )?;
 
                 if failures > 0 {
@@ -280,7 +279,7 @@ impl fmt::Display for ProducerError {
                         .as_ref()
                         .map(drop)
                         .unwrap_err();
-                    write!(f, "first error: {}", first_error)?;
+                    write!(f, "first error: {first_error}")?;
                 }
                 Ok(())
             }
@@ -293,16 +292,16 @@ impl fmt::Debug for ProducerError {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ProducerError::Connection(e) => write!(f, "Connection({:?})", e),
-            ProducerError::Custom(msg) => write!(f, "Custom({:?})", msg),
-            ProducerError::Io(e) => write!(f, "Connection({:?})", e),
-            ProducerError::Batch(e) => write!(f, "Connection({:?})", e),
+            ProducerError::Connection(e) => write!(f, "Connection({e:?})"),
+            ProducerError::Custom(msg) => write!(f, "Custom({msg:?})"),
+            ProducerError::Io(e) => write!(f, "Connection({e:?})"),
+            ProducerError::Batch(e) => write!(f, "Connection({e:?})"),
             ProducerError::PartialSend(parts) => {
                 write!(f, "PartialSend(")?;
                 for (i, part) in parts.iter().enumerate() {
                     match part {
                         Ok(_) => write!(f, "Ok(SendFuture)")?,
-                        Err(e) => write!(f, "Err({:?})", e)?,
+                        Err(e) => write!(f, "Err({e:?})")?,
                     }
                     if i < (parts.len() - 1) {
                         write!(f, ", ")?;
@@ -354,7 +353,7 @@ impl fmt::Display for ServiceDiscoveryError {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            ServiceDiscoveryError::Connection(e) => write!(f, "Connection error: {}", e),
+            ServiceDiscoveryError::Connection(e) => write!(f, "Connection error: {e}"),
             ServiceDiscoveryError::Query(e, s) => {
                 write!(f, "Query error ({:?}): {}", e, s.as_deref().unwrap_or(""))
             }
@@ -386,7 +385,7 @@ impl fmt::Display for AuthenticationError {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            AuthenticationError::Custom(m) => write!(f, "authentication error [{}]", m),
+            AuthenticationError::Custom(m) => write!(f, "authentication error [{m}]"),
         }
     }
 }

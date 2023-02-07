@@ -64,7 +64,7 @@ async fn main() -> Result<(), pulsar::Error> {
                 .unwrap();
             counter += 1;
             if counter % 1000 == 0 {
-                println!("sent {} messages", counter);
+                println!("sent {counter} messages");
             }
         }
     });
@@ -90,7 +90,7 @@ async fn main() -> Result<(), pulsar::Error> {
         }
         counter += 1;
         if counter % 1000 == 0 {
-            println!("received {} messages", counter);
+            println!("received {counter} messages");
         }
     }
 

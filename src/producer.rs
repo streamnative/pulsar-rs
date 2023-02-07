@@ -774,7 +774,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
                     .map_err(|e| {
                         std::io::Error::new(
                             std::io::ErrorKind::Other,
-                            format!("Snappy compression error: {:?}", e),
+                            format!("Snappy compression error: {e:?}"),
                         )
                     })
                     .map_err(ProducerError::Io)?;
@@ -1133,8 +1133,7 @@ impl<Exe: Executor> ProducerBuilder<Exe> {
         let producer = match producers.len() {
             0 => {
                 return Err(Error::Custom(format!(
-                    "Unexpected error: Partition lookup returned no topics for {}",
-                    topic
+                    "Unexpected error: Partition lookup returned no topics for {topic}"
                 )))
             }
             1 => ProducerInner::Single(producers.into_iter().next().unwrap()),

@@ -75,7 +75,7 @@ async fn main() -> Result<(), pulsar::Error> {
             counter += 1;
             if counter % 4 == 0 {
                 //producer.send_batch().await.unwrap();
-                println!("sent {} messages", counter);
+                println!("sent {counter} messages");
                 break;
             }
         }
@@ -99,10 +99,10 @@ async fn main() -> Result<(), pulsar::Error> {
         if data.data.as_str() != "data" {
             panic!("Unexpected payload: {}", &data.data);
         }
-        println!("got message: {:?}", data);
+        println!("got message: {data:?}");
         counter += 1;
         if counter % 4 == 0 {
-            println!("sent {} messages", counter);
+            println!("sent {counter} messages");
             break;
         }
     }

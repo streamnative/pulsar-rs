@@ -216,7 +216,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
         if let Some(c) = self.consumers.get_mut(topic) {
             c.ack_with_id(msg_id).await
         } else {
-            Err(ConnectionError::Unexpected(format!("no consumer for topic {}", topic)).into())
+            Err(ConnectionError::Unexpected(format!("no consumer for topic {topic}")).into())
         }
     }
 
@@ -238,7 +238,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
         if let Some(c) = self.consumers.get_mut(topic) {
             c.cumulative_ack_with_id(msg_id).await
         } else {
-            Err(ConnectionError::Unexpected(format!("no consumer for topic {}", topic)).into())
+            Err(ConnectionError::Unexpected(format!("no consumer for topic {topic}")).into())
         }
     }
 
@@ -262,7 +262,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
             c.nack_with_id(msg_id).await?;
             Ok(())
         } else {
-            Err(ConnectionError::Unexpected(format!("no consumer for topic {}", topic)).into())
+            Err(ConnectionError::Unexpected(format!("no consumer for topic {topic}")).into())
         }
     }
 
@@ -294,8 +294,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
                 Ok(())
             }
             None => Err(ConnectionError::Unexpected(format!(
-                "no consumer for consumer ids {:?}",
-                consumer_ids
+                "no consumer for consumer ids {consumer_ids:?}"
             ))
             .into()),
         }
