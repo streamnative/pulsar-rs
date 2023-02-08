@@ -1565,14 +1565,8 @@ pub(crate) mod messages {
 
 #[cfg(test)]
 mod tests {
-    use super::{Connection, Receiver};
-    use crate::{
-        authentication::Authentication,
-        error::{AuthenticationError, SharedError},
-        message::{BaseCommand, Codec, Message},
-        proto::{CommandAuthChallenge, CommandConnected},
-        TokioExecutor,
-    };
+    use std::{sync::Arc, time::Duration};
+
     use async_trait::async_trait;
     use futures::{
         channel::{mpsc, oneshot},
@@ -1580,10 +1574,17 @@ mod tests {
         stream::StreamExt,
         SinkExt,
     };
-    use std::{sync::Arc, time::Duration};
     use tokio::{net::TcpListener, sync::RwLock};
     use uuid::Uuid;
-    use crate::proto::{AuthData, CommandAuthResponse};
+
+    use super::{Connection, Receiver};
+    use crate::{
+        authentication::Authentication,
+        error::{AuthenticationError, SharedError},
+        message::{BaseCommand, Codec, Message},
+        proto::{AuthData, CommandAuthChallenge, CommandAuthResponse, CommandConnected},
+        TokioExecutor,
+    };
 
     #[tokio::test]
     #[cfg(feature = "tokio-runtime")]
