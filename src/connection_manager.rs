@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, fmt, sync::Arc, time::Duration};
 
 use futures::{channel::oneshot, lock::Mutex};
 use native_tls::Certificate;
@@ -117,6 +117,18 @@ pub struct ConnectionManager<Exe: Executor> {
     pub(crate) operation_retry_options: OperationRetryOptions,
     tls_options: TlsOptions,
     certificate_chain: Vec<Certificate>,
+}
+
+impl<Exe: Executor> fmt::Debug for ConnectionManager<Exe> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConnectionManager")
+            .field("url", &self.url)
+            .field("connections", &self.connections)
+            .field("connection_retry_options", &self.connection_retry_options)
+            .field("operation_retry_options", &self.operation_retry_options)
+            .field("tls_options", &self.tls_options)
+            .finish()
+    }
 }
 
 impl<Exe: Executor> ConnectionManager<Exe> {

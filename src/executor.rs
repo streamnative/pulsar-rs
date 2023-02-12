@@ -15,7 +15,7 @@ pub enum ExecutorKind {
 }
 
 /// Wrapper trait abstracting the Tokio and async-std executors
-pub trait Executor: Clone + Send + Sync + 'static {
+pub trait Executor: Default + Clone + Send + Sync + 'static {
     /// spawns a new task
     #[allow(clippy::result_unit_err)]
     fn spawn(&self, f: Pin<Box<dyn Future<Output = ()> + Send>>) -> Result<(), ()>;
@@ -41,7 +41,7 @@ pub trait Executor: Clone + Send + Sync + 'static {
 
 /// Wrapper for the Tokio executor
 #[cfg(feature = "tokio-runtime")]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct TokioExecutor;
 
 #[cfg(feature = "tokio-runtime")]
@@ -79,7 +79,7 @@ impl Executor for TokioExecutor {
 
 /// Wrapper for the async-std executor
 #[cfg(feature = "async-std-runtime")]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct AsyncStdExecutor;
 
 #[cfg(feature = "async-std-runtime")]
@@ -184,7 +184,7 @@ impl<T> Future for JoinHandle<T> {
     }
 }
 
-/// a `Stream` producing a `()` at rgular time intervals
+/// a `Stream` producing a `()` at regular time intervals
 pub enum Interval {
     /// wrapper for tokio's interval
     #[cfg(feature = "tokio-runtime")]

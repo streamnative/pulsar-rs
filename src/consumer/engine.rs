@@ -23,8 +23,9 @@ use crate::{
         proto::{command_subscribe::SubType, MessageIdData},
         Message as RawMessage,
     },
-    proto,
+    proto::{self, MessageMetadata},
     proto::{BaseCommand, CommandCloseConsumer, CommandMessage},
+    transactions::TxnID,
     BrokerAddress, Error, Executor, Payload, Pulsar,
 };
 
@@ -230,15 +231,15 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 trace!("ack channel was closed");
                 false
             }
-            Some(EngineMessage::Ack(message_id, cumulative)) => {
-                self.ack(message_id, cumulative);
+            Some(EngineMessage::Ack(message_id, cumulative, txn_id)) => {
+                self.ack(message_id, cumulative, txn_id);
                 true
             }
             Some(EngineMessage::Nack(message_id)) => {
                 if let Err(e) = self
                     .connection
                     .sender()
-                    .send_redeliver_unacknowleged_messages(self.id, vec![message_id.id.clone()])
+                    .send_redeliver_unacknowledged_messages(self.id, vec![message_id.id.clone()])
                 {
                     error!(
                         "could not ask for redelivery for message {:?}: {:?}",
@@ -262,7 +263,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                     if let Err(e) = self
                         .connection
                         .sender()
-                        .send_redeliver_unacknowleged_messages(self.id, ids)
+                        .send_redeliver_unacknowledged_messages(self.id, ids)
                     {
                         error!("could not ask for redelivery: {:?}", e);
                     } else {
@@ -286,13 +287,13 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    fn ack(&mut self, message_id: MessageData, cumulative: bool) {
+    fn ack(&mut self, message_id: MessageData, cumulative: bool, txn_id: Option<TxnID>) {
         // FIXME: this does not handle cumulative acks
         self.unacked_messages.remove(&message_id.id);
-        let res = self
-            .connection
-            .sender()
-            .send_ack(self.id, vec![message_id.id], cumulative);
+        let res =
+            self.connection
+                .sender()
+                .send_ack(self.id, vec![message_id.id], cumulative, txn_id);
         // TODO: abort transaction on conflict
         // TODO: do not remove pending_ack messages until txn end (see PIP-31)
         if res.is_err() {
@@ -513,13 +514,24 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                                 Error::Custom("DLQ send error".to_string())
                             })?;
 
-                        self.ack(
-                            MessageData {
-                                id: message.message_id,
-                                batch_size: None,
-                            },
-                            false,
-                        );
+                        let txn_id = match payload.metadata {
+                            MessageMetadata {
+                                txnid_most_bits: Some(most_sig_bits),
+                                txnid_least_bits: Some(least_sig_bits),
+                                ..
+                            } => Some(TxnID {
+                                most_sig_bits,
+                                least_sig_bits,
+                            }),
+                            _ => None,
+                        };
+
+                        let data = MessageData {
+                            id: message.message_id,
+                            batch_size: None,
+                        };
+
+                        self.ack(data, false, txn_id);
                     } else {
                         self.send_to_consumer(message.message_id, payload).await?
                     }

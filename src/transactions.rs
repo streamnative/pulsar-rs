@@ -91,6 +91,7 @@ impl Display for TransactionState {
     }
 }
 
+#[derive(Debug)]
 pub struct Transaction<Exe: Executor> {
     txn_id: TxnID,
     state: TransactionState,
@@ -160,6 +161,7 @@ impl<Exe: Executor> Transaction<Exe> {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct TxnID {
     pub(crate) most_sig_bits: u64,
     pub(crate) least_sig_bits: u64,
@@ -171,6 +173,7 @@ impl Display for TxnID {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct TransactionCoordinatorClient<Exe: Executor> {
     handlers: HashMap<u64, TransactionMetaStoreHandler<Exe>>,
     epoch: AtomicUsize,
@@ -248,6 +251,7 @@ impl<Exe: Executor> TransactionCoordinatorClient<Exe> {
     }
 }
 
+#[derive(Debug)]
 struct TransactionMetaStoreHandler<Exe: Executor> {
     coordinator_id: u64,
     manager: Arc<ConnectionManager<Exe>>,

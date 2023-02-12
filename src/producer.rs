@@ -83,7 +83,7 @@ pub struct Message {
 /// internal message type carrying options that must be defined
 /// by the producer
 #[derive(Debug, Clone, Default)]
-pub(crate) struct ProducerMessage {
+pub(crate) struct ProducerMessage<Exe: Executor> {
     pub payload: Vec<u8>,
     pub properties: HashMap<String, String>,
     ///key to decide partition for the msg
@@ -110,9 +110,11 @@ pub(crate) struct ProducerMessage {
     /// UTC Unix timestamp in milliseconds, time at which the message should be
     /// delivered to consumers
     pub deliver_at_time: ::std::option::Option<i64>,
+    /// The optional transaction associated with the message
+    pub txn: Option<Arc<Transaction<Exe>>>,
 }
 
-impl From<Message> for ProducerMessage {
+impl<Exe: Executor> From<Message> for ProducerMessage<Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn from(m: Message) -> Self {
         ProducerMessage {
@@ -378,12 +380,11 @@ impl<Exe: Executor> Producer<Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub(crate) async fn send_raw(
         &mut self,
-        message: ProducerMessage,
-        txn: Option<Arc<Transaction<Exe>>>,
+        message: ProducerMessage<Exe>,
     ) -> Result<SendFuture, Error> {
         match &mut self.inner {
-            ProducerInner::Single(p) => p.send_raw(message, txn).await,
-            ProducerInner::Partitioned(p) => p.next().send_raw(message, txn).await,
+            ProducerInner::Single(p) => p.send_raw(message).await,
+            ProducerInner::Partitioned(p) => p.next().send_raw(message).await,
         }
     }
 
@@ -627,7 +628,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn send<T: SerializeMessage + Sized>(&mut self, message: T) -> Result<SendFuture, Error> {
         match T::serialize_message(message) {
-            Ok(message) => self.send_raw(message.into(), None).await,
+            Ok(message) => self.send_raw(message.into()).await,
             Err(e) => Err(e),
         }
     }
@@ -679,10 +680,9 @@ impl<Exe: Executor> TopicProducer<Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub(crate) async fn send_raw(
         &mut self,
-        message: ProducerMessage,
-        txn: Option<Arc<Transaction<Exe>>>,
+        message: ProducerMessage<Exe>,
     ) -> Result<SendFuture, Error> {
-        if let Some(txn) = txn {
+        if let Some(ref txn) = message.txn {
             txn.add_publish_partition(self.topic().into()).await?;
         }
 
@@ -738,7 +738,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn send_compress(
         &mut self,
-        mut message: ProducerMessage,
+        mut message: ProducerMessage<Exe>,
     ) -> Result<proto::CommandSendReceipt, Error> {
         let compressed_message = match self.compression.clone() {
             None | Some(Compression::None) => message,
@@ -805,7 +805,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn send_inner(
         &mut self,
-        message: ProducerMessage,
+        message: ProducerMessage<Exe>,
     ) -> Result<proto::CommandSendReceipt, Error> {
         loop {
             let msg = message.clone();
@@ -1206,11 +1206,11 @@ impl Batch {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub async fn push_back(
+    pub async fn push_back<Exe: Executor>(
         &self,
         msg: (
             oneshot::Sender<Result<proto::CommandSendReceipt, Error>>,
-            ProducerMessage,
+            ProducerMessage<Exe>,
         ),
     ) {
         let (tx, message) = msg;
@@ -1380,8 +1380,9 @@ impl<'a, T: SerializeMessage + Sized, Exe: Executor> MessageBuilder<'a, T, Exe> 
         message.ordering_key = ordering_key;
         message.event_time = event_time;
 
-        let mut producer_message: ProducerMessage = message.into();
+        let mut producer_message: ProducerMessage<Exe> = message.into();
         producer_message.deliver_at_time = deliver_at_time;
-        producer.send_raw(producer_message, txn).await
+        producer_message.txn = txn;
+        producer.send_raw(producer_message).await
     }
 }

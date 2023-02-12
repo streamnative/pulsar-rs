@@ -309,7 +309,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         producer_id: u64,
         producer_name: String,
         sequence_id: u64,
-        message: producer::ProducerMessage,
+        message: producer::ProducerMessage<Exe>,
     ) -> Result<proto::CommandSendReceipt, ConnectionError> {
         let key = RequestKey::ProducerSend {
             producer_id,
@@ -515,14 +515,15 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         consumer_id: u64,
         message_ids: Vec<proto::MessageIdData>,
         cumulative: bool,
+        txn_id: Option<TxnID>,
     ) -> Result<(), ConnectionError> {
         self.tx
-            .unbounded_send(messages::ack(consumer_id, message_ids, cumulative))
+            .unbounded_send(messages::ack(consumer_id, message_ids, cumulative, txn_id))
             .map_err(|_| ConnectionError::Disconnected)
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub fn send_redeliver_unacknowleged_messages(
+    pub fn send_redeliver_unacknowledged_messages(
         &self,
         consumer_id: u64,
         message_ids: Vec<proto::MessageIdData>,
@@ -1168,6 +1169,7 @@ pub(crate) mod messages {
         },
         producer::{self, ProducerOptions},
         transactions::TxnID,
+        Executor,
     };
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
@@ -1275,17 +1277,19 @@ pub(crate) mod messages {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub(crate) fn send(
+    pub(crate) fn send<Exe: Executor>(
         producer_id: u64,
         producer_name: String,
         sequence_id: u64,
-        message: producer::ProducerMessage,
+        message: producer::ProducerMessage<Exe>,
     ) -> Message {
         let properties = message
             .properties
             .into_iter()
             .map(|(key, value)| proto::KeyValue { key, value })
             .collect();
+
+        let txn = message.txn.as_ref();
 
         Message {
             command: proto::BaseCommand {
@@ -1300,7 +1304,8 @@ pub(crate) mod messages {
             },
             payload: Some(Payload {
                 metadata: proto::MessageMetadata {
-                    // TODO: pass transaction id if present
+                    txnid_least_bits: txn.map(|t| t.id().least_sig_bits),
+                    txnid_most_bits: txn.map(|t| t.id().most_sig_bits),
                     producer_name,
                     sequence_id,
                     properties,
@@ -1464,6 +1469,7 @@ pub(crate) mod messages {
         consumer_id: u64,
         message_id: Vec<proto::MessageIdData>,
         cumulative: bool,
+        txn_id: Option<TxnID>,
     ) -> Message {
         Message {
             command: proto::BaseCommand {
@@ -1476,7 +1482,8 @@ pub(crate) mod messages {
                         proto::command_ack::AckType::Individual as i32
                     },
                     message_id,
-                    // TODO: pass transaction id if present
+                    txnid_least_bits: txn_id.as_ref().map(|id| id.least_sig_bits),
+                    txnid_most_bits: txn_id.as_ref().map(|id| id.most_sig_bits),
                     validation_error: None,
                     properties: Vec::new(),
                     ..Default::default()

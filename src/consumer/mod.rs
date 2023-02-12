@@ -237,7 +237,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         }
     }
 
-    /// returns a list of broker URLs this consumer is connnected to
+    /// returns a list of broker URLs this consumer is connected to
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn connections(&mut self) -> Result<Vec<Url>, Error> {
         match &mut self.inner {
@@ -848,7 +848,7 @@ mod tests {
             );
 
             if consumed_2 >= msg_count {
-                log::info!("received {} messagses, so break", consumed_2);
+                log::info!("received {} messages, so break", consumed_2);
                 break;
             }
         }

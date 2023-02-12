@@ -320,7 +320,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         self.engine_tx
-            .send(EngineMessage::Ack(msg.message_id.clone(), false))
+            .send(EngineMessage::Ack(msg.message_id.clone(), false, None))
             .await?;
         Ok(())
     }
@@ -330,7 +330,15 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         txn.add_subscription(msg.topic.clone(), self.subscription.clone())
             .await?;
 
-        self.ack(msg).await.map_err(|e| e.into())
+        self.engine_tx
+            .send(EngineMessage::Ack(
+                msg.message_id.clone(),
+                false,
+                Some(txn.id().clone()),
+            ))
+            .await
+            .map_err(ConsumerError::from)?;
+        Ok(())
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
@@ -341,7 +349,23 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn cumulative_ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         self.engine_tx
-            .send(EngineMessage::Ack(msg.message_id.clone(), true))
+            .send(EngineMessage::Ack(msg.message_id.clone(), true, None))
+            .await?;
+        Ok(())
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub async fn cumulative_ack_txn(
+        &mut self,
+        msg: &Message<T>,
+        txn: &Transaction<Exe>,
+    ) -> Result<(), ConsumerError> {
+        self.engine_tx
+            .send(EngineMessage::Ack(
+                msg.message_id.clone(),
+                true,
+                Some(txn.id().clone()),
+            ))
             .await?;
         Ok(())
     }

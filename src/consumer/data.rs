@@ -5,6 +5,7 @@ use futures::channel::{mpsc, oneshot};
 use crate::{
     connection::Connection,
     message::{proto::MessageIdData, Message as RawMessage},
+    transactions::TxnID,
     Error, Executor, Payload,
 };
 
@@ -16,7 +17,7 @@ pub enum EngineEvent<Exe: Executor> {
 }
 
 pub enum EngineMessage<Exe: Executor> {
-    Ack(MessageData, bool),
+    Ack(MessageData, bool, Option<TxnID>),
     Nack(MessageData),
     UnackedRedelivery,
     GetConnection(oneshot::Sender<Arc<Connection<Exe>>>),

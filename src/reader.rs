@@ -14,6 +14,8 @@ use crate::{
     error::Error,
     executor::Executor,
     message::proto::{command_subscribe::SubType, MessageIdData},
+    proto::MessageMetadata,
+    transactions::TxnID,
 };
 
 /// A client that acknowledges messages systematically
@@ -53,11 +55,25 @@ impl<T: DeserializeMessage + 'static, Exe: Executor> Stream for Reader<T, Exe> {
                 Poll::Ready(Some(Ok(msg))) => {
                     let mut acker = this.consumer.acker();
                     let message_id = msg.message_id.clone();
+                    let txn_id = match msg.payload.metadata {
+                        MessageMetadata {
+                            txnid_most_bits: Some(most_sig_bits),
+                            txnid_least_bits: Some(least_sig_bits),
+                            ..
+                        } => Some(TxnID {
+                            most_sig_bits,
+                            least_sig_bits,
+                        }),
+                        _ => None,
+                    };
+
                     this.state = Some(State::PollingAck(
                         msg,
-                        Box::pin(
-                            async move { acker.send(EngineMessage::Ack(message_id, false)).await },
-                        ),
+                        Box::pin(async move {
+                            acker
+                                .send(EngineMessage::Ack(message_id, false, txn_id))
+                                .await
+                        }),
                     ));
                     Pin::new(this).poll_next(cx)
                 }
