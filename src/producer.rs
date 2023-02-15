@@ -1308,6 +1308,8 @@ impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
     }
 
     /// delivers the message at this date
+    /// Note: The delayed and scheduled message attributes are only applied to shared subscription.
+    /// With other subscription types, the messages will still be delivered immediately.
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn deliver_at(mut self, date: SystemTime) -> Result<Self, std::time::SystemTimeError> {
         self.deliver_at_time = Some(date.duration_since(UNIX_EPOCH)?.as_millis() as i64);
@@ -1315,6 +1317,8 @@ impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
     }
 
     /// delays message deliver with this duration
+    /// Note: The delayed and scheduled message attributes are only applied to shared subscription.
+    /// With other subscription types, the messages will still be delivered immediately.
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn delay(mut self, delay: Duration) -> Result<Self, std::time::SystemTimeError> {
         let date = SystemTime::now() + delay;
@@ -1327,7 +1331,11 @@ impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
         Ok(self)
     }
 
-    /// delivers the message at this date
+    // set the event time for a given message
+    // By default, messages don't have an event time associated, while the publish
+    // time will be be always present.
+    // Set the event time to explicitly declare the time
+    // that the event "happened", as opposed to when the message is being published.
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn event_time(mut self, event_time: u64) -> Self {
         self.event_time = Some(event_time);
