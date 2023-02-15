@@ -1308,7 +1308,7 @@ impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
     }
 
     /// delivers the message at this date
-    /// Note: The delayed and scheduled message attributes are only applied to shared subscription.    
+    /// Note: The delayed and scheduled message attributes are only applied to shared subscription.
     /// With other subscription types, the messages will still be delivered immediately.
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn deliver_at(mut self, date: SystemTime) -> Result<Self, std::time::SystemTimeError> {
@@ -1317,7 +1317,7 @@ impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
     }
 
     /// delays message deliver with this duration
-    /// Note: The delayed and scheduled message attributes are only applied to shared subscription.    
+    /// Note: The delayed and scheduled message attributes are only applied to shared subscription.
     /// With other subscription types, the messages will still be delivered immediately.
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn delay(mut self, delay: Duration) -> Result<Self, std::time::SystemTimeError> {
