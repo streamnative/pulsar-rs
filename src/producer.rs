@@ -1331,10 +1331,10 @@ impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
         Ok(self)
     }
 
-    // set the event time for a given message                                                           ▐
-    // By default, messages don't have an event time associated, while the publish                                ▐
-    // time will be be always present.                                                                            ▐
-    // Set the event time to explicitly declare the time                                  ▐
+    // set the event time for a given message
+    // By default, messages don't have an event time associated, while the publish
+    // time will be be always present.
+    // Set the event time to explicitly declare the time
     // that the event "happened", as opposed to when the message is being published.
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn event_time(mut self, event_time: u64) -> Self {
