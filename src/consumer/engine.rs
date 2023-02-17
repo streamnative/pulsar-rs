@@ -367,7 +367,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             }
             unexpected => {
                 let r#type = proto::base_command::Type::try_from(unexpected.command.r#type)
-                    .map(|t| format!("{:?}", t))
+                    .map(|t| format!("{t:?}"))
                     .unwrap_or_else(|_| unexpected.command.r#type.to_string());
                 warn!(
                     "Unexpected message type sent to consumer: {}. This is probably a bug!",
@@ -391,7 +391,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                     error!("unknown compression type: {}", compression);
                     Error::Consumer(ConsumerError::Io(std::io::Error::new(
                         ErrorKind::Other,
-                        format!("unknown compression type: {}", compression),
+                        format!("unknown compression type: {compression}"),
                     )))
                 })?
             }
@@ -786,7 +786,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             name = self
                 .name
                 .as_ref()
-                .map(|s| format!("({})", s))
+                .map(|s| format!("({s})"))
                 .unwrap_or_default(),
             topic = &self.topic
         )
