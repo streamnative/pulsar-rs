@@ -18,7 +18,6 @@ docker run -it \
 RUST_LOG=info cargo run --release --example producer
 ```
 
-
 ## Consumer
 
 ```bash
