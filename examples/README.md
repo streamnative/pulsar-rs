@@ -15,7 +15,7 @@ docker run -it \
 ## Producer
 
 ```bash
-$ RUST_LOG=info cargo run --release --example producer
+RUST_LOG=info cargo run --release --example producer
 ```
 
 
