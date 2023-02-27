@@ -21,5 +21,5 @@ RUST_LOG=info cargo run --release --example producer
 ## Consumer
 
 ```bash
-$ RUST_LOG=info cargo run --release --example consumer
+RUST_LOG=info cargo run --release --example consumer
 ```
