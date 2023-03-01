@@ -75,7 +75,7 @@ async fn main() -> Result<(), pulsar::Error> {
             .unwrap();
 
         counter += 1;
-        println!("{counter} messages");
+        log::info!("{counter} messages");
         tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
 
         if counter > 10 {
