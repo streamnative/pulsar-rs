@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use futures::{channel::oneshot, lock::Mutex};
-use native_tls::Certificate;
+use native_tls::{Certificate, Identity};
 use rand::Rng;
 use url::Url;
 
@@ -75,6 +75,12 @@ pub struct TlsOptions {
     /// contains a list of PEM encoded certificates
     pub certificate_chain: Option<Vec<u8>>,
 
+    /// PEM encoded X509 certificates
+    pub certificate: Option<Vec<u8>>,
+
+    /// is a PEM encoded PKCS #8 formatted private key for the leaf certificate
+    pub private_key: Option<Vec<u8>>,
+
     /// allow insecure TLS connection if set to true
     ///
     /// defaults to *false*
@@ -91,6 +97,8 @@ impl Default for TlsOptions {
     fn default() -> Self {
         Self {
             certificate_chain: None,
+            certificate: None,
+            private_key: None,
             allow_insecure_connection: false,
             tls_hostname_verification_enabled: true,
         }
@@ -117,6 +125,7 @@ pub struct ConnectionManager<Exe: Executor> {
     pub(crate) operation_retry_options: OperationRetryOptions,
     tls_options: TlsOptions,
     certificate_chain: Vec<Certificate>,
+    identity: Option<Identity>,
 }
 
 impl<Exe: Executor> ConnectionManager<Exe> {
@@ -162,6 +171,13 @@ impl<Exe: Executor> ConnectionManager<Exe> {
             }
         };
 
+        let identity = match (tls_options.certificate.as_ref(), tls_options.private_key.as_ref()) {
+            (None, _) | (_, None) => None,
+            (Some(certificate), Some(privatekey)) => {
+                Some(native_tls::Identity::from_pkcs8(&certificate, &privatekey)?)
+            }
+        };
+
         if let Some(auth) = auth.clone() {
             auth.lock().await.initialize().await?;
         }
@@ -175,6 +191,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
             operation_retry_options,
             tls_options,
             certificate_chain,
+            identity,
         };
         let broker_address = BrokerAddress {
             url: url.clone(),
@@ -292,6 +309,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                 self.auth.clone(),
                 proxy_url.clone(),
                 &self.certificate_chain,
+                &self.identity,
                 self.tls_options.allow_insecure_connection,
                 self.tls_options.tls_hostname_verification_enabled,
                 self.connection_retry_options.connection_timeout,
