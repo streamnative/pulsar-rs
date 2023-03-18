@@ -29,7 +29,7 @@ use crate::{
     BrokerAddress, DeserializeMessage, Error, Executor, Payload, Pulsar,
 };
 
-static consumer_id_generator: AtomicU64 = AtomicU64::new(0);
+static CONSUMER_ID_GENERATOR: AtomicU64 = AtomicU64::new(0);
 
 // this is entirely public for use in reader.rs
 pub struct TopicConsumer<T: DeserializeMessage, Exe: Executor> {
@@ -63,7 +63,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
             options,
             dead_letter_policy,
         } = config.clone();
-        let consumer_id = consumer_id.unwrap_or_else(consumer_id_generator.fetch_add(1, Ordering::SeqCst));
+        let consumer_id = consumer_id.unwrap_or_else(|| CONSUMER_ID_GENERATOR.fetch_add(1, Ordering::SeqCst));
         let (resolver, messages) = mpsc::unbounded();
         let batch_size = batch_size.unwrap_or(1000);
 

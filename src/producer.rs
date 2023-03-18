@@ -32,7 +32,7 @@ use crate::{
 type ProducerId = u64;
 type ProducerName = String;
 
-static producer_id_generator: AtomicU64 = AtomicU64::new(0);
+static PRODUCER_ID_GENERATOR: AtomicU64 = AtomicU64::new(0);
 
 /// returned by [Producer::send]
 ///
@@ -442,7 +442,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
         options: ProducerOptions,
     ) -> Result<Self, Error> {
         let topic = topic.into();
-        let producer_id = producer_id_generator.fetch_add(1, Ordering::SeqCst);
+        let producer_id = PRODUCER_ID_GENERATOR.fetch_add(1, Ordering::SeqCst);
         let sequence_ids = SerialId::new();
 
         let topic = topic.clone();
