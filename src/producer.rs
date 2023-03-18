@@ -4,6 +4,7 @@ use std::{
     io::Write,
     pin::Pin,
     sync::Arc,
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -30,6 +31,8 @@ use crate::{
 
 type ProducerId = u64;
 type ProducerName = String;
+
+static producer_id_generator: AtomicU64 = AtomicU64::new(0);
 
 /// returned by [Producer::send]
 ///
@@ -439,7 +442,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
         options: ProducerOptions,
     ) -> Result<Self, Error> {
         let topic = topic.into();
-        let producer_id = rand::random();
+        let producer_id = producer_id_generator.fetch_add(1, Ordering::SeqCst);
         let sequence_ids = SerialId::new();
 
         let topic = topic.clone();

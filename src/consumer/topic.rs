@@ -3,6 +3,7 @@ use std::{
     marker::PhantomData,
     pin::Pin,
     sync::Arc,
+    sync::atomic::{AtomicU64, Ordering},
     task::{Context, Poll},
     time::{Duration, Instant},
 };
@@ -27,6 +28,8 @@ use crate::{
     proto::CommandConsumerStatsResponse,
     BrokerAddress, DeserializeMessage, Error, Executor, Payload, Pulsar,
 };
+
+static consumer_id_generator: AtomicU64 = AtomicU64::new(0);
 
 // this is entirely public for use in reader.rs
 pub struct TopicConsumer<T: DeserializeMessage, Exe: Executor> {
@@ -60,7 +63,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
             options,
             dead_letter_policy,
         } = config.clone();
-        let consumer_id = consumer_id.unwrap_or_else(rand::random);
+        let consumer_id = consumer_id.unwrap_or_else(consumer_id_generator.fetch_add(1, Ordering::SeqCst));
         let (resolver, messages) = mpsc::unbounded();
         let batch_size = batch_size.unwrap_or(1000);
 
