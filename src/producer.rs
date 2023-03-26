@@ -138,6 +138,9 @@ pub struct ProducerOptions {
     pub schema: Option<Schema>,
     /// batch message size
     pub batch_size: Option<u32>,
+    /// batch size in bytes treshold (only relevant when batch_size active).
+    /// batch is sent when batch size in bytes is reached
+    pub batch_byte_size: Option<usize>,
     /// algorithm used to compress the messages
     pub compression: Option<Compression>,
     /// producer access mode: shared = 0, exclusive = 1, waitforexclusive =2,
@@ -444,6 +447,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
 
         let topic = topic.clone();
         let batch_size = options.batch_size;
+        let batch_byte_size = options.batch_byte_size;
         let compression = options.compression.clone();
 
         let producer_name: ProducerName;
@@ -596,7 +600,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
             name: producer_name,
             topic,
             message_id: sequence_ids,
-            batch: batch_size.map(Batch::new).map(Mutex::new),
+            batch: batch_size.map(|batch_size| Batch::new(batch_size, batch_byte_size)).map(Mutex::new),
             compression,
             drop_signal: _drop_signal,
             options,
@@ -851,6 +855,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
 
         let topic = self.topic.clone();
         let batch_size = self.options.batch_size;
+        let batch_byte_size = self.options.batch_byte_size;
 
         let mut current_retries = 0u32;
         let start = std::time::Instant::now();
@@ -1004,7 +1009,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
         // drop_signal will be dropped when the TopicProducer is dropped, then
         // drop_receiver will return, and we can close the producer
         let (_drop_signal, drop_receiver) = oneshot::channel::<()>();
-        let batch = batch_size.map(Batch::new).map(Mutex::new);
+        let batch = batch_size.map(|batch_size| Batch::new(batch_size, batch_byte_size)).map(Mutex::new);
         let conn = Arc::downgrade(&self.connection);
 
         let producer_id = self.id;
@@ -1164,31 +1169,74 @@ impl<Exe: Executor> ProducerBuilder<Exe> {
     }
 }
 
+struct BatchStorage {
+    size: usize,
+    #[allow(clippy::type_complexity)]
+    pub storage: VecDeque<(
+        oneshot::Sender<Result<proto::CommandSendReceipt, Error>>,
+        BatchedMessage,
+    )>,
+}
+
+impl BatchStorage {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn new(length: u32) -> BatchStorage {
+        BatchStorage {
+            size: 0usize,
+            storage: VecDeque::with_capacity(length as usize),
+        }
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn push_back(
+        & mut self,
+        tx: oneshot::Sender<Result<proto::CommandSendReceipt, Error>>,
+        batched: BatchedMessage
+    ) {
+        self.size += batched.metadata.payload_size as usize;
+        self.storage.push_back((tx, batched))
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn get_messages(
+        & mut self,
+    ) -> Vec<(
+        oneshot::Sender<Result<proto::CommandSendReceipt, Error>>,
+        BatchedMessage,
+    )> {
+        self.size = 0usize;
+        self.storage.drain(..).collect()
+    }
+}
+
 struct Batch {
+    // max number of message
     pub length: u32,
+    // max total message treshhold
+    pub size: Option<usize>,
     // put it in a mutex because the design of Producer requires an immutable TopicProducer,
     // so we cannot have a mutable Batch in a send_raw(&mut self, ...)
     #[allow(clippy::type_complexity)]
-    pub storage: Mutex<
-        VecDeque<(
-            oneshot::Sender<Result<proto::CommandSendReceipt, Error>>,
-            BatchedMessage,
-        )>,
-    >,
+    pub storage: Mutex<BatchStorage>,
 }
 
 impl Batch {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub fn new(length: u32) -> Batch {
+    pub fn new(length: u32, size: Option<usize>) -> Batch {
         Batch {
             length,
-            storage: Mutex::new(VecDeque::with_capacity(length as usize)),
+            size,
+            storage: Mutex::new(BatchStorage::new(length)),
         }
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn is_full(&self) -> bool {
-        self.storage.lock().await.len() >= self.length as usize
+        let s = self.storage.lock().await;
+        match self.size {
+            None => s.storage.len() >= self.length as usize,
+            Some(size) => s.storage.len() >= self.length as usize || s.size >= size
+        }
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
@@ -1218,7 +1266,7 @@ impl Batch {
             },
             payload: message.payload,
         };
-        self.storage.lock().await.push_back((tx, batched))
+        self.storage.lock().await.push_back(tx, batched)
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
@@ -1228,7 +1276,7 @@ impl Batch {
         oneshot::Sender<Result<proto::CommandSendReceipt, Error>>,
         BatchedMessage,
     )> {
-        self.storage.lock().await.drain(..).collect()
+        self.storage.lock().await.get_messages()
     }
 }
 
