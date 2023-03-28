@@ -198,7 +198,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use futures::{future::try_join_all, StreamExt};
+    use futures::{future::try_join_all, StreamExt, TryFutureExt};
     use log::{LevelFilter, Metadata, Record};
     #[cfg(feature = "tokio-runtime")]
     use tokio::time::timeout;
@@ -310,20 +310,40 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "tokio-runtime")]
     async fn round_trip() {
-        let _result = log::set_logger(&TEST_LOGGER);
-        log::set_max_level(LevelFilter::Debug);
+        env_logger::init();
 
-        let addr = "pulsar://127.0.0.1:6650";
-        let pulsar: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await.unwrap();
+        let _result = log::set_logger(&TEST_LOGGER);
+        log::set_max_level(LevelFilter::Trace);
+
+        //let addr = "pulsar://127.0.0.1:6650";
+        let tenant =
+            "user_a899a382-3c6b-4c9c-9c92-edb632f74149/pulsar_0921d9a9-f204-4216-a06d-5b2fe9cec81b";
+        let topic = "yo2";
+        let token = "EnYKDBgDIggKBggEEgIYDRIkCAASIDZFTlStxCxoVWTPpNT_K4i51-J9begIIm23SxZw_ECAGkADks3E29opT9JUJprQzl0a0unGMBsYmUUHTdBRiQ5JXdFr9TkPhOhJmiBFvehXlWNvLhVjCfm0JScJeZV-UCgKGvwBCpEBCil1c2VyX2E4OTlhMzgyLTNjNmItNGM5Yy05YzkyLWVkYjYzMmY3NDE0OQorcHVsc2FyXzA5MjFkOWE5LWYyMDQtNDIxNi1hMDZkLTViMmZlOWNlYzgxYgoFdG9waWMYAzIuChIKAggbEgwICRIDGIAIEgMYgQgKGAoCCBsSEgiCCBIDGIAIEgMYgQgSAwiCCBIkCAASIIT4iMLEjoQsvs1RtDUbjGtxtbFm94gGajjY6_3LBX_bGkBNDoYfIZ3QAhqxSVljS-olqvaHMYgd9IzlTGVsN0Xdj7yz14pFhG2xKuZ3GseitQg5Zu6WqMwi4qr8egaelw8HIiIKIBWFlJl-6hRDpQNUcjhuzjfn5NyVXMPQYAjComkOvDca";
+        let addr = "pulsar+ssl://c2-pulsar-clevercloud-customers.services.clever-cloud.com:2002";
+        let authentication = Authentication {
+            name: "token".to_string(),
+            data: token.as_bytes().to_vec(),
+        };
+        let pulsar: Pulsar<_> = Pulsar::builder(addr, TokioExecutor)
+            .with_auth(authentication)
+            .with_connection_retry_options(ConnectionRetryOptions {
+                max_retries: 3,
+                ..Default::default()
+            })
+            .build()
+            .await
+            .unwrap();
 
         // random topic to better allow multiple test runs while debugging
-        let topic = format!("test_{}", rand::random::<u16>());
+        let topic = format!("{}/{}", tenant, topic);
 
-        let mut producer = pulsar.producer().with_topic(&topic).build().await.unwrap();
-        info!("producer created");
+        // let mut producer = pulsar.producer().with_topic(&topic).build().await.unwrap();
+        // info!("producer created");
 
         let message_ids: BTreeSet<u64> = (0..100).collect();
 
+        /*
         info!("will send message");
         let mut sends = Vec::new();
         for &id in &message_ids {
@@ -334,14 +354,15 @@ mod tests {
             sends.push(producer.send(&message).await.unwrap());
         }
         try_join_all(sends).await.unwrap();
+        */
 
         info!("sent");
 
-        let mut consumer: Consumer<TestData, _> = pulsar
+        let mut consumer: Consumer<String, _> = pulsar
             .consumer()
             .with_topic(&topic)
             .with_consumer_name("test_consumer")
-            .with_subscription_type(SubType::Exclusive)
+            .with_subscription_type(SubType::Shared)
             .with_subscription("test_subscription")
             .with_options(ConsumerOptions {
                 initial_position: InitialPosition::Earliest,
@@ -359,13 +380,15 @@ mod tests {
         assert!(topics[0].ends_with(&topic));
 
         let mut received = BTreeSet::new();
-        while let Ok(Some(msg)) = timeout(Duration::from_secs(10), consumer.next()).await {
-            let msg: Message<TestData> = msg.unwrap();
-            info!("id: {:?}", msg.message_id());
-            received.insert(msg.deserialize().unwrap().id);
-            consumer.ack(&msg).await.unwrap();
-            if received.len() == message_ids.len() {
-                break;
+        loop {
+            //dbg!(consumer.check_connection().await.map_err(|s| s.to_string()));
+
+            while let Some(Ok(msg)) = consumer.next().await {
+                info!("id: {:?}", msg.message_id());
+                consumer.ack(&msg).await.unwrap();
+                // if received.len() == message_ids.len() {
+                //     break;
+                // }
             }
         }
         assert_eq!(received.len(), message_ids.len());

@@ -694,10 +694,12 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn reconnect(&mut self) -> Result<(), Error> {
         debug!("reconnecting consumer for topic: {}", self.topic);
+        tokio::time::sleep(Duration::from_secs(2)).await;
         if let Some(prev_single) = std::mem::replace(&mut self.drop_signal, None) {
             // kill the previous errored consumer
             drop(prev_single);
         }
+        tokio::time::sleep(Duration::from_secs(2)).await;
 
         let broker_address = self.client.lookup_topic(&self.topic).await?;
         let conn = self.client.manager.get_connection(&broker_address).await?;
@@ -738,6 +740,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 Err(Err(e)) => return Err(e),
             }
         }
+        tokio::time::sleep(Duration::from_secs(2)).await;
 
         self.messages_rx = Some(messages);
 
@@ -751,6 +754,8 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         let _ = self.client.executor.spawn(Box::pin(async move {
             let _res = drop_receiver.await;
             // if we receive a message, it indicates we want to stop this task
+
+            error!("Disconnection !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
 
             match conn.upgrade() {
                 None => {

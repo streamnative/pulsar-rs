@@ -126,6 +126,12 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Receiver<S> {
     }
 }
 
+impl<S: Stream<Item = Result<Message, ConnectionError>>> Drop for Receiver<S> {
+    fn drop(&mut self) {
+        error!("Dropping receiver!");
+    }
+}
+
 impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> {
     type Output = Result<(), ()>;
 
@@ -155,7 +161,13 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> 
                     consumer_id,
                     resolver,
                 })) => {
-                    self.consumers.insert(consumer_id, resolver);
+                    debug!("Adding new consumer {}", consumer_id);
+                    debug!("consumers len : {}", self.consumers.len());
+                    debug!(
+                        "consumers contains {}",
+                        self.consumers.contains_key(&consumer_id)
+                    );
+                    self.consumers.entry(consumer_id).or_insert(resolver);
                 }
                 Poll::Ready(Some(Register::Ping { resolver })) => {
                     self.ping = Some(resolver);
@@ -1114,7 +1126,7 @@ impl<Exe: Executor> Connection<Exe> {
 impl<Exe: Executor> Drop for Connection<Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn drop(&mut self) {
-        trace!("dropping connection {} for {}", self.id, self.url);
+        debug!("dropping connection {} for {}", self.id, self.url);
         if let Some(shutdown) = self.sender.receiver_shutdown.take() {
             let _ = shutdown.send(());
         }
