@@ -93,7 +93,7 @@ pub(crate) struct Receiver<S: Stream<Item = Result<Message, ConnectionError>>> {
     outbound: mpsc::UnboundedSender<Message>,
     error: SharedError,
     pending_requests: BTreeMap<RequestKey, oneshot::Sender<Message>>,
-    consumers: BTreeMap<u64, mpsc::UnboundedSender<Message>>,
+    consumers: Consumers,
     received_messages: BTreeMap<RequestKey, Message>,
     registrations: Pin<Box<mpsc::UnboundedReceiver<Register>>>,
     shutdown: Pin<Box<oneshot::Receiver<()>>>,
@@ -110,6 +110,7 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Receiver<S> {
         registrations: mpsc::UnboundedReceiver<Register>,
         shutdown: oneshot::Receiver<()>,
         auth_challenge: mpsc::UnboundedSender<()>,
+        consumers: Consumers,
     ) -> Receiver<S> {
         Receiver {
             inbound: Box::pin(inbound),
@@ -117,7 +118,7 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Receiver<S> {
             error,
             pending_requests: BTreeMap::new(),
             received_messages: BTreeMap::new(),
-            consumers: BTreeMap::new(),
+            consumers,
             registrations: Box::pin(registrations),
             shutdown: Box::pin(shutdown),
             ping: None,
@@ -161,13 +162,17 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> 
                     consumer_id,
                     resolver,
                 })) => {
+                    self.consumers
+                        .lock()
+                        .unwrap()
+                        .entry(consumer_id)
+                        .or_insert(resolver);
                     debug!("Adding new consumer {}", consumer_id);
-                    debug!("consumers len : {}", self.consumers.len());
+                    debug!("consumers len : {}", self.consumers.lock().unwrap().len());
                     debug!(
                         "consumers contains {}",
-                        self.consumers.contains_key(&consumer_id)
+                        self.consumers.lock().unwrap().contains_key(&consumer_id)
                     );
-                    self.consumers.entry(consumer_id).or_insert(resolver);
                 }
                 Poll::Ready(Some(Register::Ping { resolver })) => {
                     self.ping = Some(resolver);
@@ -211,6 +216,8 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> 
                         Some(RequestKey::Consumer { consumer_id }) => {
                             let _ = self
                                 .consumers
+                                .lock()
+                                .unwrap()
                                 .get_mut(&consumer_id)
                                 .map(move |consumer| consumer.unbounded_send(msg));
                         }
@@ -229,6 +236,8 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> 
                             } else {
                                 let res = self
                                     .consumers
+                                    .lock()
+                                    .unwrap()
                                     .get_mut(&consumer_id)
                                     .map(move |consumer| consumer.unbounded_send(msg));
 
@@ -720,7 +729,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
     }
 }
 
-pub type Consumers = Arc<Mutex<BTreeMap<u64, mpsc::UnboundedSender<Message>>>>;
+pub type Consumers = Arc<std::sync::Mutex<BTreeMap<u64, mpsc::UnboundedSender<Message>>>>;
 
 pub struct Connection<Exe: Executor> {
     id: Uuid,
@@ -742,6 +751,8 @@ impl<Exe: Executor> Connection<Exe> {
         operation_timeout: Duration,
         executor: Arc<Exe>,
     ) -> Result<Connection<Exe>, ConnectionError> {
+        error!("Creating connection");
+
         if url.scheme() != "pulsar" && url.scheme() != "pulsar+ssl" {
             error!("invalid scheme: {}", url.scheme());
             return Err(ConnectionError::NotFound);
@@ -781,7 +792,7 @@ impl<Exe: Executor> Connection<Exe> {
             _ => return Err(ConnectionError::NotFound),
         };
 
-        let consumers = Arc::new(Mutex::new(BTreeMap::default()));
+        let consumers = Arc::new(std::sync::Mutex::new(BTreeMap::default()));
 
         let id = Uuid::new_v4();
         let mut errors = vec![];
@@ -852,7 +863,7 @@ impl<Exe: Executor> Connection<Exe> {
         }
     }
 
-    pub fn get_consumers(&self) -> Arc<Mutex<BTreeMap<u64, mpsc::UnboundedSender<Message>>>> {
+    pub fn get_consumers(&self) -> Consumers {
         self.consumers.clone()
     }
 
@@ -1053,6 +1064,7 @@ impl<Exe: Executor> Connection<Exe> {
                     registrations_rx,
                     receiver_shutdown_rx,
                     auth_challenge_tx,
+                    consumers.clone(),
                 )
                 .map(|_| ()),
             ))
@@ -1147,7 +1159,7 @@ impl<Exe: Executor> Connection<Exe> {
 impl<Exe: Executor> Drop for Connection<Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn drop(&mut self) {
-        debug!("dropping connection {} for {}", self.id, self.url);
+        error!("dropping connection {} for {}", self.id, self.url);
         if let Some(shutdown) = self.sender.receiver_shutdown.take() {
             let _ = shutdown.send(());
         }
@@ -1648,6 +1660,7 @@ mod tests {
             registrations_rx,
             receiver_shutdown_rx,
             auth_challenge_tx,
+            Arc::new(Default::default()),
         )));
 
         if error.is_set() {

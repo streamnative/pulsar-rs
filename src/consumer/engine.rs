@@ -731,8 +731,14 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             let mutex = self.consumers.lock().await;
 
             if let Some(consumers) = &*mutex {
-                let mut map = consumers.lock().await;
-                resolver = map.remove(&self.id).unwrap_or(resolver);
+                let mut map = consumers.lock().unwrap();
+
+                dbg!(&map);
+
+                if let Some(r) = map.remove(&self.id) {
+                    info!("Replace resolver from previous connection iteration");
+                    resolver = r;
+                }
             }
         }
 
@@ -768,7 +774,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         let name = self.name.clone();
         let id = self.id;
         let topic = self.topic.clone();
-        let mut consumers_arc = self.consumers.clone();
+        let consumers_arc = self.consumers.clone();
         let _ = self.client.executor.spawn(Box::pin(async move {
             let _res = drop_receiver.await;
             // if we receive a message, it indicates we want to stop this task
@@ -781,7 +787,9 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 }
                 Some(connection) => {
                     let consumers = connection.get_consumers();
-                    let _ = consumers_arc.lock().await.insert(consumers);
+                    dbg!(consumers.lock().unwrap().len());
+                    let mut mutex = consumers_arc.lock().await;
+                    *mutex = Some(consumers);
 
                     debug!("Closing producers of connection {}", connection.id());
                     let res = connection.sender().close_consumer(id).await;
