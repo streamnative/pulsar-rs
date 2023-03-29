@@ -720,10 +720,13 @@ impl<Exe: Executor> ConnectionSender<Exe> {
     }
 }
 
+pub type Consumers = Arc<Mutex<BTreeMap<u64, mpsc::UnboundedSender<Message>>>>;
+
 pub struct Connection<Exe: Executor> {
     id: Uuid,
     url: Url,
     sender: ConnectionSender<Exe>,
+    consumers: Consumers,
 }
 
 impl<Exe: Executor> Connection<Exe> {
@@ -778,6 +781,8 @@ impl<Exe: Executor> Connection<Exe> {
             _ => return Err(ConnectionError::NotFound),
         };
 
+        let consumers = Arc::new(Mutex::new(BTreeMap::default()));
+
         let id = Uuid::new_v4();
         let mut errors = vec![];
         for address in addresses {
@@ -795,6 +800,7 @@ impl<Exe: Executor> Connection<Exe> {
                 tls_hostname_verification_enabled,
                 executor.clone(),
                 operation_timeout,
+                consumers.clone(),
             );
             let delay_f = executor.delay(connection_timeout);
 
@@ -816,7 +822,12 @@ impl<Exe: Executor> Connection<Exe> {
                 }
             };
 
-            return Ok(Connection { id, url, sender });
+            return Ok(Connection {
+                id,
+                url,
+                sender,
+                consumers,
+            });
         }
 
         let mut fatal_errors = vec![];
@@ -839,6 +850,10 @@ impl<Exe: Executor> Connection<Exe> {
             warn!("retry establish connection on: {:?}", retryable_errors);
             Err(retryable_errors.into_iter().next().unwrap())
         }
+    }
+
+    pub fn get_consumers(&self) -> Arc<Mutex<BTreeMap<u64, mpsc::UnboundedSender<Message>>>> {
+        self.consumers.clone()
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
@@ -870,6 +885,7 @@ impl<Exe: Executor> Connection<Exe> {
         tls_hostname_verification_enabled: bool,
         executor: Arc<Exe>,
         operation_timeout: Duration,
+        consumers: Consumers,
     ) -> Result<ConnectionSender<Exe>, ConnectionError> {
         match executor.kind() {
             #[cfg(feature = "tokio-runtime")]
@@ -899,6 +915,7 @@ impl<Exe: Executor> Connection<Exe> {
                         proxy_to_broker_url,
                         executor,
                         operation_timeout,
+                        consumers.clone(),
                     )
                     .await
                 } else {
@@ -913,6 +930,7 @@ impl<Exe: Executor> Connection<Exe> {
                         proxy_to_broker_url,
                         executor,
                         operation_timeout,
+                        consumers.clone(),
                     )
                     .await
                 }
@@ -945,6 +963,7 @@ impl<Exe: Executor> Connection<Exe> {
                         proxy_to_broker_url,
                         executor,
                         operation_timeout,
+                        consumers.clone(),
                     )
                     .await
                 } else {
@@ -959,6 +978,7 @@ impl<Exe: Executor> Connection<Exe> {
                         proxy_to_broker_url,
                         executor,
                         operation_timeout,
+                        consumers.clone(),
                     )
                     .await
                 }
@@ -978,6 +998,7 @@ impl<Exe: Executor> Connection<Exe> {
         proxy_to_broker_url: Option<String>,
         executor: Arc<Exe>,
         operation_timeout: Duration,
+        consumers: Consumers,
     ) -> Result<ConnectionSender<Exe>, ConnectionError>
     where
         S: Stream<Item = Result<Message, ConnectionError>>,
@@ -1590,6 +1611,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::{Connection, Receiver};
+    use crate::connection::Consumers;
     use crate::{
         authentication::Authentication,
         error::{AuthenticationError, SharedError},
@@ -1701,6 +1723,8 @@ mod tests {
             .await
             .unwrap();
 
+        let consumers = Consumers::default();
+
         let connection = Connection::connect(
             Uuid::new_v4(),
             stream,
@@ -1710,6 +1734,7 @@ mod tests {
             None,
             TokioExecutor.into(),
             Duration::from_secs(10),
+            consumers,
         )
         .await;
 

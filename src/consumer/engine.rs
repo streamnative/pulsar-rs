@@ -1,3 +1,5 @@
+use futures::lock::Mutex;
+use std::collections::BTreeMap;
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
@@ -10,7 +12,10 @@ use futures::{
     channel::{mpsc, mpsc::UnboundedSender, oneshot},
     SinkExt, StreamExt,
 };
+use log::kv::Source;
 
+use crate::connection::Consumers;
+use crate::message::Message;
 use crate::{
     connection::Connection,
     consumer::{
@@ -48,6 +53,7 @@ pub struct ConsumerEngine<Exe: Executor> {
     dead_letter_policy: Option<DeadLetterPolicy>,
     options: ConsumerOptions,
     drop_signal: Option<oneshot::Sender<()>>,
+    consumers: Arc<Mutex<Option<Consumers>>>,
 }
 
 impl<Exe: Executor> ConsumerEngine<Exe> {
@@ -90,6 +96,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             dead_letter_policy,
             options,
             drop_signal: Some(drop_signal),
+            consumers: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -717,7 +724,17 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         let topic = self.topic.clone();
 
         let mut current_retries = 0u32;
-        let (resolver, messages) = mpsc::unbounded();
+
+        let (mut resolver, messages) = mpsc::unbounded();
+
+        {
+            let mutex = self.consumers.lock().await;
+
+            if let Some(consumers) = &*mutex {
+                let mut map = consumers.lock().await;
+                resolver = map.remove(&self.id).unwrap_or(resolver);
+            }
+        }
 
         // Reconnection loop
         // If the error is recoverable
@@ -751,6 +768,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         let name = self.name.clone();
         let id = self.id;
         let topic = self.topic.clone();
+        let mut consumers_arc = self.consumers.clone();
         let _ = self.client.executor.spawn(Box::pin(async move {
             let _res = drop_receiver.await;
             // if we receive a message, it indicates we want to stop this task
@@ -762,6 +780,9 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                     debug!("Connection already dropped, no weak reference remaining")
                 }
                 Some(connection) => {
+                    let consumers = connection.get_consumers();
+                    let _ = consumers_arc.lock().await.insert(consumers);
+
                     debug!("Closing producers of connection {}", connection.id());
                     let res = connection.sender().close_consumer(id).await;
 
