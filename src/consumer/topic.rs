@@ -2,8 +2,10 @@ use std::{
     io::ErrorKind,
     marker::PhantomData,
     pin::Pin,
-    sync::Arc,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     task::{Context, Poll},
     time::{Duration, Instant},
 };
@@ -29,8 +31,6 @@ use crate::{
     BrokerAddress, DeserializeMessage, Error, Executor, Payload, Pulsar,
 };
 
-static CONSUMER_ID_GENERATOR: AtomicU64 = AtomicU64::new(0);
-
 // this is entirely public for use in reader.rs
 pub struct TopicConsumer<T: DeserializeMessage, Exe: Executor> {
     pub(crate) consumer_id: u64,
@@ -53,6 +53,8 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         mut addr: BrokerAddress,
         config: ConsumerConfig,
     ) -> Result<TopicConsumer<T, Exe>, Error> {
+        static CONSUMER_ID_GENERATOR: AtomicU64 = AtomicU64::new(0);
+
         let ConsumerConfig {
             subscription,
             sub_type,
@@ -63,7 +65,8 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
             options,
             dead_letter_policy,
         } = config.clone();
-        let consumer_id = consumer_id.unwrap_or_else(|| CONSUMER_ID_GENERATOR.fetch_add(1, Ordering::SeqCst));
+        let consumer_id =
+            consumer_id.unwrap_or_else(|| CONSUMER_ID_GENERATOR.fetch_add(1, Ordering::SeqCst));
         let (resolver, messages) = mpsc::unbounded();
         let batch_size = batch_size.unwrap_or(1000);
 
