@@ -205,24 +205,6 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
             .map_err(|e| Error::Consumer(ConsumerError::Connection(e)))?;
 
         let (engine_tx, engine_rx) = mpsc::unbounded();
-        // drop_signal will be dropped when Consumer is dropped, then
-        // drop_receiver will return, and we can close the consumer
-        let (drop_signal, drop_receiver) = oneshot::channel::<()>();
-        let conn = connection.clone();
-        let name = consumer_name.clone();
-        let topic_name = topic.clone();
-        let _ = client.executor.spawn(Box::pin(async move {
-            let _res = drop_receiver.await;
-            // if we receive a message, it indicates we want to stop this task
-            if _res.is_err() {
-                if let Err(e) = conn.sender().close_consumer(consumer_id).await {
-                    error!(
-                        "could not close consumer {:?}({}) for topic {}: {:?}",
-                        consumer_name, consumer_id, topic_name, e
-                    );
-                }
-            }
-        }));
 
         if unacked_message_redelivery_delay.is_some() {
             let mut redelivery_tx = engine_tx.clone();
@@ -251,7 +233,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
             subscription.clone(),
             sub_type,
             consumer_id,
-            name,
+            consumer_name,
             tx,
             messages,
             engine_rx,
@@ -259,16 +241,14 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
             unacked_message_redelivery_delay,
             dead_letter_policy.clone(),
             options.clone(),
-            drop_signal,
         );
-        let f = async move {
+        if client.executor.spawn(Box::pin(async move {
             c.engine()
                 .map(|res| {
                     debug!("consumer engine stopped: {:?}", res);
                 })
                 .await;
-        };
-        if client.executor.spawn(Box::pin(f)).is_err() {
+        })).is_err() {
             return Err(Error::Executor);
         }
 

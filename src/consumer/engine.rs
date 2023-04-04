@@ -7,7 +7,7 @@ use std::{
 };
 
 use futures::{
-    channel::{mpsc, mpsc::UnboundedSender, oneshot},
+    channel::{mpsc, mpsc::UnboundedSender},
     SinkExt, StreamExt,
 };
 
@@ -47,7 +47,6 @@ pub struct ConsumerEngine<Exe: Executor> {
     unacked_messages: HashMap<MessageIdData, Instant>,
     dead_letter_policy: Option<DeadLetterPolicy>,
     options: ConsumerOptions,
-    drop_signal: Option<oneshot::Sender<()>>,
 }
 
 impl<Exe: Executor> ConsumerEngine<Exe> {
@@ -67,7 +66,6 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         unacked_message_redelivery_delay: Option<Duration>,
         dead_letter_policy: Option<DeadLetterPolicy>,
         options: ConsumerOptions,
-        drop_signal: oneshot::Sender<()>,
     ) -> ConsumerEngine<Exe> {
         let (event_tx, event_rx) = mpsc::unbounded();
         ConsumerEngine {
@@ -89,7 +87,6 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             unacked_messages: HashMap::new(),
             dead_letter_policy,
             options,
-            drop_signal: Some(drop_signal),
         }
     }
 
@@ -689,15 +686,20 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn reconnect(&mut self) -> Result<(), Error> {
         debug!("reconnecting consumer for topic: {}", self.topic);
-        if let Some(prev_single) = std::mem::replace(&mut self.drop_signal, None) {
-            // kill the previous errored consumer
-            drop(prev_single);
+
+        // send CloseConsumer to server
+        // remove our resolver from the Connection consumers BTreeMap,
+        // stopping the current Message source
+        if let Err(e) = self.connection.sender().close_consumer(self.id).await {
+            error!(
+                "could not close consumer {:?}({}) for topic {}: {:?}",
+                self.name, self.id, self.topic, e
+            );
         }
+        // should have logged "rx terminated" by now
 
         let broker_address = self.client.lookup_topic(&self.topic).await?;
-        let conn = self.client.manager.get_connection(&broker_address).await?;
-
-        self.connection = conn;
+        self.connection = self.client.manager.get_connection(&broker_address).await?;
 
         warn!(
             "Retry -> reconnecting consumer {:#} using connection {:#} to broker {:#} to topic {:#}",
@@ -742,39 +744,6 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
 
         self.messages_rx = Some(messages);
 
-        // drop_signal will be dropped when Consumer is dropped, then
-        // drop_receiver will return, and we can close the consumer
-        let (drop_signal, drop_receiver) = oneshot::channel::<()>();
-        let conn = Arc::downgrade(&self.connection);
-        let name = self.name.clone();
-        let id = self.id;
-        let topic = self.topic.clone();
-        let _ = self.client.executor.spawn(Box::pin(async move {
-            let _res = drop_receiver.await;
-            // if we receive a message, it indicates we want to stop this task
-
-            match conn.upgrade() {
-                None => {
-                    debug!("Connection already dropped, no weak reference remaining")
-                }
-                Some(connection) => {
-                    debug!("Closing producers of connection {}", connection.id());
-                    let res = connection.sender().close_consumer(id).await;
-
-                    if let Err(e) = res {
-                        error!(
-                            "could not close consumer {:?}({}) for topic {}: {:?}",
-                            name, id, topic, e
-                        );
-                    }
-                }
-            }
-        }));
-
-        if let Some(prev_single) = std::mem::replace(&mut self.drop_signal, Some(drop_signal)) {
-            drop(prev_single);
-        }
-
         Ok(())
     }
 
@@ -808,5 +777,22 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         dur: Duration,
     ) -> Result<O, tokio::time::error::Elapsed> {
         tokio::time::timeout_at(tokio::time::Instant::now() + dur, fut).await
+    }
+}
+
+impl<Exe: Executor> std::ops::Drop for ConsumerEngine<Exe> {
+    fn drop(&mut self) {
+        let conn = self.connection.clone();
+        let id = self.id;
+        let name = self.name.clone();
+        let topic = self.topic.clone();
+        let _ = self.client.executor.spawn(Box::pin(async move {
+            if let Err(e) = conn.sender().close_consumer(id).await {
+                error!(
+                    "could not close consumer {:?}({}) for topic {}: {:?}",
+                    name, id, topic, e
+                );
+            }
+        }));
     }
 }

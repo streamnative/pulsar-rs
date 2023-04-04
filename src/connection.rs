@@ -46,6 +46,9 @@ pub(crate) enum Register {
         consumer_id: u64,
         resolver: mpsc::UnboundedSender<Message>,
     },
+    RemoveConsumer {
+        consumer_id: u64,
+    },
     Ping {
         resolver: oneshot::Sender<()>,
     },
@@ -156,6 +159,9 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> 
                     resolver,
                 })) => {
                     self.consumers.insert(consumer_id, resolver);
+                }
+                Poll::Ready(Some(Register::RemoveConsumer { consumer_id })) => {
+                    self.consumers.remove(&consumer_id);
                 }
                 Poll::Ready(Some(Register::Ping { resolver })) => {
                     self.ping = Some(resolver);
@@ -549,6 +555,16 @@ impl<Exe: Executor> ConnectionSender<Exe> {
     ) -> Result<proto::CommandSuccess, ConnectionError> {
         let request_id = self.request_id.get();
         let msg = messages::close_consumer(consumer_id, request_id);
+        match self
+            .registrations
+            .unbounded_send(Register::RemoveConsumer { consumer_id })
+        {
+            Ok(_) => {}
+            Err(_) => {
+                self.error.set(ConnectionError::Disconnected);
+                return Err(ConnectionError::Disconnected);
+            }
+        }
         self.send_message(msg, RequestKey::RequestId(request_id), |resp| {
             resp.command.success
         })

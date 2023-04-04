@@ -428,7 +428,6 @@ struct TopicProducer<Exe: Executor> {
     // while we might be pushing more messages from elsewhere
     batch: Option<Mutex<Batch>>,
     compression: Option<Compression>,
-    drop_signal: oneshot::Sender<()>,
     options: ProducerOptions,
 }
 
@@ -585,15 +584,6 @@ impl<Exe: Executor> TopicProducer<Exe> {
             }
         }
 
-        // drop_signal will be dropped when the TopicProducer is dropped, then
-        // drop_receiver will return, and we can close the producer
-        let (_drop_signal, drop_receiver) = oneshot::channel::<()>();
-        let conn = connection.clone();
-        let _ = client.executor.spawn(Box::pin(async move {
-            let _res = drop_receiver.await;
-            let _ = conn.sender().close_producer(producer_id).await;
-        }));
-
         Ok(TopicProducer {
             client,
             connection,
@@ -603,7 +593,6 @@ impl<Exe: Executor> TopicProducer<Exe> {
             message_id: sequence_ids,
             batch: batch_size.map(Batch::new).map(Mutex::new),
             compression,
-            drop_signal: _drop_signal,
             options,
         })
     }
@@ -833,18 +822,15 @@ impl<Exe: Executor> TopicProducer<Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn reconnect(&mut self) -> Result<(), Error> {
         debug!("reconnecting producer for topic: {}", self.topic);
-        // Sender::send() method consumes the sender
-        // as the sender is hold by the TopicProducer, there is no way to call send method
-        // The lines below take the pointed sender and replace it by a new one bound to nothing
-        // but as the TopicProducer sender is recreate below, there is no worry
-        let (drop_signal, _) = oneshot::channel::<()>();
-        let old_signal = std::mem::replace(&mut self.drop_signal, drop_signal);
-        // This line ask for kill the previous errored producer
-        let _ = old_signal.send(());
 
+        if let Err(e) = self.connection.sender().close_producer(self.id).await {
+            error!(
+                "could not close producer {:?}({}) for topic {}: {:?}",
+                self.name, self.id, self.topic, e
+            );
+        }
         let broker_address = self.client.lookup_topic(&self.topic).await?;
-        let conn = self.client.manager.get_connection(&broker_address).await?;
-        self.connection = conn;
+        self.connection = self.client.manager.get_connection(&broker_address).await?;
 
         warn!(
             "Retry #0 -> reconnecting producer {:#} using connection {:#} to broker {:#} to topic {:#}",
@@ -855,8 +841,6 @@ impl<Exe: Executor> TopicProducer<Exe> {
         );
 
         let topic = self.topic.clone();
-        let batch_size = self.options.batch_size;
-
         let mut current_retries = 0u32;
         let start = std::time::Instant::now();
         let operation_retry_options = self.client.operation_retry_options.clone();
@@ -1006,56 +990,32 @@ impl<Exe: Executor> TopicProducer<Exe> {
             }
         }
 
-        // drop_signal will be dropped when the TopicProducer is dropped, then
-        // drop_receiver will return, and we can close the producer
-        let (_drop_signal, drop_receiver) = oneshot::channel::<()>();
-        let batch = batch_size.map(Batch::new).map(Mutex::new);
-        let conn = Arc::downgrade(&self.connection);
-
-        let producer_id = self.id;
-        let _ = self.client.executor.spawn(Box::pin(async move {
-            let _res = drop_receiver.await;
-
-            match conn.upgrade() {
-                None => {
-                    debug!("Connection already dropped, no weak reference remaining")
-                }
-                Some(connection) => {
-                    debug!("Closing producers of connection {}", connection.id());
-                    let _ = connection.sender().close_producer(producer_id).await;
-                }
-            }
-        }));
-
-        self.batch = batch;
-        self.drop_signal = _drop_signal;
+        self.batch = self.options.batch_size.map(Batch::new).map(Mutex::new);
 
         Ok(())
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn close(&self) -> Result<(), Error> {
-        let connection = Arc::downgrade(&self.connection);
+        self.connection.sender().close_producer(self.id).await?;
+        Ok(())
+    }
+}
 
-        match connection.upgrade() {
-            None => {
-                info!("Connection already gone");
-                Ok(())
-            }
-            Some(connection) => {
-                info!(
-                    "Closing connection #{} of producer[{}]",
-                    self.connection.id(),
-                    self.name
+impl<Exe: Executor> std::ops::Drop for TopicProducer<Exe> {
+    fn drop(&mut self) {
+        let conn = self.connection.clone();
+        let id = self.id;
+        let name = self.name.clone();
+        let topic = self.topic.clone();
+        let _ = self.client.executor.spawn(Box::pin(async move {
+            if let Err(e) = conn.sender().close_producer(id).await {
+                error!(
+                    "could not close producer {:?}({}) for topic {}: {:?}",
+                    name, id, topic, e
                 );
-                connection
-                    .sender()
-                    .close_producer(self.id)
-                    .await
-                    .map(drop)
-                    .map_err(Error::Connection)
             }
-        }
+        }));
     }
 }
 
