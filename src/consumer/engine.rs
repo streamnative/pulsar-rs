@@ -191,13 +191,8 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
     ) -> Option<Result<(), Error>> {
         match message_opt {
             None => {
-                error!("Consumer: messages::next: returning Disconnected");
-                if let Err(err) = self.reconnect().await {
-                    Some(Err(err))
-                } else {
-                    None
-                }
-                //return Err(Error::Consumer(ConsumerError::Connection(ConnectionError::Disconnected)).into());
+                debug!("Consumer: old message source died");
+                None
             }
             Some(message) => {
                 self.remaining_messages -= message
@@ -589,9 +584,9 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         resolver: UnboundedSender<crate::message::Message>,
         topic: &String,
         current_retries: &mut u32,
+        start_time: &Instant,
         broker_address: &BrokerAddress,
     ) -> Result<(), Result<(), Error>> {
-        let start = Instant::now();
         let operation_retry_options = self.client.operation_retry_options.clone();
 
         match self
@@ -610,7 +605,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         {
             Ok(_success) => {
                 if *current_retries > 0 {
-                    let dur = (Instant::now() - start).as_secs();
+                    let dur = (Instant::now() - *start_time).as_secs();
                     log::info!(
                         "subscribing({}) success after {} retries over {} seconds",
                         topic,
@@ -713,8 +708,8 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         );
 
         let topic = self.topic.clone();
-
         let mut current_retries = 0u32;
+        let start = Instant::now();
         let (resolver, messages) = mpsc::unbounded();
 
         // Reconnection loop
@@ -726,6 +721,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                     resolver.clone(),
                     &topic,
                     &mut current_retries,
+                    &start,
                     &broker_address,
                 )
                 .await
@@ -738,6 +734,11 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 Err(Err(e)) => return Err(e),
             }
         }
+
+        self.connection
+            .sender()
+            .send_flow(self.id, self.batch_size)
+            .map_err(|e| Error::Consumer(ConsumerError::Connection(e)))?;
 
         self.messages_rx = Some(messages);
 
