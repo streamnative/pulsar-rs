@@ -28,7 +28,8 @@ use crate::{
         proto::{self, CommandSendReceipt, EncryptionKeys, Schema},
         BatchedMessage,
     },
-    Error, Pulsar,
+    retry_op::retry_create_producer,
+    BrokerAddress, Error, Pulsar,
 };
 
 type ProducerId = u64;
@@ -433,9 +434,9 @@ struct TopicProducer<Exe: Executor> {
 
 impl<Exe: Executor> TopicProducer<Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub(crate) async fn from_connection<S: Into<String>>(
+    pub(crate) async fn new<S: Into<String>>(
         client: Pulsar<Exe>,
-        mut connection: Arc<Connection<Exe>>,
+        addr: BrokerAddress,
         topic: S,
         name: Option<String>,
         options: ProducerOptions,
@@ -449,140 +450,18 @@ impl<Exe: Executor> TopicProducer<Exe> {
         let topic = topic.clone();
         let batch_size = options.batch_size;
         let compression = options.compression.clone();
+        let mut connection = client.manager.get_connection(&addr).await?;
 
-        let producer_name: ProducerName;
-        let mut current_retries = 0u32;
-        let start = std::time::Instant::now();
-        let operation_retry_options = client.operation_retry_options.clone();
-
-        loop {
-            let connection_sender = connection.sender();
-            match connection_sender
-                .create_producer(topic.clone(), producer_id, name.clone(), options.clone())
-                .await
-                .map_err(|e| {
-                    error!("TopicProducer::from_connection error[{}]: {:?}", line!(), e);
-                    e
-                }) {
-                Ok(partial_success) => {
-                    // If producer is not "ready", the client will avoid to timeout the request
-                    // for creating the producer. Instead it will wait indefinitely until it gets
-                    // a subsequent  `CommandProducerSuccess` with `producer_ready==true`.
-                    if let Some(producer_ready) = partial_success.producer_ready {
-                        if !producer_ready {
-                            // wait until next commandproducersuccess message has been received
-                            trace!("producer is still waiting for exclusive access");
-                            let result = connection_sender
-                                .wait_for_exclusive_access(partial_success.request_id)
-                                .await;
-                            trace!("result is received: {:?}", result);
-                        }
-                    }
-                    producer_name = partial_success.producer_name;
-
-                    if current_retries > 0 {
-                        let dur = (std::time::Instant::now() - start).as_secs();
-                        log::info!(
-                            "producer({}) success after {} retries over {} seconds",
-                            topic,
-                            current_retries + 1,
-                            dur
-                        );
-                    }
-                    break;
-                }
-                Err(ConnectionError::PulsarError(
-                    Some(proto::ServerError::ServiceNotReady),
-                    text,
-                )) => {
-                    if operation_retry_options.max_retries.is_none()
-                        || operation_retry_options.max_retries.unwrap() > current_retries
-                    {
-                        error!("create_producer({}) answered ServiceNotReady, retrying request after {}ms (max_retries = {:?}): {}",
-                        topic, operation_retry_options.retry_delay.as_millis(),
-                        operation_retry_options.max_retries, text.unwrap_or_default());
-
-                        current_retries += 1;
-                        client
-                            .executor
-                            .delay(operation_retry_options.retry_delay)
-                            .await;
-
-                        let addr = client.lookup_topic(&topic).await?;
-                        connection = client.manager.get_connection(&addr).await?;
-
-                        continue;
-                    } else {
-                        error!("create_producer({}) reached max retries", topic);
-
-                        return Err(ConnectionError::PulsarError(
-                            Some(proto::ServerError::ServiceNotReady),
-                            text,
-                        )
-                        .into());
-                    }
-                }
-                Err(ConnectionError::PulsarError(Some(proto::ServerError::ProducerBusy), text)) => {
-                    if operation_retry_options.max_retries.is_none()
-                        || operation_retry_options.max_retries.unwrap() > current_retries
-                    {
-                        error!("create_producer({}) answered ProducerBusy, retrying request after {}ms (max_retries = {:?}): {}",
-                        topic, operation_retry_options.retry_delay.as_millis(),
-                        operation_retry_options.max_retries, text.unwrap_or_default());
-
-                        current_retries += 1;
-                        client
-                            .executor
-                            .delay(operation_retry_options.retry_delay)
-                            .await;
-
-                        let addr = client.lookup_topic(&topic).await?;
-                        connection = client.manager.get_connection(&addr).await?;
-
-                        continue;
-                    } else {
-                        error!("create_producer({}) reached max retries", topic);
-
-                        return Err(ConnectionError::PulsarError(
-                            Some(proto::ServerError::ProducerBusy),
-                            text,
-                        )
-                        .into());
-                    }
-                }
-                Err(ConnectionError::Io(e)) => {
-                    if e.kind() != std::io::ErrorKind::TimedOut {
-                        warn!("send_inner got io error: {:?}", e);
-                        return Err(ProducerError::Connection(ConnectionError::Io(e)).into());
-                    } else if operation_retry_options.max_retries.is_none()
-                        || operation_retry_options.max_retries.unwrap() > current_retries
-                    {
-                        error!(
-                                "create_producer({}) TimedOut, retrying request after {}ms (max_retries = {:?})",
-                                topic, operation_retry_options.retry_delay.as_millis(),
-                                operation_retry_options.max_retries
-                            );
-
-                        current_retries += 1;
-                        client
-                            .executor
-                            .delay(operation_retry_options.retry_delay)
-                            .await;
-
-                        let addr = client.lookup_topic(&topic).await?;
-                        connection = client.manager.get_connection(&addr).await?;
-
-                        continue;
-                    } else {
-                        error!("create_producer({}) reached max retries", topic);
-
-                        return Err(ProducerError::Connection(ConnectionError::Io(e)).into());
-                    }
-                }
-                //this also captures producer fenced error
-                Err(e) => return Err(Error::Connection(e)),
-            }
-        }
+        let producer_name = retry_create_producer(
+            &client,
+            &mut connection,
+            addr,
+            &topic,
+            producer_id,
+            name,
+            &options,
+        )
+        .await?;
 
         Ok(TopicProducer {
             client,
@@ -830,165 +709,18 @@ impl<Exe: Executor> TopicProducer<Exe> {
             );
         }
         let broker_address = self.client.lookup_topic(&self.topic).await?;
-        self.connection = self.client.manager.get_connection(&broker_address).await?;
 
-        warn!(
-            "Retry #0 -> reconnecting producer {:#} using connection {:#} to broker {:#} to topic {:#}",
+        // should we ignore, test or use producer_name?
+        let _producer_name = retry_create_producer(
+            &self.client,
+            &mut self.connection,
+            broker_address,
+            &self.topic,
             self.id,
-            self.connection.id(),
-            broker_address.url,
-            self.topic
-        );
-
-        let topic = self.topic.clone();
-        let mut current_retries = 0u32;
-        let start = std::time::Instant::now();
-        let operation_retry_options = self.client.operation_retry_options.clone();
-
-        loop {
-            match self
-                .connection
-                .sender()
-                .create_producer(
-                    topic.clone(),
-                    self.id,
-                    Some(self.name.clone()),
-                    self.options.clone(),
-                )
-                .await
-                .map_err(|e| {
-                    error!("TopicProducer::create_producer error[{}]: {:?}", line!(), e);
-                    e
-                }) {
-                Ok(_success) => {
-                    if current_retries > 0 {
-                        let dur = (std::time::Instant::now() - start).as_secs();
-                        log::info!(
-                            "producer({}) success after {} retries over {} seconds",
-                            topic,
-                            current_retries + 1,
-                            dur
-                        );
-                    }
-                    break;
-                }
-                Err(ConnectionError::PulsarError(
-                    Some(proto::ServerError::ServiceNotReady),
-                    text,
-                )) => {
-                    if operation_retry_options.max_retries.is_none()
-                        || operation_retry_options.max_retries.unwrap() > current_retries
-                    {
-                        warn!("create_producer({}) answered ServiceNotReady, retrying request after {}ms (max_retries = {:?}): {}",
-                        topic, operation_retry_options.retry_delay.as_millis(),
-                        operation_retry_options.max_retries, text.unwrap_or_default());
-
-                        current_retries += 1;
-                        self.client
-                            .executor
-                            .delay(operation_retry_options.retry_delay)
-                            .await;
-
-                        let addr = self.client.lookup_topic(&topic).await?;
-                        self.connection = self.client.manager.get_connection(&addr).await?;
-
-                        warn!(
-                            "Retry #{} -> reconnecting producer {:#} using connection {:#} to broker {:#} to topic {:#}",
-                            current_retries,
-                            self.id,
-                            self.connection.id(),
-                            broker_address.url,
-                            self.topic
-                        );
-
-                        continue;
-                    } else {
-                        error!("create_producer({}) reached max retries", topic);
-
-                        return Err(ConnectionError::PulsarError(
-                            Some(proto::ServerError::ServiceNotReady),
-                            text,
-                        )
-                        .into());
-                    }
-                }
-                Err(ConnectionError::PulsarError(Some(proto::ServerError::ProducerBusy), text)) => {
-                    if operation_retry_options.max_retries.is_none()
-                        || operation_retry_options.max_retries.unwrap() > current_retries
-                    {
-                        warn!("create_producer({}) answered ProducerBusy, retrying request after {}ms (max_retries = {:?}): {}",
-                        topic, operation_retry_options.retry_delay.as_millis(),
-                        operation_retry_options.max_retries, text.unwrap_or_default());
-
-                        current_retries += 1;
-                        self.client
-                            .executor
-                            .delay(operation_retry_options.retry_delay)
-                            .await;
-
-                        let addr = self.client.lookup_topic(&topic).await?;
-                        self.connection = self.client.manager.get_connection(&addr).await?;
-
-                        warn!(
-                            "Retry #{} -> reconnecting producer {:#} using connection {:#} to broker {:#} to topic {:#}",
-                            current_retries,
-                            self.id,
-                            self.connection.id(),
-                            broker_address.url,
-                            self.topic
-                        );
-
-                        continue;
-                    } else {
-                        error!("create_producer({}) reached max retries", topic);
-
-                        return Err(ConnectionError::PulsarError(
-                            Some(proto::ServerError::ProducerBusy),
-                            text,
-                        )
-                        .into());
-                    }
-                }
-                Err(ConnectionError::Io(e)) => {
-                    if e.kind() != std::io::ErrorKind::TimedOut {
-                        error!("send_inner got io error: {:?}", e);
-                        return Err(ProducerError::Connection(ConnectionError::Io(e)).into());
-                    } else if operation_retry_options.max_retries.is_none()
-                        || operation_retry_options.max_retries.unwrap() > current_retries
-                    {
-                        warn!("create_producer({}) TimedOut, retrying request after {}ms (max_retries = {:?})",
-                            topic, operation_retry_options.retry_delay.as_millis(), operation_retry_options.max_retries);
-
-                        current_retries += 1;
-                        self.client
-                            .executor
-                            .delay(operation_retry_options.retry_delay)
-                            .await;
-
-                        let addr = self.client.lookup_topic(&topic).await?;
-                        self.connection = self.client.manager.get_connection(&addr).await?;
-
-                        warn!(
-                            "Retry #{} -> reconnecting producer {:#} using connection {:#} to broker {:#} to topic {:#}",
-                            current_retries,
-                            self.id,
-                            self.connection.id(),
-                            broker_address.url,
-                            self.topic
-                        );
-
-                        continue;
-                    } else {
-                        error!("create_producer({}) reached max retries", topic);
-                        return Err(Error::Connection(ConnectionError::Io(e)));
-                    }
-                }
-                Err(e) => {
-                    error!("reconnect error[{:?}]: {:?}", line!(), e);
-                    return Err(Error::Connection(e));
-                }
-            }
-        }
+            Some(self.name.clone()),
+            &self.options,
+        )
+        .await?;
 
         self.batch = self.options.batch_size.map(Batch::new).map(Mutex::new);
 
@@ -1085,10 +817,8 @@ impl<Exe: Executor> ProducerBuilder<Exe> {
                     let options = options.clone();
                     let pulsar = pulsar.clone();
                     async move {
-                        let conn = pulsar.manager.get_connection(&addr).await?;
                         let producer =
-                            TopicProducer::from_connection(pulsar, conn, topic, name, options)
-                                .await?;
+                            TopicProducer::new(pulsar, addr, topic, name, options).await?;
                         Ok::<TopicProducer<Exe>, Error>(producer)
                     }
                 }),

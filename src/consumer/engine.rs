@@ -25,7 +25,8 @@ use crate::{
     },
     proto,
     proto::{BaseCommand, CommandCloseConsumer, CommandMessage},
-    BrokerAddress, Error, Executor, Payload, Pulsar,
+    retry_op::retry_subscribe_consumer,
+    Error, Executor, Payload, Pulsar,
 };
 
 pub struct ConsumerEngine<Exe: Executor> {
@@ -188,7 +189,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
     ) -> Option<Result<(), Error>> {
         match message_opt {
             None => {
-                debug!("Consumer: old message source died");
+                debug!("Consumer: old message source terminated");
                 None
             }
             Some(message) => {
@@ -536,154 +537,6 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    async fn retry_with_delay(
-        &mut self,
-        current_retries: &mut u32,
-        error: &str,
-        topic: &String,
-        text: &Option<String>,
-        broker_address: &BrokerAddress,
-    ) -> Result<Arc<Connection<Exe>>, Error> {
-        warn!(
-            "subscribing({}) answered {}, retrying request after {}ms (max_retries = {:?}): {}",
-            topic,
-            error,
-            self.client.operation_retry_options.retry_delay.as_millis(),
-            self.client.operation_retry_options.max_retries,
-            text.as_deref().unwrap_or_default()
-        );
-
-        *current_retries += 1;
-        self.client
-            .executor
-            .delay(self.client.operation_retry_options.retry_delay)
-            .await;
-
-        let addr = self.client.lookup_topic(topic).await?;
-        let connection = self.client.manager.get_connection(&addr).await?;
-        self.connection = connection.clone();
-
-        warn!(
-            "Retry #{} -> reconnecting consumer {:#} using connection {:#} to broker {:#} to topic {:#}",
-            current_retries,
-            self.id,
-            self.connection.id(),
-            broker_address.url,
-            self.topic
-        );
-
-        Ok(connection)
-    }
-
-    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    async fn subscribe_topic(
-        &mut self,
-        resolver: UnboundedSender<crate::message::Message>,
-        topic: &String,
-        current_retries: &mut u32,
-        start_time: &Instant,
-        broker_address: &BrokerAddress,
-    ) -> Result<(), Result<(), Error>> {
-        let operation_retry_options = self.client.operation_retry_options.clone();
-
-        match self
-            .connection
-            .sender()
-            .subscribe(
-                resolver.clone(),
-                topic.clone(),
-                self.subscription.clone(),
-                self.sub_type,
-                self.id,
-                self.name.clone(),
-                self.options.clone(),
-            )
-            .await
-        {
-            Ok(_success) => {
-                if *current_retries > 0 {
-                    let dur = (Instant::now() - *start_time).as_secs();
-                    log::info!(
-                        "subscribing({}) success after {} retries over {} seconds",
-                        topic,
-                        *current_retries + 1,
-                        dur
-                    );
-                }
-            }
-            Err(ConnectionError::PulsarError(Some(err), text)) => {
-                return match err {
-                    proto::ServerError::ServiceNotReady | proto::ServerError::ConsumerBusy => {
-                        match operation_retry_options.max_retries {
-                            Some(max_retries) if *current_retries < max_retries => {
-                                self.retry_with_delay(
-                                    current_retries,
-                                    err.as_str_name(),
-                                    topic,
-                                    &text,
-                                    broker_address,
-                                )
-                                    .await
-                                    .map_err(Err)?;
-
-                                Err(Ok(()))
-                            }
-                            _ => {
-                                error!("subscribe topic({}) reached max retries", topic);
-
-                                Err(Err(ConnectionError::PulsarError(Some(err), text).into()))
-                            }
-                        }
-                    }
-                    _ => Err(Err(Error::Connection(ConnectionError::PulsarError(
-                        Some(err),
-                        text,
-                    )))),
-                }
-            }
-            Err(ConnectionError::Io(e))
-            // Retryable IO Error
-            if matches!(
-                    e.kind(),
-                    ErrorKind::BrokenPipe
-                        | ErrorKind::ConnectionAborted
-                        | ErrorKind::ConnectionReset
-                        | ErrorKind::Interrupted
-                        | ErrorKind::NotConnected
-                        | ErrorKind::TimedOut
-                        | ErrorKind::UnexpectedEof
-                ) =>
-                {
-                    return match operation_retry_options.max_retries {
-                        Some(max_retries) if *current_retries < max_retries => {
-                            self.retry_with_delay(
-                                current_retries,
-                                e.kind().to_string().as_str(),
-                                topic,
-                                &None,
-                                broker_address,
-                            )
-                                .await
-                                .map_err(Err)?;
-
-                            Err(Ok(()))
-                        }
-                        _ => {
-                            error!("subscribing({}) reached max retries", topic);
-                            Err(Err(Error::Connection(ConnectionError::Io(e))))
-                        }
-                    }
-                }
-            Err(e) => {
-                error!("reconnect error [{:?}]: {:?}", line!(), e);
-                return Err(Err(Error::Connection(e)));
-            }
-        }
-
-        Ok(())
-    }
-
-    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn reconnect(&mut self) -> Result<(), Error> {
         debug!("reconnecting consumer for topic: {}", self.topic);
 
@@ -699,48 +552,20 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         // should have logged "rx terminated" by now
 
         let broker_address = self.client.lookup_topic(&self.topic).await?;
-        self.connection = self.client.manager.get_connection(&broker_address).await?;
 
-        warn!(
-            "Retry -> reconnecting consumer {:#} using connection {:#} to broker {:#} to topic {:#}",
+        let messages = retry_subscribe_consumer(
+            &self.client,
+            &mut self.connection,
+            broker_address,
+            &self.topic,
+            &self.subscription,
+            self.sub_type,
             self.id,
-            self.connection.id(),
-            broker_address.url,
-            self.topic
-        );
-
-        let topic = self.topic.clone();
-        let mut current_retries = 0u32;
-        let start = Instant::now();
-        let (resolver, messages) = mpsc::unbounded();
-
-        // Reconnection loop
-        // If the error is recoverable
-        // Try to reconnect in the bounds of retry limits
-        loop {
-            match self
-                .subscribe_topic(
-                    resolver.clone(),
-                    &topic,
-                    &mut current_retries,
-                    &start,
-                    &broker_address,
-                )
-                .await
-            {
-                // Reconnection went well
-                Ok(()) => break,
-                // An retryable error occurs
-                Err(Ok(())) => continue,
-                // An non-retryable error happens, the connection must die !
-                Err(Err(e)) => return Err(e),
-            }
-        }
-
-        self.connection
-            .sender()
-            .send_flow(self.id, self.batch_size)
-            .map_err(|e| Error::Consumer(ConsumerError::Connection(e)))?;
+            &self.name,
+            &self.options,
+            self.batch_size,
+        )
+        .await?;
 
         self.messages_rx = Some(messages);
 
