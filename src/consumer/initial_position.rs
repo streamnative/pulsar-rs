@@ -7,6 +7,7 @@ pub enum InitialPosition {
     Latest,
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for InitialPosition {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn default() -> Self {
