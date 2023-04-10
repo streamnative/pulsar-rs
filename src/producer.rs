@@ -3,7 +3,10 @@ use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     io::Write,
     pin::Pin,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -438,8 +441,10 @@ impl<Exe: Executor> TopicProducer<Exe> {
         name: Option<String>,
         options: ProducerOptions,
     ) -> Result<Self, Error> {
+        static PRODUCER_ID_GENERATOR: AtomicU64 = AtomicU64::new(0);
+
         let topic = topic.into();
-        let producer_id = rand::random();
+        let producer_id = PRODUCER_ID_GENERATOR.fetch_add(1, Ordering::SeqCst);
         let sequence_ids = SerialId::new();
 
         let topic = topic.clone();
