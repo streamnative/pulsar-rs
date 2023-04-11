@@ -543,7 +543,6 @@ pub mod proto {
     //trait implementations used in Consumer::unacked_messages
     impl Eq for MessageIdData {}
 
-    #[allow(clippy::derived_hash_with_manual_eq)]
     impl std::hash::Hash for MessageIdData {
         #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
         fn hash<H: std::hash::Hasher>(&self, state: &mut H) {

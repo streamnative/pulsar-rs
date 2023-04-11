@@ -1,17 +1,11 @@
 /// position of the first message that will be consumed
-#[derive(Clone, Debug)]
+#[derive(Default, Clone, Debug)]
 pub enum InitialPosition {
     /// start at the oldest message
     Earliest,
     /// start at the most recent message
+    #[default]
     Latest,
-}
-
-impl Default for InitialPosition {
-    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    fn default() -> Self {
-        InitialPosition::Latest
-    }
 }
 
 impl From<InitialPosition> for i32 {
