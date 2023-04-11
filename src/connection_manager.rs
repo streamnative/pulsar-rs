@@ -448,7 +448,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                 }
             }
             Some(ConnectionStatus::Connected(_)) => {
-                //info!("removing old connection");
+                info!("removing old connection");
             }
             None => {
                 //info!("setting up new connection");

@@ -189,6 +189,7 @@ pub mod executor;
 pub mod message;
 pub mod producer;
 pub mod reader;
+mod retry_op;
 mod service_discovery;
 
 #[cfg(test)]
