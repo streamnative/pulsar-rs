@@ -428,7 +428,7 @@ struct TopicProducer<Exe: Executor> {
     name: ProducerName,
     topic: String,
     message_id: SerialId,
-    //putting it in a mutex because we must send multiple messages at once
+    // putting it in a mutex because we must send multiple messages at once
     // while we might be pushing more messages from elsewhere
     batch: Option<Mutex<Batch>>,
     compression: Option<Compression>,
@@ -467,6 +467,10 @@ impl<Exe: Executor> TopicProducer<Exe> {
         )
         .await?;
 
+        let batch = batch_size
+            .map(|batch_size| Batch::new(batch_size, batch_byte_size))
+            .map(Mutex::new);
+
         Ok(TopicProducer {
             client,
             connection,
@@ -474,7 +478,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
             name: producer_name,
             topic,
             message_id: sequence_ids,
-            batch: batch_size.map(|batch_size| Batch::new(batch_size, batch_byte_size)).map(Mutex::new),
+            batch,
             compression,
             options,
         })
@@ -726,7 +730,11 @@ impl<Exe: Executor> TopicProducer<Exe> {
         )
         .await?;
 
-        self.batch = self.options.batch_size.map(|batch_size| Batch::new(batch_size, self.options.batch_byte_size)).map(Mutex::new);
+        self.batch = self
+            .options
+            .batch_size
+            .map(|batch_size| Batch::new(batch_size, self.options.batch_byte_size))
+            .map(Mutex::new);
 
         Ok(())
     }
@@ -865,9 +873,8 @@ impl<Exe: Executor> ProducerBuilder<Exe> {
 
 struct BatchStorage {
     size: usize,
-    #[allow(clippy::type_complexity)]
-    pub storage: VecDeque<(
-        oneshot::Sender<Result<proto::CommandSendReceipt, Error>>,
+    storage: VecDeque<(
+        oneshot::Sender<Result<CommandSendReceipt, Error>>,
         BatchedMessage,
     )>,
 }
@@ -876,16 +883,16 @@ impl BatchStorage {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn new(length: u32) -> BatchStorage {
         BatchStorage {
-            size: 0usize,
+            size: 0,
             storage: VecDeque::with_capacity(length as usize),
         }
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn push_back(
-        & mut self,
-        tx: oneshot::Sender<Result<proto::CommandSendReceipt, Error>>,
-        batched: BatchedMessage
+        &mut self,
+        tx: oneshot::Sender<Result<CommandSendReceipt, Error>>,
+        batched: BatchedMessage,
     ) {
         self.size += batched.metadata.payload_size as usize;
         self.storage.push_back((tx, batched))
@@ -893,12 +900,12 @@ impl BatchStorage {
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn get_messages(
-        & mut self,
+        &mut self,
     ) -> Vec<(
-        oneshot::Sender<Result<proto::CommandSendReceipt, Error>>,
+        oneshot::Sender<Result<CommandSendReceipt, Error>>,
         BatchedMessage,
     )> {
-        self.size = 0usize;
+        self.size = 0;
         self.storage.drain(..).collect()
     }
 }
@@ -906,11 +913,10 @@ impl BatchStorage {
 struct Batch {
     // max number of message
     pub length: u32,
-    // max total message treshhold
+    // message bytes threshold
     pub size: Option<usize>,
     // put it in a mutex because the design of Producer requires an immutable TopicProducer,
     // so we cannot have a mutable Batch in a send_raw(&mut self, ...)
-    #[allow(clippy::type_complexity)]
     pub storage: Mutex<BatchStorage>,
 }
 
@@ -929,7 +935,7 @@ impl Batch {
         let s = self.storage.lock().await;
         match self.size {
             None => s.storage.len() >= self.length as usize,
-            Some(size) => s.storage.len() >= self.length as usize || s.size >= size
+            Some(size) => s.storage.len() >= self.length as usize || s.size >= size,
         }
     }
 
@@ -937,7 +943,7 @@ impl Batch {
     pub async fn push_back(
         &self,
         msg: (
-            oneshot::Sender<Result<proto::CommandSendReceipt, Error>>,
+            oneshot::Sender<Result<CommandSendReceipt, Error>>,
             ProducerMessage,
         ),
     ) {
@@ -967,7 +973,7 @@ impl Batch {
     pub async fn get_messages(
         &self,
     ) -> Vec<(
-        oneshot::Sender<Result<proto::CommandSendReceipt, Error>>,
+        oneshot::Sender<Result<CommandSendReceipt, Error>>,
         BatchedMessage,
     )> {
         self.storage.lock().await.get_messages()
