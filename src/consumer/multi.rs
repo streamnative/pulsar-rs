@@ -14,7 +14,7 @@ use regex::Regex;
 use crate::{
     consumer::{config::ConsumerConfig, message::Message, topic::TopicConsumer},
     error::{ConnectionError, ConsumerError},
-    message::proto::MessageIdData,
+    message::proto::{MessageIdData, Schema},
     proto,
     proto::CommandConsumerStatsResponse,
     DeserializeMessage, Error, Executor, Pulsar,
@@ -303,6 +303,19 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn config(&self) -> &ConsumerConfig {
         &self.config
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub(crate) async fn get_schema(
+        &mut self,
+        topic: &str,
+        version: Option<Vec<u8>>,
+    ) -> Result<Option<Schema>, Error> {
+        if let Some(c) = self.consumers.get_mut(topic) {
+            c.get_schema(version).await
+        } else {
+            Err(ConnectionError::Unexpected(format!("no consumer for topic {topic}")).into())
+        }
     }
 }
 
