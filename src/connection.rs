@@ -431,9 +431,10 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         producer_id: u64,
         producer_name: Option<String>,
         options: ProducerOptions,
+        epoch: u64,
     ) -> Result<proto::CommandProducerSuccess, ConnectionError> {
         let request_id = self.request_id.get();
-        let msg = messages::create_producer(topic, producer_name, producer_id, request_id, options);
+        let msg = messages::create_producer(topic, producer_name, producer_id, request_id, options, epoch);
         self.send_message(msg, RequestKey::RequestId(request_id), |resp| {
             resp.command.producer_success
         })
@@ -1227,6 +1228,7 @@ pub(crate) mod messages {
         producer_id: u64,
         request_id: u64,
         options: ProducerOptions,
+        epoch: u64,
     ) -> Message {
         Message {
             command: proto::BaseCommand {
@@ -1247,6 +1249,7 @@ pub(crate) mod messages {
                         .collect(),
                     schema: options.schema,
                     producer_access_mode: options.access_mode,
+                    epoch: Some(epoch),
                     ..Default::default()
                 }),
                 ..Default::default()
