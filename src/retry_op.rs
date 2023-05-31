@@ -175,7 +175,7 @@ pub async fn retry_create_producer<Exe: Executor>(
                 producer_id,
                 producer_name.clone(),
                 options.clone(),
-                epoch.fetch_add(0, std::sync::atomic::Ordering::Relaxed)
+                epoch.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             )
             .await
         {
