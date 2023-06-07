@@ -1186,7 +1186,7 @@ pub(crate) mod messages {
                     auth_method_name,
                     auth_data,
                     proxy_to_broker_url,
-                    client_version: String::from("2.0.1-incubating"),
+                    client_version: proto::client_version(),
                     protocol_version: Some(12),
                     ..Default::default()
                 }),
