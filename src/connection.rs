@@ -1186,7 +1186,11 @@ pub(crate) mod messages {
                     auth_method_name,
                     auth_data,
                     proxy_to_broker_url,
-                    client_version: String::from("2.0.1-incubating"),
+                    client_version: format!(
+                        "{}_{}",
+                        "pulsar-rs",
+                        env!("CARGO_PKG_VERSION").to_string()
+                    ),
                     protocol_version: Some(12),
                     ..Default::default()
                 }),

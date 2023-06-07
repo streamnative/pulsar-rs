@@ -638,7 +638,6 @@ mod tests {
 
         {
             let connect = message.command.connect.as_ref().unwrap();
-            assert_eq!(connect.client_version, "2.0.1-incubating");
             assert_eq!(connect.auth_method_name.as_ref().unwrap(), "none");
             assert_eq!(connect.protocol_version.as_ref().unwrap(), &12);
         }
