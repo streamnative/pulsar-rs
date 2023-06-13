@@ -554,6 +554,10 @@ pub mod proto {
             self.batch_size.hash(state);
         }
     }
+
+    pub fn client_version() -> String {
+        format!("{}-v{}", "pulsar-rs", env!("CARGO_PKG_VERSION"))
+    }
 }
 
 impl TryFrom<i32> for base_command::Type {
@@ -629,16 +633,15 @@ mod tests {
     #[test]
     fn parse_simple_command() {
         let input: &[u8] = &[
-            0x00, 0x00, 0x00, 0x22, 0x00, 0x00, 0x00, 0x1E, 0x08, 0x02, 0x12, 0x1A, 0x0A, 0x10,
-            0x32, 0x2E, 0x30, 0x2E, 0x31, 0x2D, 0x69, 0x6E, 0x63, 0x75, 0x62, 0x61, 0x74, 0x69,
-            0x6E, 0x67, 0x20, 0x0C, 0x2A, 0x04, 0x6E, 0x6F, 0x6E, 0x65,
+            0, 0, 0, 34, 0, 0, 0, 30, 8, 2, 18, 26, 10, 16, 112, 117, 108, 115, 97, 114, 45, 114,
+            115, 45, 118, 54, 46, 48, 46, 48, 32, 12, 42, 4, 110, 111, 110, 101,
         ];
 
         let message = Codec.decode(&mut input.into()).unwrap().unwrap();
 
         {
             let connect = message.command.connect.as_ref().unwrap();
-            assert_eq!(connect.client_version, "2.0.1-incubating");
+            assert_eq!(connect.client_version, "pulsar-rs-v6.0.0");
             assert_eq!(connect.auth_method_name.as_ref().unwrap(), "none");
             assert_eq!(connect.protocol_version.as_ref().unwrap(), &12);
         }
