@@ -722,6 +722,19 @@ impl<Exe: Executor> ConnectionSender<Exe> {
             _ => Err(ConnectionError::Disconnected),
         }
     }
+
+    pub(crate) async fn get_schema(
+        &self,
+        topic: &str,
+        version: Option<Vec<u8>>,
+    ) -> Result<proto::CommandGetSchemaResponse, ConnectionError> {
+        let request_id = self.request_id.get();
+        let msg = messages::get_schema(request_id, topic, version);
+        self.send_message(msg, RequestKey::RequestId(request_id), |resp| {
+            resp.command.get_schema_response
+        })
+        .await
+    }
 }
 
 pub struct Connection<Exe: Executor> {
@@ -1269,6 +1282,22 @@ pub(crate) mod messages {
                     namespace,
                     mode: Some(mode as i32),
                     ..Default::default()
+                }),
+                ..Default::default()
+            },
+            payload: None,
+        }
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn get_schema(request_id: u64, topic: &str, version: Option<Vec<u8>>) -> Message {
+        Message {
+            command: proto::BaseCommand {
+                r#type: CommandType::GetSchema as i32,
+                get_schema: Some(proto::CommandGetSchema {
+                    request_id,
+                    topic: topic.to_string(),
+                    schema_version: version,
                 }),
                 ..Default::default()
             },
