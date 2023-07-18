@@ -494,7 +494,6 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 (Some(redelivery_count), Some(dead_letter_policy))
                     if redelivery_count as usize >= dead_letter_policy.max_redeliver_count =>
                 {
-                    println!("sending to DLQ");
                     // Send message to Dead Letter Topic and ack message in original topic
                     self.client
                         .send(&dead_letter_policy.dead_letter_topic, payload.data)
