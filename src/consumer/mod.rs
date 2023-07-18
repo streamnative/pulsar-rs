@@ -822,7 +822,7 @@ mod tests {
             consumer.nack(&msg).await.unwrap();
 
             let dlq_msg = dlq_consumer.next().await.unwrap().unwrap();
-            println!("got message: {:?}", msg.payload);
+            println!("got message: {:?}", dlq_msg.payload);
             assert_eq!(
                 message,
                 dlq_msg.deserialize().unwrap(),
