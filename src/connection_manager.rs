@@ -154,7 +154,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                     .rev()
                 {
                     v.push(
-                        Certificate::from_der(&cert.contents[..])
+                        Certificate::from_der(&cert.contents())
                             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?,
                     );
                 }
