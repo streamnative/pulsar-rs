@@ -88,7 +88,15 @@ pub enum ConnectionError {
     Encoding(String),
     SocketAddr(String),
     UnexpectedResponse(String),
+    #[cfg(any(feature = "tokio-runtime", feature = "async-std-runtime"))]
     Tls(native_tls::Error),
+    #[cfg(all(
+        any(feature = "tokio-rustls-runtime", feature = "async-std-rustls-runtime"),
+        not(any(feature = "tokio-runtime", feature = "async-std-runtime"))
+    ))]
+    Tls(rustls::Error),
+    #[cfg(any(feature = "tokio-rustls-runtime", feature = "async-std-rustls-runtime"))]
+    DnsName(rustls::client::InvalidDnsNameError),
     Authentication(AuthenticationError),
     NotFound,
     Canceled,
@@ -113,10 +121,30 @@ impl From<io::Error> for ConnectionError {
     }
 }
 
+#[cfg(any(feature = "tokio-runtime", feature = "async-std-runtime"))]
 impl From<native_tls::Error> for ConnectionError {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn from(err: native_tls::Error) -> Self {
         ConnectionError::Tls(err)
+    }
+}
+
+#[cfg(all(
+    any(feature = "tokio-rustls-runtime", feature = "async-std-rustls-runtime"),
+    not(any(feature = "tokio-runtime", feature = "async-std-runtime"))
+))]
+impl From<rustls::Error> for ConnectionError {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    fn from(err: rustls::Error) -> Self {
+        ConnectionError::Tls(err)
+    }
+}
+
+#[cfg(any(feature = "tokio-rustls-runtime", feature = "async-std-rustls-runtime"))]
+impl From<rustls::client::InvalidDnsNameError> for ConnectionError {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    fn from(err: rustls::client::InvalidDnsNameError) -> Self {
+        ConnectionError::DnsName(err)
     }
 }
 
@@ -141,6 +169,8 @@ impl fmt::Display for ConnectionError {
             ConnectionError::Encoding(e) => write!(f, "Error encoding message: {e}"),
             ConnectionError::SocketAddr(e) => write!(f, "Error obtaining socket address: {e}"),
             ConnectionError::Tls(e) => write!(f, "Error connecting TLS stream: {e}"),
+            #[cfg(any(feature = "tokio-rustls-runtime", feature = "async-std-rustls-runtime"))]
+            ConnectionError::DnsName(e) => write!(f, "Error resolving hostname: {e}"),
             ConnectionError::Authentication(e) => write!(f, "Error authentication: {e}"),
             ConnectionError::UnexpectedResponse(e) => {
                 write!(f, "Unexpected response from pulsar: {e}")

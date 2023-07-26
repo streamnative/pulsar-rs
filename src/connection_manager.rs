@@ -1,8 +1,14 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use futures::{channel::oneshot, lock::Mutex};
+#[cfg(any(feature = "tokio-runtime", feature = "async-std-runtime"))]
 use native_tls::Certificate;
 use rand::Rng;
+#[cfg(all(
+    any(feature = "tokio-rustls-runtime", feature = "async-std-rustls-runtime"),
+    not(any(feature = "tokio-runtime", feature = "async-std-runtime"))
+))]
+use rustls::Certificate;
 use url::Url;
 
 use crate::{connection::Connection, error::ConnectionError, executor::Executor};
@@ -153,10 +159,20 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                     .iter()
                     .rev()
                 {
+                    #[cfg(any(feature = "tokio-runtime", feature = "async-std-runtime"))]
                     v.push(
-                        Certificate::from_der(&cert.contents())
+                        Certificate::from_der(cert.contents())
                             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?,
                     );
+
+                    #[cfg(all(
+                        any(
+                            feature = "tokio-rustls-runtime",
+                            feature = "async-std-rustls-runtime"
+                        ),
+                        not(any(feature = "tokio-runtime", feature = "async-std-runtime"))
+                    ))]
+                    v.push(Certificate(cert.contents().to_vec()));
                 }
                 v
             }

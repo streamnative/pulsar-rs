@@ -40,11 +40,11 @@ pub trait Executor: Clone + Send + Sync + 'static {
 }
 
 /// Wrapper for the Tokio executor
-#[cfg(feature = "tokio-runtime")]
+#[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
 #[derive(Clone, Debug)]
 pub struct TokioExecutor;
 
-#[cfg(feature = "tokio-runtime")]
+#[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
 impl Executor for TokioExecutor {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn spawn(&self, f: Pin<Box<dyn Future<Output = ()> + Send>>) -> Result<(), ()> {
@@ -78,11 +78,11 @@ impl Executor for TokioExecutor {
 }
 
 /// Wrapper for the async-std executor
-#[cfg(feature = "async-std-runtime")]
+#[cfg(any(feature = "async-std-runtime", features = "async-std-rustls-runtime"))]
 #[derive(Clone, Debug)]
 pub struct AsyncStdExecutor;
 
-#[cfg(feature = "async-std-runtime")]
+#[cfg(any(feature = "async-std-runtime", features = "async-std-rustls-runtime"))]
 impl Executor for AsyncStdExecutor {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn spawn(&self, f: Pin<Box<dyn Future<Output = ()> + Send>>) -> Result<(), ()> {
@@ -150,13 +150,18 @@ impl<Exe: Executor> Executor for Arc<Exe> {
 /// future returned by [Executor::spawn_blocking] to await on the task's result
 pub enum JoinHandle<T> {
     /// wrapper for tokio's `JoinHandle`
-    #[cfg(feature = "tokio-runtime")]
+    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
     Tokio(tokio::task::JoinHandle<T>),
     /// wrapper for async-std's `JoinHandle`
-    #[cfg(feature = "async-std-runtime")]
+    #[cfg(any(feature = "async-std-runtime", features = "async-std-rustls-runtime"))]
     AsyncStd(async_std::task::JoinHandle<T>),
     // here to avoid a compilation error since T is not used
-    #[cfg(all(not(feature = "tokio-runtime"), not(feature = "async-std-runtime")))]
+    #[cfg(all(
+        not(feature = "tokio-runtime"),
+        not(feature = "tokio-rustls-runtime"),
+        not(feature = "async-std-runtime"),
+        not(feature = "async-std-rustls-runtime")
+    ))]
     PlaceHolder(T),
 }
 
@@ -166,17 +171,22 @@ impl<T> Future for JoinHandle<T> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context) -> std::task::Poll<Self::Output> {
         match self.get_mut() {
-            #[cfg(feature = "tokio-runtime")]
+            #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
             JoinHandle::Tokio(j) => match Pin::new(j).poll(cx) {
                 Poll::Pending => Poll::Pending,
                 Poll::Ready(v) => Poll::Ready(v.ok()),
             },
-            #[cfg(feature = "async-std-runtime")]
+            #[cfg(any(feature = "async-std-runtime", features = "async-std-rustls-runtime"))]
             JoinHandle::AsyncStd(j) => match Pin::new(j).poll(cx) {
                 Poll::Pending => Poll::Pending,
                 Poll::Ready(v) => Poll::Ready(Some(v)),
             },
-            #[cfg(all(not(feature = "tokio-runtime"), not(feature = "async-std-runtime")))]
+            #[cfg(all(
+                not(feature = "tokio-runtime"),
+                not(feature = "tokio-rustls-runtime"),
+                not(feature = "async-std-runtime"),
+                not(feature = "async-std-rustls-runtime")
+            ))]
             JoinHandle::PlaceHolder(t) => {
                 unimplemented!("please activate one of the following cargo features: tokio-runtime, async-std-runtime")
             }
@@ -187,12 +197,17 @@ impl<T> Future for JoinHandle<T> {
 /// a `Stream` producing a `()` at rgular time intervals
 pub enum Interval {
     /// wrapper for tokio's interval
-    #[cfg(feature = "tokio-runtime")]
+    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
     Tokio(tokio::time::Interval),
     /// wrapper for async-std's interval
-    #[cfg(feature = "async-std-runtime")]
+    #[cfg(any(feature = "async-std-runtime", features = "async-std-rustls-runtime"))]
     AsyncStd(async_std::stream::Interval),
-    #[cfg(all(not(feature = "tokio-runtime"), not(feature = "async-std-runtime")))]
+    #[cfg(all(
+        not(feature = "tokio-runtime"),
+        not(feature = "tokio-rustls-runtime"),
+        not(feature = "async-std-runtime"),
+        not(feature = "async-std-rustls-runtime")
+    ))]
     PlaceHolder,
 }
 
@@ -206,17 +221,22 @@ impl Stream for Interval {
     ) -> std::task::Poll<Option<Self::Item>> {
         unsafe {
             match Pin::get_unchecked_mut(self) {
-                #[cfg(feature = "tokio-runtime")]
+                #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
                 Interval::Tokio(j) => match Pin::new_unchecked(j).poll_tick(cx) {
                     Poll::Pending => Poll::Pending,
                     Poll::Ready(_) => Poll::Ready(Some(())),
                 },
-                #[cfg(feature = "async-std-runtime")]
+                #[cfg(any(feature = "async-std-runtime", features = "async-std-rustls-runtime"))]
                 Interval::AsyncStd(j) => match Pin::new_unchecked(j).poll_next(cx) {
                     Poll::Pending => Poll::Pending,
                     Poll::Ready(v) => Poll::Ready(v),
                 },
-                #[cfg(all(not(feature = "tokio-runtime"), not(feature = "async-std-runtime")))]
+                #[cfg(all(
+                    not(feature = "tokio-runtime"),
+                    not(feature = "tokio-rustls-runtime"),
+                    not(feature = "async-std-runtime"),
+                    not(feature = "async-std-rustls-runtime")
+                ))]
                 Interval::PlaceHolder => {
                     unimplemented!("please activate one of the following cargo features: tokio-runtime, async-std-runtime")
                 }
@@ -228,10 +248,10 @@ impl Stream for Interval {
 /// a future producing a `()` after some time
 pub enum Delay {
     /// wrapper around tokio's `Sleep`
-    #[cfg(feature = "tokio-runtime")]
+    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
     Tokio(tokio::time::Sleep),
     /// wrapper around async-std's `Delay`
-    #[cfg(feature = "async-std-runtime")]
+    #[cfg(any(feature = "async-std-runtime", features = "async-std-rustls-runtime"))]
     AsyncStd(Pin<Box<dyn Future<Output = ()> + Send>>),
 }
 
@@ -242,12 +262,12 @@ impl Future for Delay {
     fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context) -> std::task::Poll<Self::Output> {
         unsafe {
             match Pin::get_unchecked_mut(self) {
-                #[cfg(feature = "tokio-runtime")]
+                #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
                 Delay::Tokio(d) => match Pin::new_unchecked(d).poll(cx) {
                     Poll::Pending => Poll::Pending,
                     Poll::Ready(_) => Poll::Ready(()),
                 },
-                #[cfg(feature = "async-std-runtime")]
+                #[cfg(any(feature = "async-std-runtime", features = "async-std-rustls-runtime"))]
                 Delay::AsyncStd(j) => match Pin::new_unchecked(j).poll(cx) {
                     Poll::Pending => Poll::Pending,
                     Poll::Ready(_) => Poll::Ready(()),
