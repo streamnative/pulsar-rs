@@ -506,6 +506,25 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
         self
     }
 
+    /// add a certificate and private key to authenticate the client in TLS connections
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn with_identity(mut self, certificate: Vec<u8>, private_key: Vec<u8>) -> Self {
+        match &mut self.tls_options {
+            Some(tls) => {
+                tls.certificate = Some(certificate);
+                tls.private_key = Some(private_key);
+            }
+            None => {
+                self.tls_options = Some(TlsOptions {
+                    certificate: Some(certificate),
+                    private_key: Some(private_key),
+                    ..Default::default()
+                })
+            }
+        }
+        self
+    }
+
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_allow_insecure_connection(mut self, allow: bool) -> Self {
         match &mut self.tls_options {
@@ -547,6 +566,26 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
         file.read_to_end(&mut v)?;
 
         Ok(self.with_certificate_chain(v))
+    }
+
+    /// add a certificate and private key to authenticate the client in TLS connections
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn with_identity_files<P: AsRef<std::path::Path>>(
+        self,
+        certificate_path: P,
+        private_key_path: P,
+    ) -> Result<Self, std::io::Error> {
+        use std::io::Read;
+
+        let mut file = std::fs::File::open(certificate_path)?;
+        let mut certificate = vec![];
+        file.read_to_end(&mut certificate)?;
+
+        let mut file = std::fs::File::open(private_key_path)?;
+        let mut private_key = vec![];
+        file.read_to_end(&mut private_key)?;
+
+        Ok(self.with_identity(certificate, private_key))
     }
 
     /// creates the Pulsar client and connects it
