@@ -8,7 +8,7 @@ authors = [
     "Geoffroy Couprie <contact@geoffroycouprie.com>",
 ]
 
-license = "MIT/Apache-2.0"
+license = "MIT OR Apache-2.0"
 readme = "./README.md"
 repository = "https://github.com/streamnative/pulsar-rs"
 documentation = "https://docs.rs/pulsar"
