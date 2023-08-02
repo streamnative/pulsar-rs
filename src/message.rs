@@ -220,7 +220,7 @@ impl Message {
 /// tokio and async-std codec for Pulsar messages
 pub struct Codec;
 
-#[cfg(feature = "tokio-runtime")]
+#[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
 impl tokio_util::codec::Encoder<Message> for Codec {
     type Error = ConnectionError;
 
@@ -269,7 +269,7 @@ impl tokio_util::codec::Encoder<Message> for Codec {
     }
 }
 
-#[cfg(feature = "tokio-runtime")]
+#[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
 impl tokio_util::codec::Decoder for Codec {
     type Item = Message;
     type Error = ConnectionError;
@@ -324,7 +324,7 @@ impl tokio_util::codec::Decoder for Codec {
     }
 }
 
-#[cfg(feature = "async-std-runtime")]
+#[cfg(any(feature = "async-std-runtime", feature = "async-std-rustls-runtime"))]
 impl asynchronous_codec::Encoder for Codec {
     type Item = Message;
     type Error = ConnectionError;
@@ -374,7 +374,7 @@ impl asynchronous_codec::Encoder for Codec {
     }
 }
 
-#[cfg(feature = "async-std-runtime")]
+#[cfg(any(feature = "async-std-runtime", feature = "async-std-rustls-runtime"))]
 impl asynchronous_codec::Decoder for Codec {
     type Item = Message;
     type Error = ConnectionError;

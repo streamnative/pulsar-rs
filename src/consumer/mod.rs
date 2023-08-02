@@ -437,11 +437,11 @@ mod tests {
     };
     use log::LevelFilter;
     use regex::Regex;
-    #[cfg(feature = "tokio-runtime")]
+    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
     use tokio::time::timeout;
 
     use super::*;
-    #[cfg(feature = "tokio-runtime")]
+    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
     use crate::executor::TokioExecutor;
     use crate::{
         consumer::initial_position::InitialPosition, producer, proto, tests::TEST_LOGGER,
@@ -476,7 +476,7 @@ mod tests {
         tag: "multi_consumer",
     };
     #[tokio::test]
-    #[cfg(feature = "tokio-runtime")]
+    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
     async fn multi_consumer() {
         let _result = log::set_logger(&MULTI_LOGGER);
         log::set_max_level(LevelFilter::Debug);
@@ -567,7 +567,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(feature = "tokio-runtime")]
+    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
     async fn consumer_dropped_with_lingering_acks() {
         use rand::{distributions::Alphanumeric, Rng};
         let _result = log::set_logger(&TEST_LOGGER);
@@ -664,7 +664,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(feature = "tokio-runtime")]
+    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
     async fn dead_letter_queue() {
         let _result = log::set_logger(&TEST_LOGGER);
         log::set_max_level(LevelFilter::Debug);
@@ -738,7 +738,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(feature = "tokio-runtime")]
+    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
     async fn failover() {
         let _result = log::set_logger(&MULTI_LOGGER);
         log::set_max_level(LevelFilter::Debug);
@@ -798,7 +798,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(feature = "tokio-runtime")]
+    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
     async fn seek_single_consumer() {
         let _result = log::set_logger(&MULTI_LOGGER);
         log::set_max_level(LevelFilter::Debug);
@@ -917,7 +917,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(feature = "tokio-runtime")]
+    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
     async fn schema_test() {
         #[derive(Serialize, Deserialize)]
         struct TestData {

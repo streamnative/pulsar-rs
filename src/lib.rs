@@ -160,6 +160,11 @@ extern crate prost_derive;
 #[macro_use]
 extern crate serde;
 
+#[cfg(all(features = "tokio-rustls-runtime", features = "tokio-runtime"))]
+compile_error!("You have selected both features \"tokio-rustls-runtime\" and \"tokio-runtime\" which are exclusive, please choose one of them");
+#[cfg(all(features = "async-std-rustls-runtime", features = "async-std-runtime"))]
+compile_error!("You have selected both features \"async-std-rustls-runtime\" and \"async-std-runtime\" which are exclusive, please choose one of them");
+
 pub use client::{DeserializeMessage, Pulsar, PulsarBuilder, SerializeMessage};
 pub use connection::Authentication;
 pub use connection_manager::{
@@ -167,10 +172,10 @@ pub use connection_manager::{
 };
 pub use consumer::{Consumer, ConsumerBuilder, ConsumerOptions};
 pub use error::Error;
-#[cfg(feature = "async-std-runtime")]
+#[cfg(any(feature = "async-std-runtime", features = "async-std-rustls-runtime"))]
 pub use executor::AsyncStdExecutor;
 pub use executor::Executor;
-#[cfg(feature = "tokio-runtime")]
+#[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
 pub use executor::TokioExecutor;
 pub use message::{
     proto::{self, command_subscribe::SubType, CommandSendReceipt},
@@ -201,11 +206,11 @@ mod tests {
 
     use futures::{future::try_join_all, StreamExt};
     use log::{LevelFilter, Metadata, Record};
-    #[cfg(feature = "tokio-runtime")]
+    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
     use tokio::time::timeout;
 
     use super::*;
-    #[cfg(feature = "tokio-runtime")]
+    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
     use crate::executor::TokioExecutor;
     use crate::{
         client::SerializeMessage,
@@ -309,7 +314,7 @@ mod tests {
     pub static TEST_LOGGER: SimpleLogger = SimpleLogger { tag: "" };
 
     #[tokio::test]
-    #[cfg(feature = "tokio-runtime")]
+    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
     async fn round_trip() {
         let _result = log::set_logger(&TEST_LOGGER);
         log::set_max_level(LevelFilter::Debug);
@@ -374,7 +379,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(feature = "tokio-runtime")]
+    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
     async fn unsized_data() {
         let _result = log::set_logger(&TEST_LOGGER);
         log::set_max_level(LevelFilter::Debug);
@@ -460,7 +465,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(feature = "tokio-runtime")]
+    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
     async fn redelivery() {
         let _result = log::set_logger(&TEST_LOGGER);
         log::set_max_level(LevelFilter::Debug);
@@ -506,7 +511,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(feature = "tokio-runtime")]
+    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
     async fn batching() {
         let _result = log::set_logger(&TEST_LOGGER);
         log::set_max_level(LevelFilter::Debug);
