@@ -22,7 +22,7 @@ nom = { version="^7.1.3", default-features=false, features=["alloc"] }
 prost = "^0.11.9"
 prost-derive = "^0.11.9"
 rand = "^0.8.5"
-chrono = "^0.4.26"
+chrono = { version = "^0.4.26", default-features = false, features = ["clock", "std"] }
 futures-timer = "^3.0.2"
 log = "^0.4.19"
 url = "^2.4.0"
