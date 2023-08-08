@@ -24,7 +24,7 @@ use crate::{
         message::Message,
     },
     error::{ConnectionError, ConsumerError},
-    message::proto::MessageIdData,
+    message::proto::{MessageIdData, Schema},
     proto::CommandConsumerStatsResponse,
     retry_op::retry_subscribe_consumer,
     BrokerAddress, DeserializeMessage, Error, Executor, Payload, Pulsar,
@@ -262,7 +262,6 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn close(&mut self) -> Result<(), Error> {
         let consumer_id = self.consumer_id;
-        self.unsubscribe().await?;
         self.connection()
             .await?
             .sender()
@@ -305,6 +304,16 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
             payload,
             _phantom: PhantomData,
         }
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub(crate) async fn get_schema(
+        &mut self,
+        version: Option<Vec<u8>>,
+    ) -> Result<Option<Schema>, Error> {
+        let conn = self.connection().await?;
+        let schema_response = conn.sender().get_schema(&self.topic, version).await?;
+        Ok(schema_response.schema)
     }
 }
 

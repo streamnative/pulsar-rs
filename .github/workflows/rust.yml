@@ -10,14 +10,10 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - name: Install protocol buffer compiler
-        uses: arduino/setup-protoc@v1
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/checkout@v3
       - uses: Swatinem/rust-cache@v1
       - name: Build
-        run: cargo build
+        run: cargo build --features protobuf-src
       - name: Check Clippy
         run: cargo clippy --tests --all-features -- -D warnings
       - name: Install nightly rustfmt
@@ -29,17 +25,11 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        pulsar-version: [ 2.8.4.1, 2.9.3.11, 2.10.1.8 ]
+        pulsar-version: [ 2.10.4.3, 2.11.1.2, 3.0.0.1 ]
     steps:
-      - name: Install protocol buffer compiler
-        uses: arduino/setup-protoc@v1
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Start Pulsar Standalone Container
         run: docker run --name pulsar -p 6650:6650 -p 8080:8080 -d -e GITHUB_ACTIONS=true -e CI=true streamnative/pulsar:${{ matrix.pulsar-version }} /pulsar/bin/pulsar standalone
       - uses: actions/checkout@v3
       - uses: Swatinem/rust-cache@v1
-      - name: Build
-        run: cargo build
       - name: Run tests
-        run: cargo test -- --nocapture
+        run: cargo test --features protobuf-src -- --nocapture

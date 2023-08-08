@@ -35,7 +35,7 @@ use url::Url;
 use crate::{
     error::{ConsumerError, Error},
     executor::Executor,
-    message::proto::{command_subscribe::SubType, MessageIdData},
+    message::proto::{command_subscribe::SubType, MessageIdData, Schema},
     proto::CommandConsumerStatsResponse,
     DeserializeMessage, Pulsar,
 };
@@ -254,7 +254,6 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    /// Unsubscribe the topic then close the connection
     pub async fn close(&mut self) -> Result<(), Error> {
         match &mut self.inner {
             InnerConsumer::Single(c) => c.close().await,
@@ -396,6 +395,19 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
             InnerConsumer::Multi(c) => c.messages_received(),
         }
     }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    //Returns the current message schema
+    pub async fn get_schema(
+        &mut self,
+        topic: &str,
+        version: Option<Vec<u8>>,
+    ) -> Result<Option<Schema>, Error> {
+        match &mut self.inner {
+            InnerConsumer::Single(c) => c.get_schema(version).await,
+            InnerConsumer::Multi(c) => c.get_schema(topic, version).await,
+        }
+    }
 }
 
 //TODO: why does T need to be 'static?
@@ -425,15 +437,15 @@ mod tests {
     };
     use log::LevelFilter;
     use regex::Regex;
-    #[cfg(feature = "tokio-runtime")]
+    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
     use tokio::time::timeout;
 
     use super::*;
-    #[cfg(feature = "tokio-runtime")]
+    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
     use crate::executor::TokioExecutor;
     use crate::{
-        consumer::initial_position::InitialPosition, producer, tests::TEST_LOGGER, Payload, Pulsar,
-        SerializeMessage,
+        consumer::initial_position::InitialPosition, producer, proto, tests::TEST_LOGGER,
+        Error as PulsarError, Payload, Pulsar, SerializeMessage,
     };
 
     #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -464,7 +476,7 @@ mod tests {
         tag: "multi_consumer",
     };
     #[tokio::test]
-    #[cfg(feature = "tokio-runtime")]
+    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
     async fn multi_consumer() {
         let _result = log::set_logger(&MULTI_LOGGER);
         log::set_max_level(LevelFilter::Debug);
@@ -555,7 +567,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(feature = "tokio-runtime")]
+    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
     async fn consumer_dropped_with_lingering_acks() {
         use rand::{distributions::Alphanumeric, Rng};
         let _result = log::set_logger(&TEST_LOGGER);
@@ -652,7 +664,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(feature = "tokio-runtime")]
+    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
     async fn dead_letter_queue() {
         let _result = log::set_logger(&TEST_LOGGER);
         log::set_max_level(LevelFilter::Debug);
@@ -726,7 +738,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(feature = "tokio-runtime")]
+    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
     async fn failover() {
         let _result = log::set_logger(&MULTI_LOGGER);
         log::set_max_level(LevelFilter::Debug);
@@ -786,7 +798,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(feature = "tokio-runtime")]
+    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
     async fn seek_single_consumer() {
         let _result = log::set_logger(&MULTI_LOGGER);
         log::set_max_level(LevelFilter::Debug);
@@ -902,5 +914,121 @@ mod tests {
         // then check if all messages were received
         assert_eq!(50, consumed_1);
         assert_eq!(100, consumed_2);
+    }
+
+    #[tokio::test]
+    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
+    async fn schema_test() {
+        #[derive(Serialize, Deserialize)]
+        struct TestData {
+            age: i32,
+            name: String,
+        }
+
+        impl SerializeMessage for TestData {
+            fn serialize_message(input: Self) -> Result<producer::Message, PulsarError> {
+                let payload =
+                    serde_json::to_vec(&input).map_err(|e| PulsarError::Custom(e.to_string()))?;
+                Ok(producer::Message {
+                    payload,
+                    ..Default::default()
+                })
+            }
+        }
+
+        impl DeserializeMessage for TestData {
+            type Output = Result<TestData, serde_json::Error>;
+
+            fn deserialize_message(payload: &Payload) -> Self::Output {
+                serde_json::from_slice(&payload.data)
+            }
+        }
+        let _result = log::set_logger(&MULTI_LOGGER);
+        log::set_max_level(LevelFilter::Debug);
+        log::info!("starting schema test");
+        let addr = "pulsar://127.0.0.1:6650";
+        let topic = format!("schema_{}", rand::random::<u16>());
+        let client: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await.unwrap();
+
+        let json_schema = serde_json::json!({
+            "$id": "https://example.com/test.schema.json",
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "title": "TestRecord",
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+              },
+              "age": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+        });
+
+        let schema_data = serde_json::to_vec(&json_schema).unwrap();
+
+        let mut producer = client
+            .producer()
+            .with_topic(&topic)
+            .with_name("schema producer")
+            .with_options(producer::ProducerOptions {
+                schema: Some(proto::Schema {
+                    r#type: proto::schema::Type::Json as i32,
+                    schema_data,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .build()
+            .await
+            .unwrap();
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+
+        let join_handle = tokio::spawn(async move {
+            let mut consumer: Consumer<TestData, _> = client
+                .consumer()
+                .with_consumer_name("seek_single_test")
+                .with_subscription("seek_single_test")
+                .with_subscription_type(SubType::Shared)
+                .with_topic(&topic)
+                .build()
+                .await
+                .unwrap();
+            log::info!("built the consumer");
+            tx.send(true).unwrap();
+
+            if let Some(msg) = consumer.try_next().await.unwrap() {
+                let schema_version = msg.payload.metadata.schema_version.clone();
+                let schema = consumer
+                    .get_schema(&topic, schema_version)
+                    .await
+                    .unwrap()
+                    .unwrap();
+
+                assert_eq!(schema.r#type, proto::schema::Type::Json as i32);
+                let schema_resolved: serde_json::Value =
+                    serde_json::from_slice(&schema.schema_data).unwrap();
+                assert_eq!(json_schema, schema_resolved);
+
+                consumer.ack(&msg).await.unwrap();
+            }
+        });
+
+        let consumer_created = rx.await.unwrap();
+        assert!(consumer_created);
+
+        producer
+            .send(TestData {
+                age: 30,
+                name: "test".to_string(),
+            })
+            .await
+            .unwrap()
+            .await
+            .unwrap();
+
+        join_handle.await.unwrap();
     }
 }
