@@ -30,9 +30,10 @@ pub struct MultiTopicConsumer<T: DeserializeMessage, Exe: Executor> {
     pub(super) topics: VecDeque<String>,
     pub(super) existing_topics: VecDeque<String>,
     #[allow(clippy::type_complexity)]
-    pub(super) new_consumers:
-        Option<Pin<Box<dyn Future<Output = Result<Vec<TopicConsumer<T, Exe>>, Error>> + Send>>>,
-    pub(super) refresh: Pin<Box<dyn Stream<Item = ()> + Send>>,
+    pub(super) new_consumers: Option<
+        Pin<Box<dyn Future<Output = Result<Vec<TopicConsumer<T, Exe>>, Error>> + Send + Sync>>,
+    >,
+    pub(super) refresh: Pin<Box<dyn Stream<Item = ()> + Send + Sync>>,
     pub(super) config: ConsumerConfig,
     // Stats on disconnected consumers to keep metrics correct
     pub(super) disc_messages_received: u64,

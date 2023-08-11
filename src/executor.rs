@@ -252,7 +252,7 @@ pub enum Delay {
     Tokio(tokio::time::Sleep),
     /// wrapper around async-std's `Delay`
     #[cfg(any(feature = "async-std-runtime", features = "async-std-rustls-runtime"))]
-    AsyncStd(Pin<Box<dyn Future<Output = ()> + Send>>),
+    AsyncStd(Pin<Box<dyn Future<Output = ()> + Send + Sync>>),
 }
 
 impl Future for Delay {

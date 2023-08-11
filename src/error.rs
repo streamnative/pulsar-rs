@@ -406,7 +406,7 @@ impl std::error::Error for ServiceDiscoveryError {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum AuthenticationError {
     Custom(String),
 }
