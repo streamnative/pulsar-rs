@@ -18,14 +18,11 @@ keywords = ["pulsar", "api", "client"]
 [dependencies]
 bytes = "^1.4.0"
 crc = "^3.0.1"
-nom = { version = "^7.1.3", default-features = false, features = ["alloc"] }
+nom = { version="^7.1.3", default-features=false, features=["alloc"] }
 prost = "^0.11.9"
 prost-derive = "^0.11.9"
 rand = "^0.8.5"
-chrono = { version = "^0.4.26", default-features = false, features = [
-    "clock",
-    "std",
-] }
+chrono = { version = "^0.4.26", default-features = false, features = ["clock", "std"] }
 futures-timer = "^3.0.2"
 log = "^0.4.19"
 url = "^2.4.0"
@@ -37,18 +34,11 @@ native-tls = { version = "^0.2.11", optional = true }
 rustls = { version = "^0.21.5", optional = true }
 webpki-roots = { version = "^0.25.1", optional = true }
 pem = "^3.0.0"
-tokio = { version = "^1.29.1", features = [
-    "rt",
-    "net",
-    "time",
-], optional = true }
+tokio = { version = "^1.29.1", features = ["rt", "net", "time"], optional = true }
 tokio-util = { version = "^0.7.8", features = ["codec"], optional = true }
 tokio-rustls = { version = "^0.24.1", optional = true }
 tokio-native-tls = { version = "^0.3.1", optional = true }
-async-std = { version = "^1.12.0", features = [
-    "attributes",
-    "unstable",
-], optional = true }
+async-std = { version = "^1.12.0", features = [ "attributes", "unstable" ], optional = true }
 asynchronous-codec = { version = "^0.6.2", optional = true }
 async-rustls = { version = "^0.4.0", optional = true }
 async-native-tls = { version = "^0.5.0", optional = true }
@@ -61,7 +51,7 @@ oauth2 = { version = "^4.4.1", optional = true }
 serde = { version = "^1.0.175", features = ["derive"], optional = true }
 serde_json = { version = "^1.0.103", optional = true }
 tracing = { version = "^0.1.37", optional = true }
-async-trait = "^0.1.68"
+async-trait = "^0.1.72"
 data-url = { version = "^0.3.0", optional = true }
 uuid = { version = "^1.4.1", features = ["v4", "fast-rng"] }
 
@@ -76,29 +66,12 @@ prost-build = "^0.11.9"
 protobuf-src = { version = "1.1.0", optional = true }
 
 [features]
-default = ["compression", "tokio-runtime", "async-std-runtime", "auth-oauth2"]
-compression = ["lz4", "flate2", "zstd", "snap"]
-tokio-runtime = ["tokio", "tokio-util", "native-tls", "tokio-native-tls"]
-tokio-rustls-runtime = [
-    "tokio",
-    "tokio-util",
-    "tokio-rustls",
-    "rustls",
-    "webpki-roots",
-]
-async-std-runtime = [
-    "async-std",
-    "asynchronous-codec",
-    "native-tls",
-    "async-native-tls",
-]
-async-std-rustls-runtime = [
-    "async-std",
-    "asynchronous-codec",
-    "async-rustls",
-    "rustls",
-    "webpki-roots",
-]
-auth-oauth2 = ["openidconnect", "oauth2", "serde", "serde_json", "data-url"]
+default = [ "compression", "tokio-runtime", "async-std-runtime", "auth-oauth2"]
+compression = [ "lz4", "flate2", "zstd", "snap" ]
+tokio-runtime = [ "tokio", "tokio-util", "native-tls", "tokio-native-tls" ]
+tokio-rustls-runtime = ["tokio", "tokio-util", "tokio-rustls", "rustls", "webpki-roots" ]
+async-std-runtime = [ "async-std", "asynchronous-codec", "native-tls", "async-native-tls" ]
+async-std-rustls-runtime = ["async-std", "asynchronous-codec", "async-rustls", "rustls", "webpki-roots" ]
+auth-oauth2 = [ "openidconnect", "oauth2", "serde", "serde_json", "data-url" ]
 telemetry = ["tracing"]
 protobuf-src = ["dep:protobuf-src"]
