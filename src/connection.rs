@@ -871,10 +871,11 @@ impl<Exe: Executor> Connection<Exe> {
         match auth {
             Some(m_auth) => {
                 let mut auth_guard = m_auth.lock().await;
-                Ok(Some(Authentication {
-                    name: auth_guard.auth_method_name(),
-                    data: auth_guard.auth_data().await?,
-                }))
+                let name = auth_guard.auth_method_name();
+                // wrap the future of auth_data() with Shared so that it implements Sync
+                let data_fut = auth_guard.auth_data().shared();
+                let data = data_fut.await?;
+                Ok(Some(Authentication { name, data }))
             }
             None => Ok(None),
         }
