@@ -160,9 +160,9 @@ extern crate prost_derive;
 #[macro_use]
 extern crate serde;
 
-#[cfg(all(features = "tokio-rustls-runtime", features = "tokio-runtime"))]
+#[cfg(all(feature = "tokio-rustls-runtime", feature = "tokio-runtime"))]
 compile_error!("You have selected both features \"tokio-rustls-runtime\" and \"tokio-runtime\" which are exclusive, please choose one of them");
-#[cfg(all(features = "async-std-rustls-runtime", features = "async-std-runtime"))]
+#[cfg(all(feature = "async-std-rustls-runtime", feature = "async-std-runtime"))]
 compile_error!("You have selected both features \"async-std-rustls-runtime\" and \"async-std-runtime\" which are exclusive, please choose one of them");
 
 pub use client::{DeserializeMessage, Pulsar, PulsarBuilder, SerializeMessage};
@@ -172,7 +172,7 @@ pub use connection_manager::{
 };
 pub use consumer::{Consumer, ConsumerBuilder, ConsumerOptions};
 pub use error::Error;
-#[cfg(any(feature = "async-std-runtime", features = "async-std-rustls-runtime"))]
+#[cfg(any(feature = "async-std-runtime", feature = "async-std-rustls-runtime"))]
 pub use executor::AsyncStdExecutor;
 pub use executor::Executor;
 #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
