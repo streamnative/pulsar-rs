@@ -78,11 +78,11 @@ impl Executor for TokioExecutor {
 }
 
 /// Wrapper for the async-std executor
-#[cfg(any(feature = "async-std-runtime", features = "async-std-rustls-runtime"))]
+#[cfg(any(feature = "async-std-runtime", feature = "async-std-rustls-runtime"))]
 #[derive(Clone, Debug)]
 pub struct AsyncStdExecutor;
 
-#[cfg(any(feature = "async-std-runtime", features = "async-std-rustls-runtime"))]
+#[cfg(any(feature = "async-std-runtime", feature = "async-std-rustls-runtime"))]
 impl Executor for AsyncStdExecutor {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn spawn(&self, f: Pin<Box<dyn Future<Output = ()> + Send>>) -> Result<(), ()> {
@@ -153,7 +153,7 @@ pub enum JoinHandle<T> {
     #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
     Tokio(tokio::task::JoinHandle<T>),
     /// wrapper for async-std's `JoinHandle`
-    #[cfg(any(feature = "async-std-runtime", features = "async-std-rustls-runtime"))]
+    #[cfg(any(feature = "async-std-runtime", feature = "async-std-rustls-runtime"))]
     AsyncStd(async_std::task::JoinHandle<T>),
     // here to avoid a compilation error since T is not used
     #[cfg(all(
@@ -176,7 +176,7 @@ impl<T> Future for JoinHandle<T> {
                 Poll::Pending => Poll::Pending,
                 Poll::Ready(v) => Poll::Ready(v.ok()),
             },
-            #[cfg(any(feature = "async-std-runtime", features = "async-std-rustls-runtime"))]
+            #[cfg(any(feature = "async-std-runtime", feature = "async-std-rustls-runtime"))]
             JoinHandle::AsyncStd(j) => match Pin::new(j).poll(cx) {
                 Poll::Pending => Poll::Pending,
                 Poll::Ready(v) => Poll::Ready(Some(v)),
@@ -200,7 +200,7 @@ pub enum Interval {
     #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
     Tokio(tokio::time::Interval),
     /// wrapper for async-std's interval
-    #[cfg(any(feature = "async-std-runtime", features = "async-std-rustls-runtime"))]
+    #[cfg(any(feature = "async-std-runtime", feature = "async-std-rustls-runtime"))]
     AsyncStd(async_std::stream::Interval),
     #[cfg(all(
         not(feature = "tokio-runtime"),
@@ -226,7 +226,7 @@ impl Stream for Interval {
                     Poll::Pending => Poll::Pending,
                     Poll::Ready(_) => Poll::Ready(Some(())),
                 },
-                #[cfg(any(feature = "async-std-runtime", features = "async-std-rustls-runtime"))]
+                #[cfg(any(feature = "async-std-runtime", feature = "async-std-rustls-runtime"))]
                 Interval::AsyncStd(j) => match Pin::new_unchecked(j).poll_next(cx) {
                     Poll::Pending => Poll::Pending,
                     Poll::Ready(v) => Poll::Ready(v),
@@ -251,7 +251,7 @@ pub enum Delay {
     #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
     Tokio(tokio::time::Sleep),
     /// wrapper around async-std's `Delay`
-    #[cfg(any(feature = "async-std-runtime", features = "async-std-rustls-runtime"))]
+    #[cfg(any(feature = "async-std-runtime", feature = "async-std-rustls-runtime"))]
     AsyncStd(Pin<Box<dyn Future<Output = ()> + Send + Sync>>),
 }
 
@@ -267,7 +267,7 @@ impl Future for Delay {
                     Poll::Pending => Poll::Pending,
                     Poll::Ready(_) => Poll::Ready(()),
                 },
-                #[cfg(any(feature = "async-std-runtime", features = "async-std-rustls-runtime"))]
+                #[cfg(any(feature = "async-std-runtime", feature = "async-std-rustls-runtime"))]
                 Delay::AsyncStd(j) => match Pin::new_unchecked(j).poll(cx) {
                     Poll::Pending => Poll::Pending,
                     Poll::Ready(_) => Poll::Ready(()),
