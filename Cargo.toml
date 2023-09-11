@@ -66,7 +66,7 @@ prost-build = "^0.11.9"
 protobuf-src = { version = "1.1.0", optional = true }
 
 [features]
-default = [ "compression", "tokio-runtime", "async-std-runtime", "auth-oauth2"]
+default = [ "compression", "tokio-runtime", "async-std-runtime", "auth-oauth2" ]
 compression = [ "lz4", "flate2", "zstd", "snap" ]
 tokio-runtime = [ "tokio", "tokio-util", "native-tls", "tokio-native-tls" ]
 tokio-rustls-runtime = ["tokio", "tokio-util", "tokio-rustls", "rustls", "webpki-roots" ]

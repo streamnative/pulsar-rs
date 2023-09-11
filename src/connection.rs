@@ -882,6 +882,7 @@ impl<Exe: Executor> Connection<Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    #[allow(unused_variables)] // allow_insecure_connection and tls_hostname_verification_enabled are native-tls only
     async fn prepare_stream(
         connection_id: Uuid,
         address: SocketAddr,
