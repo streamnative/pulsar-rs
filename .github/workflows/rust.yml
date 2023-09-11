@@ -15,7 +15,9 @@ jobs:
       - name: Build
         run: cargo build --features protobuf-src
       - name: Check Clippy
-        run: cargo clippy --tests --all-features -- -D warnings
+        run: |
+          cargo clippy --tests --features telemetry,protobuf-src -- -D warnings
+          cargo clippy --tests --no-default-features --features compression,tokio-rustls-runtime,async-std-rustls-runtime,auth-oauth2,telemetry,protobuf-src -- -D warnings
       - name: Install nightly rustfmt
         run: rustup toolchain install nightly --component rustfmt
       - name: Check format
