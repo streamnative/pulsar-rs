@@ -965,7 +965,7 @@ impl<Exe: Executor> Connection<Exe> {
                         },
                     );
 
-                    root_store.add_server_trust_anchors(trust_anchors.into_iter());
+                    root_store.add_trust_anchors(trust_anchors.into_iter());
                     let config = rustls::ClientConfig::builder()
                         .with_safe_default_cipher_suites()
                         .with_safe_default_kx_groups()
@@ -1076,7 +1076,7 @@ impl<Exe: Executor> Connection<Exe> {
                         },
                     );
 
-                    root_store.add_server_trust_anchors(trust_anchors.into_iter());
+                    root_store.add_trust_anchors(trust_anchors.into_iter());
                     let config = rustls::ClientConfig::builder()
                         .with_safe_default_cipher_suites()
                         .with_safe_default_kx_groups()
