@@ -31,7 +31,7 @@ bit-vec = "^0.6.3"
 futures = "^0.3.28"
 futures-io = "^0.3.28"
 native-tls = { version = "^0.2.11", optional = true }
-rustls = { version = "^0.21.5", optional = true }
+rustls = { version = "^0.21.6", optional = true }
 webpki-roots = { version = "^0.25.1", optional = true }
 pem = "^3.0.0"
 tokio = { version = "^1.29.1", features = ["rt", "net", "time"], optional = true }
@@ -66,7 +66,7 @@ prost-build = "^0.11.9"
 protobuf-src = { version = "1.1.0", optional = true }
 
 [features]
-default = [ "compression", "tokio-runtime", "async-std-runtime", "auth-oauth2"]
+default = [ "compression", "tokio-runtime", "async-std-runtime", "auth-oauth2" ]
 compression = [ "lz4", "flate2", "zstd", "snap" ]
 tokio-runtime = [ "tokio", "tokio-util", "native-tls", "tokio-native-tls" ]
 tokio-rustls-runtime = ["tokio", "tokio-util", "tokio-rustls", "rustls", "webpki-roots" ]
