@@ -150,14 +150,13 @@ pub async fn retry_subscribe_consumer<Exe: Executor>(
 
 pub async fn retry_create_producer<Exe: Executor>(
     client: &Pulsar<Exe>,
-    connection: &mut Arc<Connection<Exe>>,
     mut addr: BrokerAddress,
     topic: &String,
     producer_id: u64,
     producer_name: Option<String>,
     options: &ProducerOptions,
-) -> Result<String, Error> {
-    *connection = client.manager.get_connection(&addr).await?;
+) -> Result<(Arc<Connection<Exe>>, String), Error> {
+    let mut connection = client.manager.get_connection(&addr).await?;
     let mut current_retries = 0u32;
     let start = Instant::now();
 
@@ -199,12 +198,12 @@ pub async fn retry_create_producer<Exe: Executor>(
                         current_retries + 1,
                     );
                 }
-                return Ok(partial_success.producer_name);
+                return Ok((connection, partial_success.producer_name));
             }
             Err(err) => {
                 handle_retry_error(
                     client,
-                    connection,
+                    &mut connection,
                     &mut addr,
                     topic,
                     "TopicProducer::create",

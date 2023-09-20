@@ -4,7 +4,7 @@ use std::{
     io::Write,
     pin::Pin,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -336,11 +336,8 @@ impl<Exe: Executor> Producer<Exe> {
     /// # }
     /// ```
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub async fn send<T: SerializeMessage + Sized>(
-        &mut self,
-        message: T,
-    ) -> Result<SendFuture, Error> {
-        match &mut self.inner {
+    pub async fn send<T: SerializeMessage + Sized>(&self, message: T) -> Result<SendFuture, Error> {
+        match &self.inner {
             ProducerInner::Single(p) => p.send(message).await,
             ProducerInner::Partitioned(p) => p.next().send(message).await,
         }
@@ -407,23 +404,30 @@ enum ProducerInner<Exe: Executor> {
 
 struct PartitionedProducer<Exe: Executor> {
     // Guaranteed to be non-empty
-    producers: VecDeque<TopicProducer<Exe>>,
+    producers: Vec<TopicProducer<Exe>>,
+    index: AtomicUsize,
     topic: String,
     options: ProducerOptions,
 }
 
 impl<Exe: Executor> PartitionedProducer<Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub fn next(&mut self) -> &mut TopicProducer<Exe> {
-        self.producers.rotate_left(1);
-        self.producers.front_mut().unwrap()
+    pub fn next(&self) -> &TopicProducer<Exe> {
+        let producer_num = self.producers.len();
+        let index = self
+            .index
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |old| {
+                Some((old + 1) % producer_num)
+            })
+            .unwrap();
+        &self.producers[index]
     }
 }
 
 /// a producer is used to publish messages on a topic
 struct TopicProducer<Exe: Executor> {
     client: Pulsar<Exe>,
-    connection: Arc<Connection<Exe>>,
+    connection: Arc<Mutex<Arc<Connection<Exe>>>>,
     id: ProducerId,
     name: ProducerName,
     topic: String,
@@ -454,18 +458,9 @@ impl<Exe: Executor> TopicProducer<Exe> {
         let batch_size = options.batch_size;
         let batch_byte_size = options.batch_byte_size;
         let compression = options.compression.clone();
-        let mut connection = client.manager.get_connection(&addr).await?;
 
-        let producer_name = retry_create_producer(
-            &client,
-            &mut connection,
-            addr,
-            &topic,
-            producer_id,
-            name,
-            &options,
-        )
-        .await?;
+        let (connection, producer_name) =
+            retry_create_producer(&client, addr, &topic, producer_id, name, &options).await?;
 
         let batch = batch_size
             .map(|batch_size| Batch::new(batch_size, batch_byte_size))
@@ -473,7 +468,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
 
         Ok(TopicProducer {
             client,
-            connection,
+            connection: Arc::new(Mutex::new(connection)),
             id: producer_id,
             name: producer_name,
             topic,
@@ -496,12 +491,12 @@ impl<Exe: Executor> TopicProducer<Exe> {
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn check_connection(&self) -> Result<(), Error> {
-        self.connection.sender().send_ping().await?;
+        self.connection.lock().await.sender().send_ping().await?;
         Ok(())
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    async fn send<T: SerializeMessage + Sized>(&mut self, message: T) -> Result<SendFuture, Error> {
+    async fn send<T: SerializeMessage + Sized>(&self, message: T) -> Result<SendFuture, Error> {
         match T::serialize_message(message) {
             Ok(message) => self.send_raw(message.into()).await,
             Err(e) => Err(e),
@@ -553,7 +548,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub(crate) async fn send_raw(&mut self, message: ProducerMessage) -> Result<SendFuture, Error> {
+    pub(crate) async fn send_raw(&self, message: ProducerMessage) -> Result<SendFuture, Error> {
         let (tx, rx) = oneshot::channel();
         match self.batch.as_ref() {
             None => {
@@ -605,7 +600,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn send_compress(
-        &mut self,
+        &self,
         mut message: ProducerMessage,
     ) -> Result<proto::CommandSendReceipt, Error> {
         let compressed_message = match self.compression.clone() {
@@ -672,13 +667,15 @@ impl<Exe: Executor> TopicProducer<Exe> {
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn send_inner(
-        &mut self,
+        &self,
         message: ProducerMessage,
     ) -> Result<proto::CommandSendReceipt, Error> {
         loop {
             let msg = message.clone();
             match self
                 .connection
+                .lock()
+                .await
                 .sender()
                 .send(self.id, self.name.clone(), self.message_id.get(), msg)
                 .await
@@ -699,7 +696,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
 
             error!(
                 "send_inner: connection {} disconnected",
-                self.connection.id()
+                self.connection.lock().await.id()
             );
 
             self.reconnect().await?;
@@ -707,41 +704,55 @@ impl<Exe: Executor> TopicProducer<Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    async fn reconnect(&mut self) -> Result<(), Error> {
-        debug!("reconnecting producer for topic: {}", self.topic);
+    async fn reconnect(&self) -> Result<(), Error> {
+        {
+            let mut conn = self.connection.lock().await;
 
-        if let Err(e) = self.connection.sender().close_producer(self.id).await {
-            error!(
-                "could not close producer {:?}({}) for topic {}: {:?}",
-                self.name, self.id, self.topic, e
-            );
+            debug!("reconnecting producer for topic: {}", self.topic);
+
+            if let Err(e) = conn.sender().close_producer(self.id).await {
+                error!(
+                    "could not close producer {:?}({}) for topic {}: {:?}",
+                    self.name, self.id, self.topic, e
+                );
+            }
+            let broker_address = self.client.lookup_topic(&self.topic).await?;
+
+            // should we ignore, test or use producer_name?
+            let (connection, _producer_name) = retry_create_producer(
+                &self.client,
+                broker_address,
+                &self.topic,
+                self.id,
+                Some(self.name.clone()),
+                &self.options,
+            )
+            .await?;
+
+            *conn = connection;
         }
-        let broker_address = self.client.lookup_topic(&self.topic).await?;
 
-        // should we ignore, test or use producer_name?
-        let _producer_name = retry_create_producer(
-            &self.client,
-            &mut self.connection,
-            broker_address,
-            &self.topic,
-            self.id,
-            Some(self.name.clone()),
-            &self.options,
-        )
-        .await?;
-
-        self.batch = self
-            .options
-            .batch_size
-            .map(|batch_size| Batch::new(batch_size, self.options.batch_byte_size))
-            .map(Mutex::new);
+        if let Some(batch) = &self.batch {
+            // does this drop the messages in the old batch?
+            let mut batch = batch.lock().await;
+            *batch = self
+                .options
+                .batch_size
+                .map(|batch_size| Batch::new(batch_size, self.options.batch_byte_size))
+                .unwrap();
+        }
 
         Ok(())
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn close(&self) -> Result<(), Error> {
-        self.connection.sender().close_producer(self.id).await?;
+        self.connection
+            .lock()
+            .await
+            .sender()
+            .close_producer(self.id)
+            .await?;
         Ok(())
     }
 }
@@ -753,7 +764,7 @@ impl<Exe: Executor> std::ops::Drop for TopicProducer<Exe> {
         let name = self.name.clone();
         let topic = self.topic.clone();
         let _ = self.client.executor.spawn(Box::pin(async move {
-            if let Err(e) = conn.sender().close_producer(id).await {
+            if let Err(e) = conn.lock().await.sender().close_producer(id).await {
                 error!(
                     "could not close producer {:?}({}) for topic {}: {:?}",
                     name, id, topic, e
@@ -845,11 +856,12 @@ impl<Exe: Executor> ProducerBuilder<Exe> {
             }
             1 => ProducerInner::Single(producers.into_iter().next().unwrap()),
             _ => {
-                let mut producers = VecDeque::from(producers);
+                // let mut producers = VecDeque::from(producers);
                 // write to topic-1 first
-                producers.rotate_right(1);
+                // producers.rotate_right(1);
                 ProducerInner::Partitioned(PartitionedProducer {
                     producers,
+                    index: AtomicUsize::new(0),
                     topic,
                     options,
                 })
