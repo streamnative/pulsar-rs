@@ -484,34 +484,30 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             }
         };
 
-        match payload.metadata.num_messages_in_batch {
-            Some(_) => {
-                let it = BatchedMessageIterator::new(message.message_id, payload)?;
-                for (id, payload) in it {
-                    // TODO: Dead letter policy for batched messages
-                    self.send_to_consumer(id, payload).await?;
-                }
-            }
-            None => match (message.redelivery_count, self.dead_letter_policy.as_ref()) {
-                (Some(redelivery_count), Some(dead_letter_policy)) => {
+        let payloads = if payload.metadata.num_messages_in_batch.is_some() {
+            BatchedMessageIterator::new(message.message_id, payload)?.collect()
+        } else {
+            vec![(message.message_id, payload)]
+        };
+        for (message_id, payload) in payloads {
+            match (message.redelivery_count, &self.dead_letter_policy) {
+                (Some(redelivery_count), Some(dead_letter_policy))
+                    if redelivery_count as usize >= dead_letter_policy.max_redeliver_count =>
+                {
                     // Send message to Dead Letter Topic and ack message in original topic
-                    if redelivery_count as usize >= dead_letter_policy.max_redeliver_count {
-                        self.client
-                            .send(&dead_letter_policy.dead_letter_topic, payload.data)
-                            .await?
-                            .await
-                            .map_err(|e| {
-                                error!("One shot cancelled {:?}", e);
-                                Error::Custom("DLQ send error".to_string())
-                            })?;
+                    self.client
+                        .send(&dead_letter_policy.dead_letter_topic, payload.data)
+                        .await?
+                        .await
+                        .map_err(|e| {
+                            error!("One shot cancelled {:?}", e);
+                            Error::Custom("DLQ send error".to_string())
+                        })?;
 
-                        self.ack(message.message_id, false);
-                    } else {
-                        self.send_to_consumer(message.message_id, payload).await?
-                    }
+                    self.ack(message_id, false);
                 }
-                _ => self.send_to_consumer(message.message_id, payload).await?,
-            },
+                _ => self.send_to_consumer(message_id, payload).await?,
+            }
         }
         Ok(())
     }
