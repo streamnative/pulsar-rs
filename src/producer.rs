@@ -538,7 +538,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
                 };
 
                 trace!("sending a batched message of size {}", message_count);
-                let send_receipt = self.send_compress(message).await.map_err(Arc::new);
+                let send_receipt = self.send_compress(message).await?.await.map_err(Arc::new);
                 for resolver in receipts {
                     let _ = resolver.send(
                         send_receipt
@@ -557,8 +557,13 @@ impl<Exe: Executor> TopicProducer<Exe> {
         let (tx, rx) = oneshot::channel();
         match self.batch.as_ref() {
             None => {
-                let receipt = self.send_compress(message).await?;
-                let _ = tx.send(Ok(receipt));
+                let fut = self.send_compress(message).await?;
+                self.client
+                    .executor
+                    .spawn(Box::pin(async move {
+                        let _ = tx.send(fut.await);
+                    }))
+                    .map_err(|_| Error::Executor)?;
                 Ok(SendFuture(rx))
             }
             Some(batch) => {
@@ -586,16 +591,18 @@ impl<Exe: Executor> TopicProducer<Exe> {
                         ..Default::default()
                     };
 
-                    let send_receipt = self.send_compress(message).await.map_err(Arc::new);
-
                     trace!("sending a batched message of size {}", counter);
-                    for tx in receipts.drain(..) {
-                        let _ = tx.send(
-                            send_receipt
-                                .clone()
-                                .map_err(|e| ProducerError::Batch(e).into()),
-                        );
-                    }
+                    let receipt_fut = self.send_compress(message).await?;
+                    self.client
+                        .executor
+                        .spawn(Box::pin(async move {
+                            let res = receipt_fut.await.map_err(Arc::new);
+                            for tx in receipts.drain(..) {
+                                let _ = tx
+                                    .send(res.clone().map_err(|e| ProducerError::Batch(e).into()));
+                            }
+                        }))
+                        .map_err(|_| Error::Executor)?;
                 }
 
                 Ok(SendFuture(rx))
@@ -607,7 +614,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
     async fn send_compress(
         &mut self,
         mut message: ProducerMessage,
-    ) -> Result<proto::CommandSendReceipt, Error> {
+    ) -> Result<impl Future<Output = Result<CommandSendReceipt, Error>>, Error> {
         let compressed_message = match self.compression.clone() {
             None | Some(Compression::None) => message,
             #[cfg(feature = "lz4")]
@@ -674,16 +681,25 @@ impl<Exe: Executor> TopicProducer<Exe> {
     async fn send_inner(
         &mut self,
         message: ProducerMessage,
-    ) -> Result<proto::CommandSendReceipt, Error> {
+    ) -> Result<impl Future<Output = Result<CommandSendReceipt, Error>>, Error> {
         loop {
             let msg = message.clone();
-            match self
-                .connection
-                .sender()
-                .send(self.id, self.name.clone(), self.message_id.get(), msg)
-                .await
-            {
-                Ok(receipt) => return Ok(receipt),
+            match self.connection.sender().send(
+                self.id,
+                self.name.clone(),
+                self.message_id.get(),
+                msg,
+            ) {
+                Ok(fut) => {
+                    let fut = async move {
+                        let res = fut.await;
+                        res.map_err(|e| {
+                            error!("wait send receipt got error: {:?}", e);
+                            Error::Producer(ProducerError::Connection(e))
+                        })
+                    };
+                    return Ok(fut);
+                }
                 Err(ConnectionError::Disconnected) => {}
                 Err(ConnectionError::Io(e)) => {
                     if e.kind() != std::io::ErrorKind::TimedOut {
