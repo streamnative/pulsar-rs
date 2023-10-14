@@ -116,13 +116,32 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
             } = convert_lookup_response(&response)?;
             is_authoritative = authoritative;
 
-            // use the TLS connection if available
-            let connection_url = if let Some(u) = &broker_url_tls {
-                u.clone()
-            } else if let Some(u) = &broker_url {
-                u.clone()
-            } else {
-                return Err(ServiceDiscoveryError::NotFound);
+            // Use broker url with the same schema of manager.url
+            let (connection_url, broker_url) = match self.manager.url.scheme() {
+                "pulsar+ssl" => {
+                    if let Some(u) = &broker_url_tls {
+                        (
+                            u.clone(),
+                            format!("{}:{}", u.host_str().unwrap(), u.port().unwrap_or(6651)),
+                        )
+                    } else {
+                        return Err(ServiceDiscoveryError::NotFound);
+                    }
+                }
+                "pulsar" => {
+                    if let Some(u) = &broker_url {
+                        (
+                            u.clone(),
+                            format!("{}:{}", u.host_str().unwrap(), u.port().unwrap_or(6650)),
+                        )
+                    } else {
+                        return Err(ServiceDiscoveryError::NotFound);
+                    }
+                }
+                other => {
+                    error!("invalid scheme: {}", other);
+                    return Err(ServiceDiscoveryError::NotFound);
+                }
             };
 
             // if going through a proxy, we use the base URL
@@ -130,19 +149,6 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
                 base_url.clone()
             } else {
                 connection_url.clone()
-            };
-
-            let broker_url = if let Some(u) = broker_url_tls {
-                format!("{}:{}", u.host_str().unwrap(), u.port().unwrap_or(6651))
-            } else if let Some(u) = broker_url {
-                format!("{}:{}", u.host_str().unwrap(), u.port().unwrap_or(6650))
-            } else {
-                error!(
-                    "tried to lookup a topic but error occured[{:?}]: {:?}",
-                    line!(),
-                    ServiceDiscoveryError::NotFound
-                );
-                return Err(ServiceDiscoveryError::NotFound);
             };
 
             broker_address = BrokerAddress {
