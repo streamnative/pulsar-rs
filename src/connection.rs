@@ -323,20 +323,22 @@ impl<Exe: Executor> ConnectionSender<Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub(crate) async fn send(
+    pub(crate) fn send(
         &self,
         producer_id: u64,
         producer_name: String,
         sequence_id: u64,
         message: producer::ProducerMessage,
-    ) -> Result<proto::CommandSendReceipt, ConnectionError> {
+    ) -> Result<
+        impl Future<Output = Result<proto::CommandSendReceipt, ConnectionError>>,
+        ConnectionError,
+    > {
         let key = RequestKey::ProducerSend {
             producer_id,
             sequence_id,
         };
         let msg = messages::send(producer_id, producer_name, sequence_id, message);
-        self.send_message(msg, key, |resp| resp.command.send_receipt)
-            .await
+        self.send_message_non_blocking(msg, key, |resp| resp.command.send_receipt)
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
@@ -623,17 +625,31 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         extract: F,
     ) -> Result<R, ConnectionError>
     where
-        F: FnOnce(Message) -> Option<R>,
+        F: FnOnce(Message) -> Option<R> + 'static,
+    {
+        self.send_message_non_blocking(msg, key, extract)?.await
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    fn send_message_non_blocking<R: Debug, F>(
+        &self,
+        msg: Message,
+        key: RequestKey,
+        extract: F,
+    ) -> Result<impl Future<Output = Result<R, ConnectionError>>, ConnectionError>
+    where
+        F: FnOnce(Message) -> Option<R> + 'static,
     {
         let (resolver, response) = oneshot::channel();
         trace!("sending message(key = {:?}): {:?}", key, msg);
 
         let k = key.clone();
-        let response = async {
+        let error = self.error.clone();
+        let response = async move {
             response
                 .await
                 .map_err(|oneshot::Canceled| {
-                    self.error.set(ConnectionError::Disconnected);
+                    error.set(ConnectionError::Disconnected);
                     ConnectionError::Disconnected
                 })
                 .map(move |message: Message| {
@@ -648,36 +664,41 @@ impl<Exe: Executor> ConnectionSender<Exe> {
             self.tx.unbounded_send(msg),
         ) {
             (Ok(_), Ok(_)) => {
+                let connection_id = self.connection_id;
+                let error = self.error.clone();
                 let delay_f = self.executor.delay(self.operation_timeout);
-                pin_mut!(response);
-                pin_mut!(delay_f);
+                let fut = async move {
+                    pin_mut!(response);
+                    pin_mut!(delay_f);
+                    match select(response, delay_f).await {
+                        Either::Left((res, _)) => {
+                            // println!("recv msg: {:?}", res);
+                            res
+                        }
+                        Either::Right(_) => {
+                            warn!(
+                                "connection {} timedout sending message to the Pulsar server",
+                                connection_id
+                            );
+                            error.set(ConnectionError::Io(std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                format!(
+                                    " connection {} timedout sending message to the Pulsar server",
+                                    connection_id
+                                ),
+                            )));
+                            Err(ConnectionError::Io(std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                format!(
+                                    " connection {} timedout sending message to the Pulsar server",
+                                    connection_id
+                                ),
+                            )))
+                        }
+                    }
+                };
 
-                match select(response, delay_f).await {
-                    Either::Left((res, _)) => {
-                        // println!("recv msg: {:?}", res);
-                        res
-                    }
-                    Either::Right(_) => {
-                        warn!(
-                            "connection {} timedout sending message to the Pulsar server",
-                            self.connection_id
-                        );
-                        self.error.set(ConnectionError::Io(std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            format!(
-                                " connection {} timedout sending message to the Pulsar server",
-                                self.connection_id
-                            ),
-                        )));
-                        Err(ConnectionError::Io(std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            format!(
-                                " connection {} timedout sending message to the Pulsar server",
-                                self.connection_id
-                            ),
-                        )))
-                    }
-                }
+                Ok(fut)
             }
             _ => {
                 warn!(
