@@ -117,7 +117,7 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
             is_authoritative = authoritative;
 
             // Use broker url with the same schema of manager.url
-            let (connection_url, broker_url) = match self.manager.url.scheme() {
+            let (connection_url, broker_url) = match base_url.scheme() {
                 "pulsar+ssl" => {
                     if let Some(u) = &broker_url_tls {
                         (
