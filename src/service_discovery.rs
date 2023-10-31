@@ -116,32 +116,27 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
             } = convert_lookup_response(&response)?;
             is_authoritative = authoritative;
 
-            // Use broker url with the same schema of manager.url
-            let (connection_url, broker_url) = match base_url.scheme() {
-                "pulsar+ssl" => {
-                    if let Some(u) = &broker_url_tls {
-                        (
-                            u.clone(),
-                            format!("{}:{}", u.host_str().unwrap(), u.port().unwrap_or(6651)),
-                        )
-                    } else {
-                        return Err(ServiceDiscoveryError::NotFound);
-                    }
-                }
-                "pulsar" => {
-                    if let Some(u) = &broker_url {
-                        (
-                            u.clone(),
-                            format!("{}:{}", u.host_str().unwrap(), u.port().unwrap_or(6650)),
-                        )
-                    } else {
-                        return Err(ServiceDiscoveryError::NotFound);
-                    }
-                }
+            // Use broker url with the same schema of url in setting
+            let (broker_url_maybe_none, broker_port) = match base_url.scheme() {
+                "pulsar+ssl" => (&broker_url_tls, 6651),
+                "pulsar" => (&broker_url, 6650),
                 other => {
                     error!("invalid scheme: {}", other);
                     return Err(ServiceDiscoveryError::NotFound);
                 }
+            };
+
+            let (connection_url, broker_url) = if let Some(u) = broker_url_maybe_none {
+                (
+                    u.clone(),
+                    format!(
+                        "{}:{}",
+                        u.host_str().unwrap(),
+                        u.port().unwrap_or(broker_port)
+                    ),
+                )
+            } else {
+                return Err(ServiceDiscoveryError::NotFound);
             };
 
             // if going through a proxy, we use the base URL
