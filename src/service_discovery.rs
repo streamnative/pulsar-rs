@@ -116,11 +116,25 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
             } = convert_lookup_response(&response)?;
             is_authoritative = authoritative;
 
-            // use the TLS connection if available
-            let connection_url = if let Some(u) = &broker_url_tls {
-                u.clone()
-            } else if let Some(u) = &broker_url {
-                u.clone()
+            // Use broker url with the same schema of url in setting
+            let (broker_url_maybe_none, broker_port) = match base_url.scheme() {
+                "pulsar+ssl" => (&broker_url_tls, 6651),
+                "pulsar" => (&broker_url, 6650),
+                other => {
+                    error!("invalid scheme: {}", other);
+                    return Err(ServiceDiscoveryError::NotFound);
+                }
+            };
+
+            let (connection_url, broker_url) = if let Some(u) = broker_url_maybe_none {
+                (
+                    u.clone(),
+                    format!(
+                        "{}:{}",
+                        u.host_str().unwrap(),
+                        u.port().unwrap_or(broker_port)
+                    ),
+                )
             } else {
                 return Err(ServiceDiscoveryError::NotFound);
             };
@@ -130,19 +144,6 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
                 base_url.clone()
             } else {
                 connection_url.clone()
-            };
-
-            let broker_url = if let Some(u) = broker_url_tls {
-                format!("{}:{}", u.host_str().unwrap(), u.port().unwrap_or(6651))
-            } else if let Some(u) = broker_url {
-                format!("{}:{}", u.host_str().unwrap(), u.port().unwrap_or(6650))
-            } else {
-                error!(
-                    "tried to lookup a topic but error occured[{:?}]: {:?}",
-                    line!(),
-                    ServiceDiscoveryError::NotFound
-                );
-                return Err(ServiceDiscoveryError::NotFound);
             };
 
             broker_address = BrokerAddress {
