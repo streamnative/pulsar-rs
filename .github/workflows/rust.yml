@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - uses: Swatinem/rust-cache@v1
+      - uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --features protobuf-src
       - name: Check Clippy
@@ -32,6 +32,6 @@ jobs:
       - name: Start Pulsar Standalone Container
         run: docker run --name pulsar -p 6650:6650 -p 8080:8080 -d -e GITHUB_ACTIONS=true -e CI=true streamnative/pulsar:${{ matrix.pulsar-version }} /pulsar/bin/pulsar standalone
       - uses: actions/checkout@v3
-      - uses: Swatinem/rust-cache@v1
+      - uses: Swatinem/rust-cache@v2
       - name: Run tests
         run: cargo test --features protobuf-src -- --nocapture
