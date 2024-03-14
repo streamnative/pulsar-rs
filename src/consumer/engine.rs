@@ -103,6 +103,9 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 let r = event_tx.send(mapper(Some(msg))).await;
                 if let Err(err) = r {
                     log::error!("Error sending event to channel - {err}");
+                    if err.is_disconnected() {
+                        break;
+                    }
                 }
             }
             let send_end_res = event_tx.send(mapper(None)).await;
