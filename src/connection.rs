@@ -1075,6 +1075,7 @@ impl<Exe: Executor> Connection<Exe> {
                 feature = "async-std-rustls-runtime",
                 not(feature = "async-std-runtime")
             ))]
+            #[allow(deprecated)]
             ExecutorKind::AsyncStd => {
                 if tls {
                     let stream = async_std::net::TcpStream::connect(&address).await?;
