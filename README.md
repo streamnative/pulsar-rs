@@ -41,7 +41,6 @@ Try out [examples](examples):
 - [@fantapsody](https://github.com/fantapsody)
 - [@freeznet](https://github.com/freeznet)
 - [@stearnsc](https://github.com/stearnsc)
-- [@tisonkun](https://github.com/tisonkun)
 
 ## Contribution
 
