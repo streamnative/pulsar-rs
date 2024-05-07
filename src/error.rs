@@ -81,6 +81,7 @@ impl std::error::Error for Error {
 #[derive(Debug)]
 pub enum ConnectionError {
     Io(io::Error),
+    SlowDown,
     Disconnected,
     PulsarError(Option<crate::message::proto::ServerError>, Option<String>),
     Unexpected(String),
@@ -155,11 +156,22 @@ impl From<AuthenticationError> for ConnectionError {
     }
 }
 
+impl<T> From<async_channel::TrySendError<T>> for ConnectionError {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    fn from(err: async_channel::TrySendError<T>) -> Self {
+        match err {
+            async_channel::TrySendError::Full(_) => ConnectionError::SlowDown,
+            async_channel::TrySendError::Closed(_) => ConnectionError::Disconnected,
+        }
+    }
+}
+
 impl fmt::Display for ConnectionError {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             ConnectionError::Io(e) => write!(f, "{e}"),
+            ConnectionError::SlowDown => write!(f, "SlowDown"),
             ConnectionError::Disconnected => write!(f, "Disconnected"),
             ConnectionError::PulsarError(e, s) => {
                 write!(f, "Server error ({:?}): {}", e, s.as_deref().unwrap_or(""))

@@ -99,7 +99,7 @@ impl crate::authentication::Authentication for Authentication {
 
 pub(crate) struct Receiver<S: Stream<Item = Result<Message, ConnectionError>>> {
     inbound: Pin<Box<S>>,
-    outbound: mpsc::UnboundedSender<Message>,
+    outbound: async_channel::Sender<Message>,
     error: SharedError,
     pending_requests: BTreeMap<RequestKey, oneshot::Sender<Message>>,
     consumers: BTreeMap<u64, mpsc::UnboundedSender<Message>>,
@@ -114,7 +114,7 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Receiver<S> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn new(
         inbound: S,
-        outbound: mpsc::UnboundedSender<Message>,
+        outbound: async_channel::Sender<Message>,
         error: SharedError,
         registrations: mpsc::UnboundedReceiver<Register>,
         shutdown: oneshot::Receiver<()>,
@@ -187,7 +187,9 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> 
                         command: BaseCommand { ping: Some(_), .. },
                         ..
                     } => {
-                        let _ = self.outbound.unbounded_send(messages::pong());
+                        if let Err(e) = self.outbound.try_send(messages::pong()) {
+                            error!("failed to send pong: {}", e);
+                        }
                     }
                     Message {
                         command: BaseCommand { pong: Some(_), .. },
@@ -289,7 +291,7 @@ impl SerialId {
 //#[derive(Clone)]
 pub struct ConnectionSender<Exe: Executor> {
     connection_id: Uuid,
-    tx: mpsc::UnboundedSender<Message>,
+    tx: async_channel::Sender<Message>,
     registrations: mpsc::UnboundedSender<Register>,
     receiver_shutdown: Option<oneshot::Sender<()>>,
     request_id: SerialId,
@@ -302,7 +304,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub(crate) fn new(
         connection_id: Uuid,
-        tx: mpsc::UnboundedSender<Message>,
+        tx: async_channel::Sender<Message>,
         registrations: mpsc::UnboundedSender<Register>,
         receiver_shutdown: oneshot::Sender<()>,
         request_id: SerialId,
@@ -349,9 +351,9 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         match (
             self.registrations
                 .unbounded_send(Register::Ping { resolver }),
-            self.tx.unbounded_send(messages::ping()),
+            self.tx.try_send(messages::ping())?,
         ) {
-            (Ok(_), Ok(_)) => {
+            (Ok(_), ()) => {
                 let delay_f = self.executor.delay(self.operation_timeout);
                 pin_mut!(response);
                 pin_mut!(delay_f);
@@ -526,8 +528,8 @@ impl<Exe: Executor> ConnectionSender<Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn send_flow(&self, consumer_id: u64, message_permits: u32) -> Result<(), ConnectionError> {
         self.tx
-            .unbounded_send(messages::flow(consumer_id, message_permits))
-            .map_err(|_| ConnectionError::Disconnected)
+            .try_send(messages::flow(consumer_id, message_permits))?;
+        Ok(())
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
@@ -538,8 +540,8 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         cumulative: bool,
     ) -> Result<(), ConnectionError> {
         self.tx
-            .unbounded_send(messages::ack(consumer_id, message_ids, cumulative))
-            .map_err(|_| ConnectionError::Disconnected)
+            .try_send(messages::ack(consumer_id, message_ids, cumulative))?;
+        Ok(())
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
@@ -549,11 +551,11 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         message_ids: Vec<proto::MessageIdData>,
     ) -> Result<(), ConnectionError> {
         self.tx
-            .unbounded_send(messages::redeliver_unacknowleged_messages(
+            .try_send(messages::redeliver_unacknowleged_messages(
                 consumer_id,
                 message_ids,
-            ))
-            .map_err(|_| ConnectionError::Disconnected)
+            ))?;
+        Ok(())
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
@@ -661,7 +663,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         match (
             self.registrations
                 .unbounded_send(Register::Request { key, resolver }),
-            self.tx.unbounded_send(msg),
+            self.tx.try_send(msg),
         ) {
             (Ok(_), Ok(_)) => {
                 let connection_id = self.connection_id;
@@ -700,6 +702,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
 
                 Ok(fut)
             }
+            (_, Err(e)) if e.is_full() => Err(ConnectionError::SlowDown),
             _ => {
                 warn!(
                     "connection {} disconnected sending message to the Pulsar server",
@@ -781,6 +784,7 @@ impl<Exe: Executor> Connection<Exe> {
         tls_hostname_verification_enabled: bool,
         connection_timeout: Duration,
         operation_timeout: Duration,
+        outbound_channel_size: usize,
         executor: Arc<Exe>,
     ) -> Result<Connection<Exe>, ConnectionError> {
         if url.scheme() != "pulsar" && url.scheme() != "pulsar+ssl" {
@@ -839,6 +843,7 @@ impl<Exe: Executor> Connection<Exe> {
                 tls_hostname_verification_enabled,
                 executor.clone(),
                 operation_timeout,
+                outbound_channel_size,
             );
             let delay_f = executor.delay(connection_timeout);
 
@@ -916,6 +921,7 @@ impl<Exe: Executor> Connection<Exe> {
         tls_hostname_verification_enabled: bool,
         executor: Arc<Exe>,
         operation_timeout: Duration,
+        outbound_channel_size: usize,
     ) -> Result<ConnectionSender<Exe>, ConnectionError> {
         match executor.kind() {
             #[cfg(feature = "tokio-runtime")]
@@ -945,6 +951,7 @@ impl<Exe: Executor> Connection<Exe> {
                         proxy_to_broker_url,
                         executor,
                         operation_timeout,
+                        outbound_channel_size,
                     )
                     .await
                 } else {
@@ -959,6 +966,7 @@ impl<Exe: Executor> Connection<Exe> {
                         proxy_to_broker_url,
                         executor,
                         operation_timeout,
+                        outbound_channel_size,
                     )
                     .await
                 }
@@ -1007,6 +1015,7 @@ impl<Exe: Executor> Connection<Exe> {
                         proxy_to_broker_url,
                         executor,
                         operation_timeout,
+                        outbound_channel_size,
                     )
                     .await
                 } else {
@@ -1021,6 +1030,7 @@ impl<Exe: Executor> Connection<Exe> {
                         proxy_to_broker_url,
                         executor,
                         operation_timeout,
+                        outbound_channel_size,
                     )
                     .await
                 }
@@ -1053,6 +1063,7 @@ impl<Exe: Executor> Connection<Exe> {
                         proxy_to_broker_url,
                         executor,
                         operation_timeout,
+                        outbound_channel_size,
                     )
                     .await
                 } else {
@@ -1067,6 +1078,7 @@ impl<Exe: Executor> Connection<Exe> {
                         proxy_to_broker_url,
                         executor,
                         operation_timeout,
+                        outbound_channel_size,
                     )
                     .await
                 }
@@ -1119,6 +1131,7 @@ impl<Exe: Executor> Connection<Exe> {
                         proxy_to_broker_url,
                         executor,
                         operation_timeout,
+                        outbound_channel_size,
                     )
                     .await
                 } else {
@@ -1133,6 +1146,7 @@ impl<Exe: Executor> Connection<Exe> {
                         proxy_to_broker_url,
                         executor,
                         operation_timeout,
+                        outbound_channel_size,
                     )
                     .await
                 }
@@ -1155,6 +1169,7 @@ impl<Exe: Executor> Connection<Exe> {
         proxy_to_broker_url: Option<String>,
         executor: Arc<Exe>,
         operation_timeout: Duration,
+        outbound_channel_size: usize,
     ) -> Result<ConnectionSender<Exe>, ConnectionError>
     where
         S: Stream<Item = Result<Message, ConnectionError>>,
@@ -1194,7 +1209,7 @@ impl<Exe: Executor> Connection<Exe> {
         }?;
 
         let (mut sink, stream) = stream.split();
-        let (tx, mut rx) = mpsc::unbounded();
+        let (tx, rx) = async_channel::bounded(outbound_channel_size);
         let (registrations_tx, registrations_rx) = mpsc::unbounded();
         let error = SharedError::new();
         let (receiver_shutdown_tx, receiver_shutdown_rx) = oneshot::channel();
@@ -1220,7 +1235,7 @@ impl<Exe: Executor> Connection<Exe> {
 
         let err = error.clone();
         let res = executor.spawn(Box::pin(async move {
-            while let Some(msg) = rx.next().await {
+            while let Ok(msg) = rx.recv().await {
                 // println!("real sent msg: {:?}", msg);
                 if let Err(e) = sink.send(msg).await {
                     err.set(e);
@@ -1236,7 +1251,7 @@ impl<Exe: Executor> Connection<Exe> {
         if auth.is_some() {
             let auth_challenge_res = executor.spawn({
                 let err = error.clone();
-                let mut tx = tx.clone();
+                let tx = tx.clone();
                 let auth = auth.clone();
                 Box::pin(async move {
                     while auth_challenge_rx.next().await.is_some() {
@@ -1796,7 +1811,7 @@ mod tests {
     #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
     async fn receiver_auth_challenge_test() {
         let (message_tx, message_rx) = mpsc::unbounded();
-        let (tx, _) = mpsc::unbounded();
+        let (tx, _) = async_channel::bounded(10);
         let (_registrations_tx, registrations_rx) = mpsc::unbounded();
         let error = SharedError::new();
         let (_receiver_shutdown_tx, receiver_shutdown_rx) = oneshot::channel();
@@ -1904,6 +1919,7 @@ mod tests {
             None,
             TokioExecutor.into(),
             Duration::from_secs(10),
+            100,
         )
         .await;
 

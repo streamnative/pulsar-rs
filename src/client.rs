@@ -179,17 +179,20 @@ impl<Exe: Executor> Pulsar<Exe> {
         connection_retry_parameters: Option<ConnectionRetryOptions>,
         operation_retry_parameters: Option<OperationRetryOptions>,
         tls_options: Option<TlsOptions>,
+        outbound_channel_size: Option<usize>,
         executor: Exe,
     ) -> Result<Self, Error> {
         let url: String = url.into();
         let executor = Arc::new(executor);
         let operation_retry_options = operation_retry_parameters.unwrap_or_default();
+        let outbound_channel_size = outbound_channel_size.unwrap_or(100);
         let manager = ConnectionManager::new(
             url,
             auth,
             connection_retry_parameters,
             operation_retry_options.clone(),
             tls_options,
+            outbound_channel_size,
             executor.clone(),
         )
         .await?;
@@ -252,6 +255,7 @@ impl<Exe: Executor> Pulsar<Exe> {
             connection_retry_options: None,
             operation_retry_options: None,
             tls_options: None,
+            outbound_channel_size: None,
             executor,
         }
     }
@@ -452,6 +456,7 @@ pub struct PulsarBuilder<Exe: Executor> {
     connection_retry_options: Option<ConnectionRetryOptions>,
     operation_retry_options: Option<OperationRetryOptions>,
     tls_options: Option<TlsOptions>,
+    outbound_channel_size: Option<usize>,
     executor: Exe,
 }
 
@@ -549,6 +554,12 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
         Ok(self.with_certificate_chain(v))
     }
 
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn with_outbound_channel_size(mut self, size: usize) -> Result<Self, std::io::Error> {
+        self.outbound_channel_size = Some(size);
+        Ok(self)
+    }
+
     /// creates the Pulsar client and connects it
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn build(self) -> Result<Pulsar<Exe>, Error> {
@@ -558,6 +569,7 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
             connection_retry_options,
             operation_retry_options,
             tls_options,
+            outbound_channel_size,
             executor,
         } = self;
 
@@ -567,6 +579,7 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
             connection_retry_options,
             operation_retry_options,
             tls_options,
+            outbound_channel_size,
             executor,
         )
         .await
