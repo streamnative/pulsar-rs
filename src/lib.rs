@@ -337,7 +337,7 @@ mod tests {
                 data: "data".to_string(),
                 id,
             };
-            sends.push(producer.send(&message).await.unwrap());
+            sends.push(producer.send_non_blocking(&message).await.unwrap());
         }
         try_join_all(sends).await.unwrap();
 
@@ -536,13 +536,13 @@ mod tests {
 
         let mut send_receipts = Vec::new();
         for i in 0..4 {
-            send_receipts.push(producer.send(i.to_string()).await.unwrap());
+            send_receipts.push(producer.send_non_blocking(i.to_string()).await.unwrap());
         }
         assert!(timeout(Duration::from_millis(100), consumer.next())
             .await
             .is_err());
 
-        send_receipts.push(producer.send(5.to_string()).await.unwrap());
+        send_receipts.push(producer.send_non_blocking(5.to_string()).await.unwrap());
 
         timeout(Duration::from_millis(100), try_join_all(send_receipts))
             .await
@@ -565,7 +565,7 @@ mod tests {
         assert_eq!(count, 5);
         let mut send_receipts = Vec::new();
         for i in 5..9 {
-            send_receipts.push(producer.send(i.to_string()).await.unwrap());
+            send_receipts.push(producer.send_non_blocking(i.to_string()).await.unwrap());
         }
         producer.send_batch().await.unwrap();
         timeout(Duration::from_millis(100), try_join_all(send_receipts))

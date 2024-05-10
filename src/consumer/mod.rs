@@ -1120,8 +1120,6 @@ mod tests {
                 name: "test".to_string(),
             })
             .await
-            .unwrap()
-            .await
             .unwrap();
 
         join_handle.await.unwrap();

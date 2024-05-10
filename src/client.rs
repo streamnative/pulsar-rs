@@ -591,7 +591,7 @@ async fn run_producer<Exe: Executor>(
         resolver,
     }) = messages.next().await
     {
-        match producer.send(topic, payload).await {
+        match producer.send_non_blocking(topic, payload).await {
             Ok(send_f) => {
                 let delay_f = client
                     .executor

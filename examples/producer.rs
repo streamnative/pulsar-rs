@@ -70,7 +70,6 @@ async fn main() -> Result<(), pulsar::Error> {
             .send(TestData {
                 data: "data".to_string(),
             })
-            .await?
             .await
             .unwrap();
 

@@ -59,8 +59,6 @@ async fn main() -> Result<(), pulsar::Error> {
                     data: "data".to_string(),
                 })
                 .await
-                .unwrap()
-                .await
                 .unwrap();
             counter += 1;
             if counter % 1000 == 0 {
