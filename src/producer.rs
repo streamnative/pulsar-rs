@@ -162,8 +162,10 @@ pub struct ProducerOptions {
 /// # let message = "data".to_owned();
 /// let pulsar: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await?;
 /// let mut producer = pulsar.producer().with_name("name").build_multi_topic();
-/// let receipt_1 = producer.send(topic, &message).await?;
-/// let receipt_2 = producer.send(topic, &message).await?;
+/// let send_1 = producer.send(topic, &message).await?;
+/// let send_2 = producer.send(topic, &message).await?;
+/// send_1.await?;
+/// send_2.await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -197,15 +199,18 @@ impl<Exe: Executor> MultiTopicProducer<Exe> {
         Ok(())
     }
 
-    /// sends one message on a topic and wait for the receipt
+    /// sends one message on a topic
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    #[deprecated = "instead use send_non_blocking"]
     pub async fn send<T: SerializeMessage + Sized, S: Into<String>>(
         &mut self,
         topic: S,
         message: T,
-    ) -> Result<CommandSendReceipt, Error> {
+    ) -> Result<SendFuture, Error> {
         let fut = self.send_non_blocking(topic, message).await?;
-        fut.await
+        let (tx, rx) = oneshot::channel();
+        let _ = tx.send(fut.await);
+        Ok(SendFuture(rx))
     }
 
     /// sends one message on a topic
@@ -234,13 +239,14 @@ impl<Exe: Executor> MultiTopicProducer<Exe> {
         producer.send_non_blocking(message).await
     }
 
-    /// sends a list of messages on a topic and wait for the receipt one by one
+    /// sends a list of messages on a topic
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    #[deprecated = "instead use send_all_non_blocking"]
     pub async fn send_all<'a, 'b, T, S, I>(
         &mut self,
         topic: S,
         messages: I,
-    ) -> Result<Vec<CommandSendReceipt>, Error>
+    ) -> Result<Vec<SendFuture>, Error>
     where
         'b: 'a,
         T: 'b + SerializeMessage + Sized,
@@ -248,12 +254,13 @@ impl<Exe: Executor> MultiTopicProducer<Exe> {
         S: Into<String>,
     {
         let topic: String = topic.into();
-        let mut receipts = vec![];
+        let mut futs = vec![];
         for message in messages {
-            let receipt = self.send(&topic, message).await?;
-            receipts.push(receipt);
+            #[allow(deprecated)]
+            let fut = self.send(&topic, message).await?;
+            futs.push(fut);
         }
-        Ok(receipts)
+        Ok(futs)
     }
 
     /// sends a list of messages on a topic
@@ -377,27 +384,37 @@ impl<Exe: Executor> Producer<Exe> {
         }
     }
 
-    /// Sends a message and wait for the receipt
+    /// Sends a message
     ///
-    /// this function is similar to send_non_blocking but only waits the `SendFuture`
-    /// of receipt before return.
+    /// this function is similar to send_non_blocking then waits the returned `SendFuture`
+    /// for the receipt.
+    ///
+    /// It returns the returned receipt in another `SendFuture` to be backward compatible.
+    ///
+    /// It is deprecated, and users should instread use send_non_blocking. Users should await the
+    /// returned `SendFuture` if blocking is needed.
     ///
     /// Usage:
     ///
     /// ```rust,no_run
     /// # async fn run(mut producer: pulsar::Producer<pulsar::TokioExecutor>) -> Result<(), pulsar::Error> {
-    /// let receipt1 = producer.send("hello").await?;
-    /// let receipt2 = producer.send("world").await?;
+    /// let f1 = producer.send("hello").await?;
+    /// let f2 = producer.send("world").await?;
+    /// let receipt1 = f1.await?;
+    /// let receipt2 = f2.await?;
     /// # Ok(())
     /// # }
     /// ```
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    #[deprecated = "instead use send_non_blocking"]
     pub async fn send<T: SerializeMessage + Sized>(
         &mut self,
         message: T,
-    ) -> Result<CommandSendReceipt, Error> {
+    ) -> Result<SendFuture, Error> {
         let fut = self.send_non_blocking(message).await?;
-        fut.await
+        let (tx, rx) = oneshot::channel();
+        let _ = tx.send(fut.await);
+        Ok(SendFuture(rx))
     }
 
     /// sends a list of messages
@@ -1162,11 +1179,14 @@ impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
 }
 
 impl<'a, T: SerializeMessage + Sized, Exe: Executor> MessageBuilder<'a, T, Exe> {
-    /// sends the message through the producer that created it and wait for the receipt
+    /// sends the message through the producer that created it
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub async fn send(self) -> Result<CommandSendReceipt, Error> {
+    #[deprecated = "instead use send_non_blocking"]
+    pub async fn send(self) -> Result<SendFuture, Error> {
         let fut = self.send_non_blocking().await?;
-        fut.await
+        let (tx, rx) = oneshot::channel();
+        let _ = tx.send(fut.await);
+        Ok(SendFuture(rx))
     }
 
     /// sends the message through the producer that created it

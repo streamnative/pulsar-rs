@@ -2,7 +2,7 @@
 #[macro_use]
 extern crate serde;
 
-use futures::TryStreamExt;
+use futures::{future::join_all, TryStreamExt};
 use pulsar::{
     compression::*,
     message::{proto::command_subscribe::SubType, Payload},
@@ -80,7 +80,7 @@ async fn main() -> Result<(), pulsar::Error> {
             }
         }
 
-        println!("receipts: {:?}", v);
+        println!("receipts: {:?}", join_all(v).await);
     });
 
     let mut consumer: Consumer<TestData, _> = pulsar
