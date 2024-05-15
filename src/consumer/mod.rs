@@ -1114,6 +1114,7 @@ mod tests {
         let consumer_created = rx.await.unwrap();
         assert!(consumer_created);
 
+        #[allow(deprecated)]
         producer
             .send(TestData {
                 age: 30,
