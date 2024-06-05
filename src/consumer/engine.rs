@@ -159,6 +159,11 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                             .sender()
                             .send_flow(self.id, self.batch_size - self.remaining_messages)?;
                     }
+                    Err(ConnectionError::SlowDown) => {
+                        self.connection
+                            .sender()
+                            .send_flow(self.id, self.batch_size - self.remaining_messages)?;
+                    }
                     Err(e) => return Err(e.into()),
                 }
                 self.remaining_messages = self.batch_size;

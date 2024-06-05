@@ -123,6 +123,7 @@ pub struct ConnectionManager<Exe: Executor> {
     pub(crate) operation_retry_options: OperationRetryOptions,
     tls_options: TlsOptions,
     certificate_chain: Vec<Certificate>,
+    outbound_channel_size: usize,
 }
 
 impl<Exe: Executor> ConnectionManager<Exe> {
@@ -133,6 +134,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
         connection_retry: Option<ConnectionRetryOptions>,
         operation_retry_options: OperationRetryOptions,
         tls: Option<TlsOptions>,
+        outbound_channel_size: usize,
         executor: Arc<Exe>,
     ) -> Result<Self, ConnectionError> {
         let connection_retry_options = connection_retry.unwrap_or_default();
@@ -191,6 +193,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
             operation_retry_options,
             tls_options,
             certificate_chain,
+            outbound_channel_size,
         };
         let broker_address = BrokerAddress {
             url: url.clone(),
@@ -312,6 +315,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                 self.tls_options.tls_hostname_verification_enabled,
                 self.connection_retry_options.connection_timeout,
                 self.operation_retry_options.operation_timeout,
+                self.outbound_channel_size,
                 self.executor.clone(),
             )
             .await
