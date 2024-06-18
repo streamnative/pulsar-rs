@@ -1639,6 +1639,7 @@ pub(crate) mod messages {
                         .collect(),
                     read_compacted: Some(options.read_compacted.unwrap_or(false)),
                     initial_position: Some(options.initial_position.into()),
+                    replicate_subscription_state: options.replicate_subscription_state,
                     schema: options.schema,
                     start_message_id: options.start_message_id,
                     ..Default::default()
