@@ -204,10 +204,11 @@ impl Message {
                             type_
                         );
                     }
-                    Err(()) => {
+                    Err(unknown_enum) => {
                         warn!(
-                            "Received BaseCommand of unexpected type: {}",
-                            self.command.r#type
+                            "Received BaseCommand of unexpected type {}: {}",
+                            self.command.r#type,
+                            unknown_enum.to_string()
                         );
                     }
                 }
@@ -560,53 +561,6 @@ pub mod proto {
     }
 }
 
-impl TryFrom<i32> for base_command::Type {
-    type Error = ();
-
-    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    fn try_from(value: i32) -> Result<Self, ()> {
-        match value {
-            2 => Ok(base_command::Type::Connect),
-            3 => Ok(base_command::Type::Connected),
-            4 => Ok(base_command::Type::Subscribe),
-            5 => Ok(base_command::Type::Producer),
-            6 => Ok(base_command::Type::Send),
-            7 => Ok(base_command::Type::SendReceipt),
-            8 => Ok(base_command::Type::SendError),
-            9 => Ok(base_command::Type::Message),
-            10 => Ok(base_command::Type::Ack),
-            11 => Ok(base_command::Type::Flow),
-            12 => Ok(base_command::Type::Unsubscribe),
-            13 => Ok(base_command::Type::Success),
-            14 => Ok(base_command::Type::Error),
-            15 => Ok(base_command::Type::CloseProducer),
-            16 => Ok(base_command::Type::CloseConsumer),
-            17 => Ok(base_command::Type::ProducerSuccess),
-            18 => Ok(base_command::Type::Ping),
-            19 => Ok(base_command::Type::Pong),
-            20 => Ok(base_command::Type::RedeliverUnacknowledgedMessages),
-            21 => Ok(base_command::Type::PartitionedMetadata),
-            22 => Ok(base_command::Type::PartitionedMetadataResponse),
-            23 => Ok(base_command::Type::Lookup),
-            24 => Ok(base_command::Type::LookupResponse),
-            25 => Ok(base_command::Type::ConsumerStats),
-            26 => Ok(base_command::Type::ConsumerStatsResponse),
-            27 => Ok(base_command::Type::ReachedEndOfTopic),
-            28 => Ok(base_command::Type::Seek),
-            29 => Ok(base_command::Type::GetLastMessageId),
-            30 => Ok(base_command::Type::GetLastMessageIdResponse),
-            31 => Ok(base_command::Type::ActiveConsumerChange),
-            32 => Ok(base_command::Type::GetTopicsOfNamespace),
-            33 => Ok(base_command::Type::GetTopicsOfNamespaceResponse),
-            34 => Ok(base_command::Type::GetSchema),
-            35 => Ok(base_command::Type::GetSchemaResponse),
-            36 => Ok(base_command::Type::AuthChallenge),
-            37 => Ok(base_command::Type::AuthResponse),
-            _ => Err(()),
-        }
-    }
-}
-
 impl From<prost::EncodeError> for ConnectionError {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn from(e: prost::EncodeError) -> Self {
@@ -623,8 +577,6 @@ impl From<prost::DecodeError> for ConnectionError {
 
 #[cfg(test)]
 mod tests {
-    use std::convert::TryFrom;
-
     use bytes::BytesMut;
     use tokio_util::codec::{Decoder, Encoder};
 
@@ -678,18 +630,5 @@ mod tests {
         let mut output = BytesMut::with_capacity(65);
         Codec.encode(message, &mut output).unwrap();
         assert_eq!(&output, input);
-    }
-
-    #[test]
-    fn base_command_type_parsing() {
-        use super::base_command::Type;
-        let mut successes = 0;
-        for i in 0..40 {
-            if let Ok(type_) = Type::try_from(i) {
-                successes += 1;
-                assert_eq!(type_ as i32, i);
-            }
-        }
-        assert_eq!(successes, 36);
     }
 }
