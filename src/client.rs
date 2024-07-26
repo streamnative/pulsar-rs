@@ -555,9 +555,9 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub fn with_outbound_channel_size(mut self, size: usize) -> Result<Self, std::io::Error> {
+    pub fn with_outbound_channel_size(mut self, size: usize) -> Self {
         self.outbound_channel_size = Some(size);
-        Ok(self)
+        self
     }
 
     /// creates the Pulsar client and connects it
