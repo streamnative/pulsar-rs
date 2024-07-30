@@ -151,19 +151,18 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                     .connection
                     .sender()
                     .send_flow(self.id, self.batch_size - self.remaining_messages)
+                    .await
                 {
                     Ok(()) => {}
                     Err(ConnectionError::Disconnected) => {
                         self.reconnect().await?;
                         self.connection
                             .sender()
-                            .send_flow(self.id, self.batch_size - self.remaining_messages)?;
+                            .send_flow(self.id, self.batch_size - self.remaining_messages)
+                            .await?;
                     }
-                    Err(ConnectionError::SlowDown) => {
-                        self.connection
-                            .sender()
-                            .send_flow(self.id, self.batch_size - self.remaining_messages)?;
-                    }
+                    // we don't need to handle the SlowDown error, since send_flow waits on the
+                    // channel to be not full
                     Err(e) => return Err(e.into()),
                 }
                 self.remaining_messages = self.batch_size;
@@ -178,7 +177,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                     }
                 }
                 Ok(Some(EngineEvent::EngineMessage(msg))) => {
-                    let continue_loop = self.handle_ack_opt(msg);
+                    let continue_loop = self.handle_ack_opt(msg).await;
                     if !continue_loop {
                         return Ok(());
                     }
@@ -225,14 +224,14 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         }
     }
 
-    fn handle_ack_opt(&mut self, ack_opt: Option<EngineMessage<Exe>>) -> bool {
+    async fn handle_ack_opt(&mut self, ack_opt: Option<EngineMessage<Exe>>) -> bool {
         match ack_opt {
             None => {
                 trace!("ack channel was closed");
                 false
             }
             Some(EngineMessage::Ack(message_id, cumulative)) => {
-                self.ack(message_id, cumulative);
+                self.ack(message_id, cumulative).await;
                 true
             }
             Some(EngineMessage::Nack(message_id)) => {
@@ -240,6 +239,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                     .connection
                     .sender()
                     .send_redeliver_unacknowleged_messages(self.id, vec![message_id.clone()])
+                    .await
                 {
                     error!(
                         "could not ask for redelivery for message {:?}: {:?}",
@@ -265,6 +265,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                         .connection
                         .sender()
                         .send_redeliver_unacknowleged_messages(self.id, ids)
+                        .await
                     {
                         error!("could not ask for redelivery: {:?}", e);
                     } else {
@@ -288,13 +289,14 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    fn ack(&mut self, message_id: MessageIdData, cumulative: bool) {
+    async fn ack(&mut self, message_id: MessageIdData, cumulative: bool) {
         // FIXME: this does not handle cumulative acks
         self.unacked_messages.remove(&message_id);
         let res = self
             .connection
             .sender()
-            .send_ack(self.id, vec![message_id], cumulative);
+            .send_ack(self.id, vec![message_id], cumulative)
+            .await;
         if res.is_err() {
             error!("ack error: {:?}", res);
         }
@@ -510,7 +512,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                             Error::Custom("DLQ send error".to_string())
                         })?;
 
-                    self.ack(message_id, false);
+                    self.ack(message_id, false).await;
                 }
                 _ => self.send_to_consumer(message_id, payload).await?,
             }
