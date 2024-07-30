@@ -327,7 +327,7 @@ impl tokio_util::codec::Decoder for Codec {
 
 #[cfg(any(feature = "async-std-runtime", feature = "async-std-rustls-runtime"))]
 impl asynchronous_codec::Encoder for Codec {
-    type Item = Message;
+    type Item<'a> = Message;
     type Error = ConnectionError;
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]

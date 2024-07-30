@@ -1,17 +1,10 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use futures::{channel::oneshot, lock::Mutex};
-#[cfg(any(feature = "tokio-runtime", feature = "async-std-runtime"))]
-use native_tls::Certificate;
 use rand::Rng;
-#[cfg(all(
-    any(feature = "tokio-rustls-runtime", feature = "async-std-rustls-runtime"),
-    not(any(feature = "tokio-runtime", feature = "async-std-runtime"))
-))]
-use rustls::Certificate;
 use url::Url;
 
-use crate::{connection::Connection, error::ConnectionError, executor::Executor};
+use crate::{connection::Connection, error::ConnectionError, executor::Executor, Certificate};
 
 /// holds connection information for a broker
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -156,11 +149,10 @@ impl<Exe: Executor> ConnectionManager<Exe> {
             None => vec![],
             Some(certificate_chain) => {
                 let mut v = vec![];
-                for cert in pem::parse_many(certificate_chain)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
-                    .iter()
-                    .rev()
-                {
+                let certificates = pem::parse_many(certificate_chain)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
+                for cert in certificates.iter().rev() {
                     #[cfg(any(feature = "tokio-runtime", feature = "async-std-runtime"))]
                     v.push(
                         Certificate::from_der(cert.contents())
@@ -174,7 +166,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                         ),
                         not(any(feature = "tokio-runtime", feature = "async-std-runtime"))
                     ))]
-                    v.push(Certificate(cert.contents().to_vec()));
+                    v.push(Certificate::from(cert.contents().to_vec()));
                 }
                 v
             }
