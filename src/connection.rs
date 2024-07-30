@@ -351,7 +351,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         match (
             self.registrations
                 .unbounded_send(Register::Ping { resolver }),
-            self.tx.try_send(messages::ping())?,
+            self.tx.send(messages::ping()).await?,
         ) {
             (Ok(_), ()) => {
                 let delay_f = self.executor.delay(self.operation_timeout);
@@ -526,35 +526,42 @@ impl<Exe: Executor> ConnectionSender<Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub fn send_flow(&self, consumer_id: u64, message_permits: u32) -> Result<(), ConnectionError> {
+    pub async fn send_flow(
+        &self,
+        consumer_id: u64,
+        message_permits: u32,
+    ) -> Result<(), ConnectionError> {
         self.tx
-            .try_send(messages::flow(consumer_id, message_permits))?;
+            .send(messages::flow(consumer_id, message_permits))
+            .await?;
         Ok(())
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub fn send_ack(
+    pub async fn send_ack(
         &self,
         consumer_id: u64,
         message_ids: Vec<proto::MessageIdData>,
         cumulative: bool,
     ) -> Result<(), ConnectionError> {
         self.tx
-            .try_send(messages::ack(consumer_id, message_ids, cumulative))?;
+            .send(messages::ack(consumer_id, message_ids, cumulative))
+            .await?;
         Ok(())
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub fn send_redeliver_unacknowleged_messages(
+    pub async fn send_redeliver_unacknowleged_messages(
         &self,
         consumer_id: u64,
         message_ids: Vec<proto::MessageIdData>,
     ) -> Result<(), ConnectionError> {
         self.tx
-            .try_send(messages::redeliver_unacknowleged_messages(
+            .send(messages::redeliver_unacknowleged_messages(
                 consumer_id,
                 message_ids,
-            ))?;
+            ))
+            .await?;
         Ok(())
     }
 

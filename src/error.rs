@@ -156,6 +156,13 @@ impl From<AuthenticationError> for ConnectionError {
     }
 }
 
+impl<T> From<async_channel::SendError<T>> for ConnectionError {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    fn from(_err: async_channel::SendError<T>) -> Self {
+        ConnectionError::Disconnected
+    }
+}
+
 impl<T> From<async_channel::TrySendError<T>> for ConnectionError {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn from(err: async_channel::TrySendError<T>) -> Self {

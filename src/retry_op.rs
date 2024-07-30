@@ -140,6 +140,7 @@ pub async fn retry_subscribe_consumer<Exe: Executor>(
     connection
         .sender()
         .send_flow(consumer_id, batch_size)
+        .await
         .map_err(|err| {
             error!("TopicConsumer::send_flow({topic}) error: {err:?}");
             Error::Consumer(ConsumerError::Connection(err))
