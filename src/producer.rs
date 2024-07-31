@@ -162,8 +162,8 @@ pub struct ProducerOptions {
 /// # let message = "data".to_owned();
 /// let pulsar: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await?;
 /// let mut producer = pulsar.producer().with_name("name").build_multi_topic();
-/// let send_1 = producer.send(topic, &message).await?;
-/// let send_2 = producer.send(topic, &message).await?;
+/// let send_1 = producer.send_non_blocking(topic, &message).await?;
+/// let send_2 = producer.send_non_blocking(topic, &message).await?;
 /// send_1.await?;
 /// send_2.await?;
 /// # Ok(())
@@ -398,8 +398,8 @@ impl<Exe: Executor> Producer<Exe> {
     ///
     /// ```rust,no_run
     /// # async fn run(mut producer: pulsar::Producer<pulsar::TokioExecutor>) -> Result<(), pulsar::Error> {
-    /// let f1 = producer.send("hello").await?;
-    /// let f2 = producer.send("world").await?;
+    /// let f1 = producer.send_non_blocking("hello").await?;
+    /// let f2 = producer.send_non_blocking("world").await?;
     /// let receipt1 = f1.await?;
     /// let receipt2 = f2.await?;
     /// # Ok(())
