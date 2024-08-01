@@ -97,7 +97,7 @@ pub enum ConnectionError {
     ))]
     Tls(rustls::Error),
     #[cfg(any(feature = "tokio-rustls-runtime", feature = "async-std-rustls-runtime"))]
-    DnsName(rustls::client::InvalidDnsNameError),
+    DnsName(rustls::pki_types::InvalidDnsNameError),
     Authentication(AuthenticationError),
     NotFound,
     Canceled,
@@ -142,9 +142,9 @@ impl From<rustls::Error> for ConnectionError {
 }
 
 #[cfg(any(feature = "tokio-rustls-runtime", feature = "async-std-rustls-runtime"))]
-impl From<rustls::client::InvalidDnsNameError> for ConnectionError {
+impl From<rustls::pki_types::InvalidDnsNameError> for ConnectionError {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    fn from(err: rustls::client::InvalidDnsNameError) -> Self {
+    fn from(err: rustls::pki_types::InvalidDnsNameError) -> Self {
         ConnectionError::DnsName(err)
     }
 }

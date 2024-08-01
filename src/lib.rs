@@ -197,6 +197,14 @@ pub mod reader;
 mod retry_op;
 mod service_discovery;
 
+#[cfg(all(
+    any(feature = "tokio-rustls-runtime", feature = "async-std-rustls-runtime"),
+    not(any(feature = "tokio-runtime", feature = "async-std-runtime"))
+))]
+pub(crate) type Certificate = rustls::pki_types::CertificateDer<'static>;
+#[cfg(any(feature = "tokio-runtime", feature = "async-std-runtime"))]
+pub(crate) type Certificate = native_tls::Certificate;
+
 #[cfg(test)]
 mod tests {
     use std::{

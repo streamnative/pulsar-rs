@@ -67,7 +67,7 @@ async fn main() -> Result<(), pulsar::Error> {
     let mut counter = 0usize;
     loop {
         producer
-            .send(TestData {
+            .send_non_blocking(TestData {
                 data: "data".to_string(),
             })
             .await?

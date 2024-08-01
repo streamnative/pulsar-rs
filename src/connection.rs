@@ -20,15 +20,8 @@ use futures::{
     task::{Context, Poll},
     Future, FutureExt, Sink, SinkExt, Stream, StreamExt,
 };
-#[cfg(any(feature = "tokio-runtime", feature = "async-std-runtime"))]
-use native_tls::Certificate;
 use proto::MessageIdData;
 use rand::{seq::SliceRandom, thread_rng};
-#[cfg(all(
-    any(feature = "tokio-rustls-runtime", feature = "async-std-rustls-runtime"),
-    not(any(feature = "tokio-runtime", feature = "async-std-runtime"))
-))]
-use rustls::Certificate;
 use url::Url;
 use uuid::Uuid;
 
@@ -41,6 +34,7 @@ use crate::{
         BaseCommand, Codec, Message,
     },
     producer::{self, ProducerOptions},
+    Certificate,
 };
 
 pub(crate) enum Register {
@@ -983,35 +977,22 @@ impl<Exe: Executor> Connection<Exe> {
                 if tls {
                     let stream = tokio::net::TcpStream::connect(&address).await?;
                     let mut root_store = rustls::RootCertStore::empty();
+
+                    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
                     for certificate in certificate_chain {
-                        root_store.add(certificate)?;
+                        root_store.add(certificate.clone())?;
                     }
 
-                    let trust_anchors = webpki_roots::TLS_SERVER_ROOTS.iter().fold(
-                        vec![],
-                        |mut acc, trust_anchor| {
-                            acc.push(
-                                rustls::OwnedTrustAnchor::from_subject_spki_name_constraints(
-                                    trust_anchor.subject,
-                                    trust_anchor.spki,
-                                    trust_anchor.name_constraints,
-                                ),
-                            );
-                            acc
-                        },
-                    );
-
-                    root_store.add_trust_anchors(trust_anchors.into_iter());
                     let config = rustls::ClientConfig::builder()
-                        .with_safe_default_cipher_suites()
-                        .with_safe_default_kx_groups()
-                        .with_safe_default_protocol_versions()?
                         .with_root_certificates(root_store)
                         .with_no_client_auth();
 
                     let cx = tokio_rustls::TlsConnector::from(Arc::new(config));
                     let stream = cx
-                        .connect(rustls::ServerName::try_from(hostname.as_str())?, stream)
+                        .connect(
+                            rustls::pki_types::ServerName::try_from(hostname.as_str())?.to_owned(),
+                            stream,
+                        )
                         .await
                         .map(|stream| tokio_util::codec::Framed::new(stream, Codec))?;
 
@@ -1099,35 +1080,22 @@ impl<Exe: Executor> Connection<Exe> {
                 if tls {
                     let stream = async_std::net::TcpStream::connect(&address).await?;
                     let mut root_store = rustls::RootCertStore::empty();
+
+                    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
                     for certificate in certificate_chain {
-                        root_store.add(certificate)?;
+                        root_store.add(certificate.clone())?;
                     }
 
-                    let trust_anchors = webpki_roots::TLS_SERVER_ROOTS.iter().fold(
-                        vec![],
-                        |mut acc, trust_anchor| {
-                            acc.push(
-                                rustls::OwnedTrustAnchor::from_subject_spki_name_constraints(
-                                    trust_anchor.subject,
-                                    trust_anchor.spki,
-                                    trust_anchor.name_constraints,
-                                ),
-                            );
-                            acc
-                        },
-                    );
-
-                    root_store.add_trust_anchors(trust_anchors.into_iter());
                     let config = rustls::ClientConfig::builder()
-                        .with_safe_default_cipher_suites()
-                        .with_safe_default_kx_groups()
-                        .with_safe_default_protocol_versions()?
                         .with_root_certificates(root_store)
                         .with_no_client_auth();
 
-                    let connector = async_rustls::TlsConnector::from(Arc::new(config));
+                    let connector = futures_rustls::TlsConnector::from(Arc::new(config));
                     let stream = connector
-                        .connect(rustls::ServerName::try_from(hostname.as_str())?, stream)
+                        .connect(
+                            rustls::pki_types::ServerName::try_from(hostname.as_str())?.to_owned(),
+                            stream,
+                        )
                         .await
                         .map(|stream| asynchronous_codec::Framed::new(stream, Codec))?;
 
