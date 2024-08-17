@@ -182,6 +182,7 @@ pub use message::{
     Payload,
 };
 pub use producer::{MultiTopicProducer, Producer, ProducerOptions};
+pub use transaction::{Transaction, TransactionBuilder};
 
 pub mod authentication;
 mod client;
@@ -196,6 +197,7 @@ pub mod producer;
 pub mod reader;
 mod retry_op;
 mod service_discovery;
+pub mod transaction;
 
 #[cfg(all(
     any(feature = "tokio-rustls-runtime", feature = "async-std-rustls-runtime"),
@@ -516,6 +518,109 @@ mod tests {
         consumer.ack(&second_receipt).await.unwrap();
 
         assert!(redelivery < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
+    async fn transactions() {
+        let _result = log::set_logger(&TEST_LOGGER);
+        log::set_max_level(LevelFilter::Debug);
+
+        let addr = "pulsar://127.0.0.1:6650";
+        let output_topic = format!("test_transactions_output_{}", rand::random::<u16>());
+
+        let pulsar: Pulsar<_> = Pulsar::builder(addr, TokioExecutor)
+            .with_transactions()
+            .build()
+            .await
+            .unwrap();
+
+        let mut output_producer = pulsar
+            .producer()
+            .with_topic(&output_topic)
+            .build()
+            .await
+            .unwrap();
+
+        let mut output_consumer: Consumer<String, _> = pulsar
+            .consumer()
+            .with_topic(&output_topic)
+            .build()
+            .await
+            .unwrap();
+
+        let txn = pulsar
+            .new_txn()
+            .unwrap()
+            .with_timeout(Duration::from_secs(10))
+            .build()
+            .await
+            .unwrap();
+
+        output_producer
+            .create_message()
+            .with_content("test 1".to_string())
+            .with_txn(&txn)
+            .send_non_blocking()
+            .await
+            .unwrap();
+
+        // Ensure that consumers cannot see messages from an open transaction
+        assert!(timeout(Duration::from_secs(1), output_consumer.next())
+            .await
+            .is_err());
+
+        txn.commit().await.unwrap();
+
+        let txn = pulsar
+            .new_txn()
+            .unwrap()
+            .with_timeout(Duration::from_secs(10))
+            .build()
+            .await
+            .unwrap();
+
+        // Ensure that consumers see messages from a committed transaction
+        let msg = output_consumer.next().await.unwrap().unwrap();
+        assert_eq!("test 1", std::str::from_utf8(&msg.payload.data).unwrap());
+        output_consumer.txn_ack(&msg, &txn).await.unwrap();
+
+        output_producer
+            .create_message()
+            .with_content("test 2".to_string())
+            .with_txn(&txn)
+            .send_non_blocking()
+            .await
+            .unwrap();
+
+        txn.commit().await.unwrap();
+
+        // We shouldn't see "test 2" now
+        let msg = output_consumer.next().await.unwrap().unwrap();
+        assert_eq!("test 2", std::str::from_utf8(&msg.payload.data).unwrap());
+
+        let txn = pulsar
+            .new_txn()
+            .unwrap()
+            .with_timeout(Duration::from_secs(10))
+            .build()
+            .await
+            .unwrap();
+
+        output_producer
+            .create_message()
+            .with_content("test 3".to_string())
+            .with_txn(&txn)
+            .send_non_blocking()
+            .await
+            .unwrap();
+
+        txn.abort().await.unwrap();
+
+        // We shouldn't see any more messages
+        assert!(timeout(Duration::from_secs(1), output_consumer.next())
+            .await
+            .is_err());
     }
 
     #[tokio::test]

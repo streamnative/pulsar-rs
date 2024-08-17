@@ -55,9 +55,11 @@ impl<T: DeserializeMessage + 'static, Exe: Executor> Stream for Reader<T, Exe> {
                     let message_id = msg.message_id().clone();
                     this.state = Some(State::PollingAck(
                         msg,
-                        Box::pin(
-                            async move { acker.send(EngineMessage::Ack(message_id, false)).await },
-                        ),
+                        Box::pin(async move {
+                            acker
+                                .send(EngineMessage::Ack(message_id, None, false))
+                                .await
+                        }),
                     ));
                     Pin::new(this).poll_next(cx)
                 }

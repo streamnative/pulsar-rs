@@ -34,6 +34,8 @@ use crate::{
         BaseCommand, Codec, Message,
     },
     producer::{self, ProducerOptions},
+    proto::ProtocolVersion,
+    transaction::TransactionId,
     Certificate,
 };
 
@@ -286,6 +288,7 @@ impl SerialId {
 pub struct ConnectionSender<Exe: Executor> {
     connection_id: Uuid,
     tx: async_channel::Sender<Message>,
+    protocol_version: ProtocolVersion,
     registrations: mpsc::UnboundedSender<Register>,
     receiver_shutdown: Option<oneshot::Sender<()>>,
     request_id: SerialId,
@@ -299,6 +302,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
     pub(crate) fn new(
         connection_id: Uuid,
         tx: async_channel::Sender<Message>,
+        protocol_version: ProtocolVersion,
         registrations: mpsc::UnboundedSender<Register>,
         receiver_shutdown: oneshot::Sender<()>,
         request_id: SerialId,
@@ -309,6 +313,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         ConnectionSender {
             connection_id,
             tx,
+            protocol_version,
             registrations,
             receiver_shutdown: Some(receiver_shutdown),
             request_id,
@@ -429,6 +434,83 @@ impl<Exe: Executor> ConnectionSender<Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub async fn new_txn(
+        &self,
+        tc_id: u64,
+        timeout: Option<u64>,
+    ) -> Result<proto::CommandNewTxnResponse, ConnectionError> {
+        let request_id = self.request_id.get();
+        let msg = messages::new_txn(tc_id, timeout, request_id);
+        self.send_message(msg, RequestKey::RequestId(request_id), |resp| {
+            resp.command.new_txn_response
+        })
+        .await
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub async fn end_txn(
+        &self,
+        txn_id: TransactionId,
+        action: proto::TxnAction,
+    ) -> Result<proto::CommandEndTxnResponse, ConnectionError> {
+        let request_id = self.request_id.get();
+        let msg = messages::end_txn(txn_id, action, request_id);
+        self.send_message(msg, RequestKey::RequestId(request_id), |resp| {
+            resp.command.end_txn_response
+        })
+        .await
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub async fn tc_client_connect_request(
+        &self,
+        tc_id: u64,
+    ) -> Result<proto::CommandTcClientConnectResponse, ConnectionError> {
+        let request_id = self.request_id.get();
+        let msg = messages::tc_client_connect_request(tc_id, request_id);
+        self.send_message(msg, RequestKey::RequestId(request_id), |resp| {
+            resp.command.tc_client_connect_response
+        })
+        .await
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub async fn add_partition_to_txn(
+        &self,
+        txn_id: TransactionId,
+        partitions: Vec<String>,
+    ) -> Result<proto::CommandAddPartitionToTxnResponse, ConnectionError> {
+        let request_id = self.request_id.get();
+        let msg = messages::add_partition_to_txn(txn_id, partitions, request_id);
+        self.send_message(msg, RequestKey::RequestId(request_id), |resp| {
+            resp.command.add_partition_to_txn_response
+        })
+        .await
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub async fn add_subscription_to_txn(
+        &self,
+        txn_id: TransactionId,
+        topic: String,
+        subscription: String,
+    ) -> Result<proto::CommandAddSubscriptionToTxnResponse, ConnectionError> {
+        let request_id = self.request_id.get();
+        let msg = messages::add_subscription_to_txn(
+            txn_id,
+            vec![proto::Subscription {
+                topic,
+                subscription,
+            }],
+            request_id,
+        );
+        self.send_message(msg, RequestKey::RequestId(request_id), |resp| {
+            resp.command.add_subscription_to_txn_response
+        })
+        .await
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn create_producer(
         &self,
         topic: String,
@@ -536,10 +618,11 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         &self,
         consumer_id: u64,
         message_ids: Vec<proto::MessageIdData>,
+        txn_id: Option<TransactionId>,
         cumulative: bool,
     ) -> Result<(), ConnectionError> {
         self.tx
-            .send(messages::ack(consumer_id, message_ids, cumulative))
+            .send(messages::ack(consumer_id, message_ids, txn_id, cumulative))
             .await?;
         Ok(())
     }
@@ -1161,7 +1244,7 @@ impl<Exe: Executor> Connection<Exe> {
             .await?;
 
         let msg = stream.next().await;
-        match msg {
+        let protocol_version = match msg {
             Some(Ok(Message {
                 command:
                     proto::BaseCommand {
@@ -1175,9 +1258,20 @@ impl<Exe: Executor> Connection<Exe> {
             Some(Ok(msg)) => {
                 let cmd = msg.command.clone();
                 trace!("received connection response: {:?}", msg);
-                msg.command.connected.ok_or_else(|| {
-                    ConnectionError::Unexpected(format!("Unexpected message from pulsar: {cmd:?}"))
-                })
+
+                match msg.command.connected {
+                    Some(proto::CommandConnected {
+                        protocol_version, ..
+                    }) => protocol_version
+                        .map::<Result<ProtocolVersion, _>, _>(|v| v.try_into())
+                        .transpose()
+                        .map_err(|_| {
+                            ConnectionError::UnexpectedResponse("Invalid protocol version".into())
+                        }),
+                    _ => Err(ConnectionError::Unexpected(format!(
+                        "Unexpected message from pulsar: {cmd:?}"
+                    ))),
+                }
             }
             Some(Err(e)) => Err(e),
             None => Err(ConnectionError::Disconnected),
@@ -1252,6 +1346,7 @@ impl<Exe: Executor> Connection<Exe> {
         let sender = ConnectionSender::new(
             connection_id,
             tx,
+            protocol_version.unwrap_or(ProtocolVersion::V0),
             registrations_tx,
             receiver_shutdown_tx,
             SerialId::new(),
@@ -1281,6 +1376,11 @@ impl<Exe: Executor> Connection<Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn url(&self) -> &Url {
         &self.url
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn protocol_version(&self) -> ProtocolVersion {
+        self.sender().protocol_version
     }
 
     /// Chain to send a message, e.g. conn.sender().send_ping()
@@ -1333,6 +1433,8 @@ pub(crate) mod messages {
             Message, Payload,
         },
         producer::{self, ProducerOptions},
+        proto::TxnAction,
+        transaction::TransactionId,
     };
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
@@ -1350,7 +1452,7 @@ pub(crate) mod messages {
                     auth_data,
                     proxy_to_broker_url,
                     client_version: proto::client_version(),
-                    protocol_version: Some(12),
+                    protocol_version: Some(19),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -1475,6 +1577,8 @@ pub(crate) mod messages {
                     producer_id,
                     sequence_id,
                     num_messages: message.num_messages_in_batch,
+                    txnid_least_bits: message.txn_id.map(|id| id.least_bits()),
+                    txnid_most_bits: message.txn_id.map(|id| id.most_bits()),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -1643,6 +1747,7 @@ pub(crate) mod messages {
     pub fn ack(
         consumer_id: u64,
         message_id: Vec<proto::MessageIdData>,
+        txn_id: Option<TransactionId>,
         cumulative: bool,
     ) -> Message {
         Message {
@@ -1656,6 +1761,8 @@ pub(crate) mod messages {
                         proto::command_ack::AckType::Individual as i32
                     },
                     message_id,
+                    txnid_least_bits: txn_id.map(|id| id.least_bits()),
+                    txnid_most_bits: txn_id.map(|id| id.most_bits()),
                     validation_error: None,
                     properties: Vec::new(),
                     ..Default::default()
@@ -1750,6 +1857,96 @@ pub(crate) mod messages {
                         auth_data: Some(auth.data),
                     }),
                     ..Default::default()
+                }),
+                ..Default::default()
+            },
+            payload: None,
+        }
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn new_txn(tc_id: u64, txn_ttl_seconds: Option<u64>, request_id: u64) -> Message {
+        Message {
+            command: proto::BaseCommand {
+                r#type: CommandType::NewTxn as i32,
+                new_txn: Some(proto::CommandNewTxn {
+                    request_id,
+                    tc_id: Some(tc_id),
+                    txn_ttl_seconds,
+                }),
+                ..Default::default()
+            },
+            payload: None,
+        }
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn end_txn(txn_id: TransactionId, txn_action: TxnAction, request_id: u64) -> Message {
+        Message {
+            command: proto::BaseCommand {
+                r#type: CommandType::EndTxn as i32,
+                end_txn: Some(proto::CommandEndTxn {
+                    request_id,
+                    txnid_least_bits: Some(txn_id.least_bits()),
+                    txnid_most_bits: Some(txn_id.most_bits()),
+                    txn_action: Some(txn_action as i32),
+                }),
+                ..Default::default()
+            },
+            payload: None,
+        }
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn tc_client_connect_request(tc_id: u64, request_id: u64) -> Message {
+        Message {
+            command: proto::BaseCommand {
+                r#type: CommandType::TcClientConnectRequest as i32,
+                tc_client_connect_request: Some(proto::CommandTcClientConnectRequest {
+                    request_id,
+                    tc_id,
+                }),
+                ..Default::default()
+            },
+            payload: None,
+        }
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn add_partition_to_txn(
+        txn_id: TransactionId,
+        partitions: Vec<String>,
+        request_id: u64,
+    ) -> Message {
+        Message {
+            command: proto::BaseCommand {
+                r#type: CommandType::AddPartitionToTxn as i32,
+                add_partition_to_txn: Some(proto::CommandAddPartitionToTxn {
+                    request_id,
+                    txnid_least_bits: Some(txn_id.least_bits()),
+                    txnid_most_bits: Some(txn_id.most_bits()),
+                    partitions,
+                }),
+                ..Default::default()
+            },
+            payload: None,
+        }
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn add_subscription_to_txn(
+        txn_id: TransactionId,
+        subscription: Vec<proto::Subscription>,
+        request_id: u64,
+    ) -> Message {
+        Message {
+            command: proto::BaseCommand {
+                r#type: CommandType::AddSubscriptionToTxn as i32,
+                add_subscription_to_txn: Some(proto::CommandAddSubscriptionToTxn {
+                    request_id,
+                    txnid_least_bits: Some(txn_id.least_bits()),
+                    txnid_most_bits: Some(txn_id.most_bits()),
+                    subscription,
                 }),
                 ..Default::default()
             },
