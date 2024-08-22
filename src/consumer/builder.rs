@@ -324,6 +324,10 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
         // would this clone() consume too much memory?
         let (mut config, mut joined_topics) = self.clone().validate::<T>().await?;
 
+        // Internally, the reader interface is implemented as a consumer using an exclusive,
+        // non-durable subscription
+        config.options.durable = Some(false);
+
         // the validate() function defaults sub_type to SubType::Shared,
         // but a reader's subscription is exclusive
         warn!("Subscription Type for a reader is `Exclusive`. Resetting.");
