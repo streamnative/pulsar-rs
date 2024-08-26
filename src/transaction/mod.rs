@@ -23,7 +23,7 @@ use crate::{
     connection::Connection, connection_manager::ConnectionManager, proto::ProtocolVersion, Pulsar,
 };
 
-const TC_ASSIGN_TOPIC: &'static str = "persistent://pulsar/system/transaction_coordinator_assign";
+const TC_ASSIGN_TOPIC: &str = "persistent://pulsar/system/transaction_coordinator_assign";
 
 fn get_tc_assign_topic_name(partition: u32) -> String {
     format!("{}-partition-{}", TC_ASSIGN_TOPIC, partition)

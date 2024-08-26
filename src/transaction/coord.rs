@@ -47,7 +47,7 @@ impl<Exe: Executor> TransactionCoordinatorClient<Exe> {
                 Arc::clone(&connection_mgr),
                 RwLock::new(connection),
                 Arc::clone(&connection_mgr.executor),
-                partition.into(),
+                partition,
             )
             .await?;
 
