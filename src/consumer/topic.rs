@@ -27,7 +27,7 @@ use crate::{
     message::proto::{MessageIdData, Schema},
     proto::CommandConsumerStatsResponse,
     retry_op::retry_subscribe_consumer,
-    BrokerAddress, DeserializeMessage, Error, Executor, Payload, Pulsar,
+    BrokerAddress, DeserializeMessage, Error, Executor, Payload, Pulsar, Transaction,
 };
 
 // this is entirely public for use in reader.rs
@@ -180,9 +180,46 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    async fn txn_ack_inner(
+        &mut self,
+        msg: &Message<T>,
+        msg_id: Option<MessageIdData>,
+        txn: &Transaction<Exe>,
+    ) -> Result<(), Error> {
+        txn.register_acked_topic(self.topic(), self.config().subscription.clone())
+            .await?;
+
+        self.engine_tx
+            .send(EngineMessage::Ack(
+                msg_id.unwrap_or(msg.message_id().clone()),
+                Some(txn.id()),
+                false,
+            ))
+            .await
+            .map_err::<ConsumerError, _>(Into::into)?;
+
+        Ok(())
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub async fn txn_ack(&mut self, msg: &Message<T>, txn: &Transaction<Exe>) -> Result<(), Error> {
+        self.txn_ack_inner(msg, None, txn).await
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub async fn txn_ack_with_id(
+        &mut self,
+        msg: &Message<T>,
+        msg_id: MessageIdData,
+        txn: &Transaction<Exe>,
+    ) -> Result<(), Error> {
+        self.txn_ack_inner(msg, Some(msg_id), txn).await
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         self.engine_tx
-            .send(EngineMessage::Ack(msg.message_id().clone(), false))
+            .send(EngineMessage::Ack(msg.message_id().clone(), None, false))
             .await?;
         Ok(())
     }
@@ -190,7 +227,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn ack_with_id(&mut self, msg_id: MessageIdData) -> Result<(), ConsumerError> {
         self.engine_tx
-            .send(EngineMessage::Ack(msg_id, false))
+            .send(EngineMessage::Ack(msg_id, None, false))
             .await?;
         Ok(())
     }
@@ -203,7 +240,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn cumulative_ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         self.engine_tx
-            .send(EngineMessage::Ack(msg.message_id().clone(), true))
+            .send(EngineMessage::Ack(msg.message_id().clone(), None, true))
             .await?;
         Ok(())
     }
@@ -214,7 +251,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         msg_id: MessageIdData,
     ) -> Result<(), ConsumerError> {
         self.engine_tx
-            .send(EngineMessage::Ack(msg_id, true))
+            .send(EngineMessage::Ack(msg_id, None, true))
             .await?;
         Ok(())
     }

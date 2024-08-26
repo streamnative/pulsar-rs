@@ -15,9 +15,8 @@ use crate::{
     consumer::{config::ConsumerConfig, message::Message, topic::TopicConsumer},
     error::{ConnectionError, ConsumerError},
     message::proto::{MessageIdData, Schema},
-    proto,
-    proto::CommandConsumerStatsResponse,
-    DeserializeMessage, Error, Executor, Pulsar,
+    proto::{self, CommandConsumerStatsResponse},
+    DeserializeMessage, Error, Executor, Pulsar, Transaction,
 };
 
 /// A consumer that can subscribe on multiple topics, from a regex matching
@@ -197,6 +196,29 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
             trace!("created {} consumers", consumers.len());
             Ok(consumers)
         }));
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub async fn txn_ack(&mut self, msg: &Message<T>, txn: &Transaction<Exe>) -> Result<(), Error> {
+        if let Some(c) = self.consumers.get_mut(&msg.topic) {
+            c.txn_ack(msg, txn).await
+        } else {
+            Err(ConnectionError::Unexpected(format!("no consumer for topic {}", msg.topic)).into())
+        }
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub async fn txn_ack_with_id(
+        &mut self,
+        msg: &Message<T>,
+        msg_id: MessageIdData,
+        txn: &Transaction<Exe>,
+    ) -> Result<(), Error> {
+        if let Some(c) = self.consumers.get_mut(&msg.topic) {
+            c.txn_ack_with_id(msg, msg_id, txn).await
+        } else {
+            Err(ConnectionError::Unexpected(format!("no consumer for topic {}", msg.topic)).into())
+        }
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
