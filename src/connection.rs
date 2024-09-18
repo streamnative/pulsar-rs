@@ -21,7 +21,7 @@ use futures::{
     Future, FutureExt, Sink, SinkExt, Stream, StreamExt,
 };
 #[cfg(any(feature = "tokio-runtime", feature = "async-std-runtime"))]
-use native_tls::{Certificate, Identity};
+use native_tls::Identity;
 use proto::MessageIdData;
 use rand::{seq::SliceRandom, thread_rng};
 use url::Url;

@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use futures::{channel::oneshot, lock::Mutex};
 #[cfg(any(feature = "tokio-runtime", feature = "async-std-runtime"))]
-use native_tls::{Certificate, Identity};
+use native_tls::Identity;
 use rand::Rng;
 use url::Url;
 
