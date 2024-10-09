@@ -146,7 +146,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                     })?;
             }
 
-            if self.remaining_messages < self.batch_size / 2 {
+            if self.remaining_messages < self.batch_size.div_ceil(2) {
                 match self
                     .connection
                     .sender()
