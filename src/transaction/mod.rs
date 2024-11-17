@@ -8,19 +8,16 @@ use std::{
     time::Duration,
 };
 
+use coord::TransactionCoordinatorClient;
 use futures::lock::Mutex as AsyncMutex;
 
 pub use crate::Executor;
 use crate::{
+    connection::Connection,
+    connection_manager::ConnectionManager,
     error::{ConnectionError, TransactionError},
-    proto::ServerError,
-    Error,
-};
-
-use coord::TransactionCoordinatorClient;
-
-use crate::{
-    connection::Connection, connection_manager::ConnectionManager, proto::ProtocolVersion, Pulsar,
+    proto::{ProtocolVersion, ServerError},
+    Error, Pulsar,
 };
 
 const TC_ASSIGN_TOPIC: &str = "persistent://pulsar/system/transaction_coordinator_assign";
@@ -61,27 +58,30 @@ async fn get_tc_connection<Exe: Executor>(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// The state of a transaction.
 pub enum State {
-    /// When a transaction is in the `OPEN` state, messages can be produced and acked with this transaction.
+    /// When a transaction is in the `OPEN` state, messages can be produced and acked with this
+    /// transaction.
     ///
     /// When a transaction is in the `OPEN` state, it can commit or abort.
     Open,
-    /// When a client invokes a commit, the transaction state is changed from `OPEN` to `COMMITTING`.
+    /// When a client invokes a commit, the transaction state is changed from `OPEN` to
+    /// `COMMITTING`.
     Committing,
     /// When a client invokes an abort, the transaction state is changed from `OPEN` to `ABORTING`.
     Aborting,
     /// When a client receives a response to a commit, the transaction state is changed from
     /// `COMMITTING` to `COMMITTED`.
     Committed,
-    /// When a client receives a response to an abort, the transaction state is changed from `ABORTING` to `ABORTED`.
+    /// When a client receives a response to an abort, the transaction state is changed from
+    /// `ABORTING` to `ABORTED`.
     Aborted,
-    /// When a client invokes a commit or an abort, but a transaction does not exist in a coordinator,
-    /// then the state is changed to `ERROR`.
+    /// When a client invokes a commit or an abort, but a transaction does not exist in a
+    /// coordinator, then the state is changed to `ERROR`.
     ///
-    /// When a client invokes a commit, but the transaction state in a coordinator is `ABORTED` or `ABORTING`,
-    /// then the state is changed to `ERROR`.
+    /// When a client invokes a commit, but the transaction state in a coordinator is `ABORTED` or
+    /// `ABORTING`, then the state is changed to `ERROR`.
     ///
-    /// When a client invokes an abort, but the transaction state in a coordinator is `COMMITTED` or `COMMITTING`,
-    /// then the state is changed to `ERROR`.
+    /// When a client invokes an abort, but the transaction state in a coordinator is `COMMITTED`
+    /// or `COMMITTING`, then the state is changed to `ERROR`.
     Error,
     /// When a transaction is timed out and the transaction state is `OPEN`,
     /// then the transaction state is changed from `OPEN` to `TIME_OUT`.

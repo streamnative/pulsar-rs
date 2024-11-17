@@ -6,6 +6,7 @@ use std::{
 
 use rand::Rng;
 
+use super::TransactionId;
 use crate::{
     connection::Connection,
     connection_manager::ConnectionManager,
@@ -13,8 +14,6 @@ use crate::{
     proto::{ServerError, TxnAction},
     Error, Executor, Pulsar,
 };
-
-use super::TransactionId;
 
 pub struct TransactionMetaStoreHandler<Exe: Executor> {
     client: Pulsar<Exe>,

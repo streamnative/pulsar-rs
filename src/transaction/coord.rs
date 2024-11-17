@@ -2,18 +2,15 @@ use std::{
     collections::BTreeMap,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, RwLock,
     },
 };
 
-use std::sync::RwLock;
-
+use super::{meta_store_handler::TransactionMetaStoreHandler, TransactionId};
 use crate::{
     connection_manager::ConnectionManager, error::TransactionError, proto::TxnAction, Error,
     Executor, Pulsar,
 };
-
-use super::{meta_store_handler::TransactionMetaStoreHandler, TransactionId};
 
 pub struct TransactionCoordinatorClient<Exe: Executor> {
     handlers: BTreeMap<u64, TransactionMetaStoreHandler<Exe>>,
