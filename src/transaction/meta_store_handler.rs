@@ -24,8 +24,7 @@ pub struct TransactionMetaStoreHandler<Exe: Executor> {
 }
 
 impl<Exe: Executor> TransactionMetaStoreHandler<Exe> {
-    // Should we make these configurable?
-    const MAX_OP_RETRIES: u32 = 3;
+    const OP_MAX_RETRIES: u32 = 3;
     const OP_MIN_BACKOFF: Duration = Duration::from_millis(10);
     const OP_MAX_BACKOFF: Duration = Duration::from_millis(1000);
 
@@ -72,8 +71,7 @@ impl<Exe: Executor> TransactionMetaStoreHandler<Exe> {
         F: Fn() -> R,
         E: Fn(T) -> ((Option<i32>, Option<String>), S),
     {
-        let mut current_retries = 0u32;
-        let mut current_backoff;
+        let mut retries = 0u32;
 
         loop {
             let res = op().await?;
@@ -86,24 +84,24 @@ impl<Exe: Executor> TransactionMetaStoreHandler<Exe> {
                     // TC Not Found errors shouldn't bubble up to the user before
                     // we've tried reconnecting a few times
                     error @ Some(ServerError::TransactionCoordinatorNotFound) => {
-                        if current_retries >= Self::MAX_OP_RETRIES {
+                        if retries >= Self::OP_MAX_RETRIES {
                             return Err(ConnectionError::PulsarError(error, message).into());
                         }
 
-                        let jitter = rand::thread_rng().gen_range(0..10);
-                        current_backoff = std::cmp::min(
-                            Self::OP_MAX_BACKOFF * 2u32.saturating_pow(current_retries),
+                        let jitter = Duration::from_millis(rand::thread_rng().gen_range(0..500));
+                        let backoff = std::cmp::min(
+                            Self::OP_MIN_BACKOFF * 2u32.saturating_pow(retries) + jitter,
                             Self::OP_MAX_BACKOFF,
-                        ) + Self::OP_MIN_BACKOFF * jitter;
-                        current_retries += 1;
+                        );
+                        retries += 1;
 
                         error!(
                             "Received error: {:?}. Retrying in {} ms",
                             error,
-                            current_backoff.as_millis()
+                            backoff.as_millis()
                         );
 
-                        self.executor.delay(current_backoff).await;
+                        self.executor.delay(backoff).await;
                         self.reconnect().await?;
                         continue;
                     }
