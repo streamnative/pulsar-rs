@@ -276,10 +276,11 @@ impl<Exe: Executor> Pulsar<Exe> {
     /// Pulsar client, this will return an error.
     ///
     /// ```rust,no_run
+    /// use std::time::Duration;
     /// use pulsar::Transaction;
     ///
     /// # async fn run(pulsar: pulsar::Pulsar<pulsar::TokioExecutor>) -> Result<(), pulsar::Error> {
-    /// let txn = pulsar.new_txn().with_timeout(1000).build().await?;
+    /// let txn = pulsar.new_txn()?.with_timeout(Duration::from_millis(1000)).build().await?;
     /// # Ok(())
     /// # }
     pub fn new_txn(&self) -> Result<TransactionBuilder<Exe>, Error> {
