@@ -352,9 +352,11 @@ impl<T: 'static + DeserializeMessage, Exe: Executor> Stream for MultiTopicConsum
             }
         }
 
-        if let Poll::Ready(Some(_)) = self.refresh.as_mut().poll_next(cx) {
-            self.update_topics();
-            return self.poll_next(cx);
+        if self.topic_regex.is_some() {
+            if let Poll::Ready(Some(_)) = self.refresh.as_mut().poll_next(cx) {
+                self.update_topics();
+                return self.poll_next(cx);
+            }
         }
 
         let mut topics_to_remove = Vec::new();
