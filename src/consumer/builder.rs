@@ -177,7 +177,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
     // Checks the builder for inconsistencies
     // returns a config and a list of topics with associated brokers
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    async fn validate<T: DeserializeMessage>(
+    async fn validate(
         self,
     ) -> Result<(ConsumerConfig, Vec<(String, BrokerAddress)>), Error> {
         let ConsumerBuilder {
@@ -272,7 +272,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn build<T: DeserializeMessage>(self) -> Result<Consumer<T, Exe>, Error> {
         // would this clone() consume too much memory?
-        let (config, joined_topics) = self.clone().validate::<T>().await?;
+        let (config, joined_topics) = self.clone().validate().await?;
 
         let consumers = try_join_all(joined_topics.into_iter().map(|(topic, addr)| {
             TopicConsumer::new(self.pulsar.clone(), topic, addr, config.clone())
@@ -322,7 +322,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn into_reader<T: DeserializeMessage>(self) -> Result<Reader<T, Exe>, Error> {
         // would this clone() consume too much memory?
-        let (mut config, mut joined_topics) = self.clone().validate::<T>().await?;
+        let (mut config, mut joined_topics) = self.clone().validate().await?;
 
         // Internally, the reader interface is implemented as a consumer using an exclusive,
         // non-durable subscription
