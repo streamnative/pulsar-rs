@@ -359,8 +359,8 @@ impl<Exe: Executor> Producer<Exe> {
     /// this function returns a `SendFuture` because the receipt can come long after
     /// this function was called, for various reasons:
     /// - the message was sent successfully but Pulsar did not send the receipt yet
-    /// - the producer is batching messages, so this function must return immediately,
-    ///     and the receipt will come when the batched messages are actually sent
+    /// - the producer is batching messages, so this function must return immediately, and the
+    ///   receipt will come when the batched messages are actually sent
     ///
     /// Usage:
     ///

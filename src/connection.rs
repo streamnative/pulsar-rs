@@ -655,7 +655,10 @@ impl<Exe: Executor> ConnectionSender<Exe> {
             response
                 .await
                 .map_err(|oneshot::Canceled| {
-                    error!("response has been canceled (key = {:?}), we are disconnected", k);
+                    error!(
+                        "response has been canceled (key = {:?}), we are disconnected",
+                        k
+                    );
                     error.set(ConnectionError::Disconnected);
                     ConnectionError::Disconnected
                 })
@@ -674,7 +677,10 @@ impl<Exe: Executor> ConnectionSender<Exe> {
                 let connection_id = self.connection_id;
                 let error = self.error.clone();
                 let delay_f = self.executor.delay(self.operation_timeout);
-                trace!("Create timeout futures with operation timeout at {:?}", self.operation_timeout);
+                trace!(
+                    "Create timeout futures with operation timeout at {:?}",
+                    self.operation_timeout
+                );
                 let fut = async move {
                     pin_mut!(response);
                     pin_mut!(delay_f);

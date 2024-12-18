@@ -170,7 +170,10 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 match self
                     .connection
                     .sender()
-                    .send_flow(self.id, (self.batch_size as i64 - self.remaining_messages) as u32)
+                    .send_flow(
+                        self.id,
+                        (self.batch_size as i64 - self.remaining_messages) as u32,
+                    )
                     .await
                 {
                     Ok(()) => {}
@@ -182,8 +185,8 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                     // channel to be not full
                     Err(e) => {
                         error!("consumer engine: we got a unrecoverable connection error, {e}");
-                        return Err(e.into())
-                    },
+                        return Err(e.into());
+                    }
                 }
 
                 self.remaining_messages = self.batch_size as i64;
@@ -191,11 +194,13 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
 
             match Self::timeout(self.event_rx.next(), Duration::from_secs(1)).await {
                 Err(_) => {
-                    // If you are reading this comment, you may have an issue where you have received a batched message
-                    // that is greater that the batch size and then break the way that we send flow command message.
+                    // If you are reading this comment, you may have an issue where you have
+                    // received a batched message that is greater that the batch
+                    // size and then break the way that we send flow command message.
                     //
-                    // In that case, you could increase your batch size or patch this driver by adding the following line,
-                    // if you are sure that you have at least 1 incoming message per second.
+                    // In that case, you could increase your batch size or patch this driver by
+                    // adding the following line, if you are sure that you have
+                    // at least 1 incoming message per second.
                     //
                     // ```rust
                     // self.remaining_messages = 0;
@@ -238,7 +243,10 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                     .payload
                     .as_ref()
                     .and_then(|payload| {
-                        debug!("Consumer: received message payload, num_messages_in_batch = {:?}", payload.metadata.num_messages_in_batch);
+                        debug!(
+                            "Consumer: received message payload, num_messages_in_batch = {:?}",
+                            payload.metadata.num_messages_in_batch
+                        );
                         payload.metadata.num_messages_in_batch
                     })
                     .unwrap_or(1) as i64;

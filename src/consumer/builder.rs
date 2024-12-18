@@ -177,9 +177,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
     // Checks the builder for inconsistencies
     // returns a config and a list of topics with associated brokers
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    async fn validate(
-        self,
-    ) -> Result<(ConsumerConfig, Vec<(String, BrokerAddress)>), Error> {
+    async fn validate(self) -> Result<(ConsumerConfig, Vec<(String, BrokerAddress)>), Error> {
         let ConsumerBuilder {
             pulsar,
             topics,
