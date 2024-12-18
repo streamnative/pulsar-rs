@@ -323,14 +323,21 @@ impl<T: DeserializeMessage, Exe: Executor> Stream for TopicConsumer<T, Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match self.messages.as_mut().poll_next(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => {
+                Poll::Pending
+            },
+            Poll::Ready(None) => {
+                Poll::Ready(None)
+            },
             Poll::Ready(Some(Ok((id, payload)))) => {
                 self.last_message_received = Some(Utc::now());
                 self.messages_received += 1;
                 Poll::Ready(Some(Ok(self.create_message(id, payload))))
             }
-            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
+            Poll::Ready(Some(Err(e))) => {
+                error!("we are using in the single-consumer and we got an error, {e}");
+                Poll::Ready(Some(Err(e)))
+            },
         }
     }
 }
