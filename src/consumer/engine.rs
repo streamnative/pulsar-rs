@@ -148,13 +148,17 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                     })?;
             }
 
-            // In the casual workflow, we use the `batch_size` as a maximum number that we could send using a send
-            // flow command message to ask the broker to send us messages, which is why we have a subtraction below (`batch_size` - `remaining_messages`).
+            // In the casual workflow, we use the `batch_size` as a maximum number that we could
+            // send using a send flow command message to ask the broker to send us
+            // messages, which is why we have a subtraction below (`batch_size` -
+            // `remaining_messages`).
             //
-            // In the special case of batch messages (which is defined by clients), the number of messages could be
-            // greater than the given batch size and the remaining messages goes negative, which is why we use an
-            // `i64` as we want to keep track of the number of negative messages as the next send flow will be
-            // the batch_size - minus remaining messages which allow us to retrieve the casual workflow of flow command messages.
+            // In the special case of batch messages (which is defined by clients), the number of
+            // messages could be greater than the given batch size and the remaining
+            // messages goes negative, which is why we use an `i64` as we want to keep
+            // track of the number of negative messages as the next send flow will be
+            // the batch_size - minus remaining messages which allow us to retrieve the casual
+            // workflow of flow command messages.
             //
             // Here is the example of it works for a batch_size at 1000 and the error case:
             //

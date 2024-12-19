@@ -178,14 +178,15 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
     ) -> Result<u32, ServiceDiscoveryError> {
         let topic = topic.into();
 
-        // This is a fast path to reduce the number of lookup requests for topic partition metadata and as a side effect
-        // reduce amplification on zookeeper.
-        // For example, for a topic with 12 partitions, before this patch we did 13 lookup requests and now, we only did
-        // once.
-        // There are some cases where we ask if a partition of a topic is partitioned which could not be the case.
-        // We are able to detect those requests as the topic name is ending with '...-partition-<number>'.
-        // So, to be effective and avoid a regex here, we use the `contains` method to detect the pattern '-partition-'.
-        // if it matches the pattern as there is no partition in a partitioned topic, we could safely return that the
+        // This is a fast path to reduce the number of lookup requests for topic partition metadata
+        // and as a side effect reduce amplification on zookeeper.
+        // For example, for a topic with 12 partitions, before this patch we did 13 lookup requests
+        // and now, we only did once.
+        // There are some cases where we ask if a partition of a topic is partitioned which could
+        // not be the case. We are able to detect those requests as the topic name is ending
+        // with '...-partition-<number>'. So, to be effective and avoid a regex here, we use
+        // the `contains` method to detect the pattern '-partition-'. if it matches the
+        // pattern as there is no partition in a partitioned topic, we could safely return that the
         // partition number is 0, that implicitly say that there is only 1 topic and the index is 0.
         if topic.contains("-partition-") {
             return Ok(0);
