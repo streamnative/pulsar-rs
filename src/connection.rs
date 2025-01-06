@@ -348,6 +348,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
             self.tx.send(messages::ping()).await?,
         ) {
             (Ok(_), ()) => {
+                debug!("set timeout to {:?} for ping-pong", self.operation_timeout);
                 let delay_f = self.executor.delay(self.operation_timeout);
                 pin_mut!(response);
                 pin_mut!(delay_f);
@@ -355,11 +356,13 @@ impl<Exe: Executor> ConnectionSender<Exe> {
                 match select(response, delay_f).await {
                     Either::Left((res, _)) => res
                         .map_err(|oneshot::Canceled| {
+                            error!("connection-sender: send ping, we have been canceled");
                             self.error.set(ConnectionError::Disconnected);
                             ConnectionError::Disconnected
                         })
                         .map(move |_| trace!("received pong from {}", self.connection_id)),
                     Either::Right(_) => {
+                        error!("connection-sender: send ping, we did not received pong inside the timed out");
                         self.error.set(ConnectionError::Io(std::io::Error::new(
                             std::io::ErrorKind::TimedOut,
                             "timeout when sending ping to the Pulsar server",
@@ -652,6 +655,10 @@ impl<Exe: Executor> ConnectionSender<Exe> {
             response
                 .await
                 .map_err(|oneshot::Canceled| {
+                    error!(
+                        "response has been canceled (key = {:?}), we are disconnected",
+                        k
+                    );
                     error.set(ConnectionError::Disconnected);
                     ConnectionError::Disconnected
                 })
@@ -670,12 +677,16 @@ impl<Exe: Executor> ConnectionSender<Exe> {
                 let connection_id = self.connection_id;
                 let error = self.error.clone();
                 let delay_f = self.executor.delay(self.operation_timeout);
+                trace!(
+                    "Create timeout futures with operation timeout at {:?}",
+                    self.operation_timeout
+                );
                 let fut = async move {
                     pin_mut!(response);
                     pin_mut!(delay_f);
                     match select(response, delay_f).await {
                         Either::Left((res, _)) => {
-                            // println!("recv msg: {:?}", res);
+                            debug!("Received response: {:?}", res);
                             res
                         }
                         Either::Right(_) => {

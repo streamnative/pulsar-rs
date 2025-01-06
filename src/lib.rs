@@ -233,7 +233,7 @@ mod tests {
         pub data: String,
     }
 
-    impl<'a> SerializeMessage for &'a TestData {
+    impl SerializeMessage for &TestData {
         fn serialize_message(input: Self) -> Result<producer::Message, PulsarError> {
             let payload =
                 serde_json::to_vec(input).map_err(|e| PulsarError::Custom(e.to_string()))?;
