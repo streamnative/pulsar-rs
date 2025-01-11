@@ -23,9 +23,9 @@ use crate::{
         proto::{command_subscribe::SubType, MessageIdData},
         Message as RawMessage,
     },
-    proto,
-    proto::{BaseCommand, CommandCloseConsumer, CommandMessage},
+    proto::{self, BaseCommand, CommandCloseConsumer, CommandMessage},
     retry_op::retry_subscribe_consumer,
+    transaction::TransactionId,
     Error, Executor, Payload, Pulsar,
 };
 
@@ -279,8 +279,8 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 trace!("ack channel was closed");
                 false
             }
-            Some(EngineMessage::Ack(message_id, cumulative)) => {
-                self.ack(message_id, cumulative).await;
+            Some(EngineMessage::Ack(message_id, maybe_txn, cumulative)) => {
+                self.ack(message_id, maybe_txn, cumulative).await;
                 true
             }
             Some(EngineMessage::Nack(message_id)) => {
@@ -338,13 +338,18 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    async fn ack(&mut self, message_id: MessageIdData, cumulative: bool) {
+    async fn ack(
+        &mut self,
+        message_id: MessageIdData,
+        txn_id: Option<TransactionId>,
+        cumulative: bool,
+    ) {
         // FIXME: this does not handle cumulative acks
         self.unacked_messages.remove(&message_id);
         let res = self
             .connection
             .sender()
-            .send_ack(self.id, vec![message_id], cumulative)
+            .send_ack(self.id, vec![message_id], txn_id, cumulative)
             .await;
         if res.is_err() {
             error!("ack error: {:?}", res);
@@ -561,7 +566,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                             Error::Custom("DLQ send error".to_string())
                         })?;
 
-                    self.ack(message_id, false).await;
+                    self.ack(message_id, None, false).await;
                 }
                 _ => self.send_to_consumer(message_id, payload).await?,
             }
