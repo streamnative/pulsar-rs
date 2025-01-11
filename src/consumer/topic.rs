@@ -367,7 +367,10 @@ impl<T: DeserializeMessage, Exe: Executor> Stream for TopicConsumer<T, Exe> {
                 self.messages_received += 1;
                 Poll::Ready(Some(Ok(self.create_message(id, payload))))
             }
-            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
+            Poll::Ready(Some(Err(e))) => {
+                error!("we are using in the single-consumer and we got an error, {e}");
+                Poll::Ready(Some(Err(e)))
+            }
         }
     }
 }

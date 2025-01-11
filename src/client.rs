@@ -72,7 +72,7 @@ impl SerializeMessage for () {
     }
 }
 
-impl<'a> SerializeMessage for &'a [u8] {
+impl SerializeMessage for &[u8] {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn serialize_message(input: Self) -> Result<producer::Message, Error> {
         Ok(producer::Message {
@@ -103,7 +103,7 @@ impl SerializeMessage for String {
     }
 }
 
-impl<'a> SerializeMessage for &'a String {
+impl SerializeMessage for &String {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn serialize_message(input: Self) -> Result<producer::Message, Error> {
         let payload = input.as_bytes().to_vec();
@@ -114,7 +114,7 @@ impl<'a> SerializeMessage for &'a String {
     }
 }
 
-impl<'a> SerializeMessage for &'a str {
+impl SerializeMessage for &str {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn serialize_message(input: Self) -> Result<producer::Message, Error> {
         let payload = input.as_bytes().to_vec();
