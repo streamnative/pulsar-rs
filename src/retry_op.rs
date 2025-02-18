@@ -54,7 +54,7 @@ pub async fn handle_retry_error<Exe: Executor>(
             return Err(err.into());
         }
     };
-    if operation_retry_options.max_retries.is_none() || current_retries < operation_retry_options.max_retries.unwrap() {
+    if operation_retry_options.allow_retry(current_retries) {
         let max_retries= operation_retry_options.max_retries.unwrap_or(0);
         error!(
             "{operation_name}({topic}) answered {kind}{text}, retrying request after {:?} (max_retries = {max_retries})",

@@ -68,6 +68,59 @@ impl Default for OperationRetryOptions {
     }
 }
 
+impl OperationRetryOptions {
+    pub fn allow_retry(&self, current: u32) -> bool {
+        self.max_retries.is_none() || current < self.max_retries.unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_allow_retry_no_max_retries() {
+        let options = OperationRetryOptions {
+            operation_timeout: Duration::from_secs(30),
+            retry_delay: Duration::from_secs(5),
+            max_retries: None,
+        };
+
+        // If max_retries is None, it should always allow retries
+        assert!(options.allow_retry(0));
+        assert!(options.allow_retry(100));
+        assert!(options.allow_retry(u32::MAX));
+    }
+
+    #[test]
+    fn test_allow_retry_with_max_retries() {
+        let options = OperationRetryOptions {
+            operation_timeout: Duration::from_secs(30),
+            retry_delay: Duration::from_secs(5),
+            max_retries: Some(3),
+        };
+
+        // If max_retries is set to 3, we allow retries for current < 3
+        assert!(options.allow_retry(0)); // current < 3
+        assert!(options.allow_retry(2)); // current < 3
+        assert!(!options.allow_retry(3)); // current == 3
+        assert!(!options.allow_retry(4)); // current > 3
+    }
+
+    #[test]
+    fn test_allow_retry_max_retries_is_zero() {
+        let options = OperationRetryOptions {
+            operation_timeout: Duration::from_secs(30),
+            retry_delay: Duration::from_secs(5),
+            max_retries: Some(0),
+        };
+
+        // If max_retries is 0, it should not allow any retries
+        assert!(!options.allow_retry(0)); // current == 0
+        assert!(!options.allow_retry(1)); // current > 0
+    }
+}
+
 /// configuration for TLS connections
 #[derive(Debug, Clone)]
 pub struct TlsOptions {
