@@ -1178,7 +1178,7 @@ impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
     }
 }
 
-impl<'a, T: SerializeMessage + Sized, Exe: Executor> MessageBuilder<'a, T, Exe> {
+impl<T: SerializeMessage + Sized, Exe: Executor> MessageBuilder<T, Exe> {
     /// sends the message through the producer that created it
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     #[deprecated = "instead use send_non_blocking"]
