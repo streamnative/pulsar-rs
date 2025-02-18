@@ -7,7 +7,11 @@ use std::{
     },
 };
 
-use crate::{message::proto::ServerError, producer::SendFuture};
+use crate::{
+    message::proto::ServerError,
+    producer::SendFuture,
+    transaction::{State as TransactionState, TransactionId},
+};
 
 #[derive(Debug)]
 pub enum Error {
@@ -18,6 +22,7 @@ pub enum Error {
     Authentication(AuthenticationError),
     Custom(String),
     Executor,
+    Transaction(TransactionError),
 }
 
 impl From<ConnectionError> for Error {
@@ -59,6 +64,7 @@ impl fmt::Display for Error {
             Error::Authentication(e) => write!(f, "authentication error: {e}"),
             Error::Custom(e) => write!(f, "error: {e}"),
             Error::Executor => write!(f, "could not spawn task"),
+            Error::Transaction(e) => write!(f, "transaction error: {e}"),
         }
     }
 }
@@ -74,6 +80,7 @@ impl std::error::Error for Error {
             Error::Authentication(e) => e.source(),
             Error::Custom(_) => None,
             Error::Executor => None,
+            Error::Transaction(e) => e.source(),
         }
     }
 }
@@ -89,6 +96,7 @@ pub enum ConnectionError {
     Encoding(String),
     SocketAddr(String),
     UnexpectedResponse(String),
+    UnsupportedProtocolVersion(u32),
     #[cfg(any(feature = "tokio-runtime", feature = "async-std-runtime"))]
     Tls(native_tls::Error),
     #[cfg(all(
@@ -197,6 +205,9 @@ impl fmt::Display for ConnectionError {
             ConnectionError::NotFound => write!(f, "error looking up URL"),
             ConnectionError::Canceled => write!(f, "canceled request"),
             ConnectionError::Shutdown => write!(f, "The connection was shut down"),
+            ConnectionError::UnsupportedProtocolVersion(v) => {
+                write!(f, "Unsupported protocol version: {v}")
+            }
         }
     }
 }
@@ -212,6 +223,59 @@ impl std::error::Error for ConnectionError {
 }
 
 #[derive(Debug)]
+pub enum TransactionError {
+    InvalidState(TransactionState),
+    /// Invalid timeout value
+    InvalidTimeout,
+    /// Transaction has timed out
+    TimedOut,
+    /// Transaction not found
+    NotFound,
+    /// Transaction Conflict
+    Conflict,
+    /// Transaction Meta Handler not found
+    MetaHandlerNotFound(TransactionId),
+    /// Transaction Coordinator not found
+    CoordinatorNotFound,
+}
+
+impl std::error::Error for TransactionError {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            TransactionError::InvalidState(_) => None,
+            TransactionError::InvalidTimeout => None,
+            TransactionError::TimedOut => None,
+            TransactionError::NotFound => None,
+            TransactionError::Conflict => None,
+            TransactionError::MetaHandlerNotFound(_) => None,
+            TransactionError::CoordinatorNotFound => None,
+        }
+    }
+}
+
+impl fmt::Display for TransactionError {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            TransactionError::InvalidState(state) => {
+                write!(f, "Transaction is in invalid state: {state}")
+            }
+            TransactionError::InvalidTimeout => write!(f, "Invalid timeout value"),
+            TransactionError::TimedOut => write!(f, "Transaction has timed out"),
+            TransactionError::NotFound => write!(f, "Transaction not found"),
+            TransactionError::Conflict => write!(f, "Transaction conflict"),
+            TransactionError::MetaHandlerNotFound(id) => {
+                write!(f, "Transaction Meta Handler not found for txn id: {id}")
+            }
+            TransactionError::CoordinatorNotFound => {
+                write!(f, "Transaction Coordinator not found")
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
 pub enum ConsumerError {
     Connection(ConnectionError),
     MissingPayload(String),
@@ -219,6 +283,7 @@ pub enum ConsumerError {
     ChannelFull,
     Closed,
     BuildError,
+    Transaction(TransactionError),
 }
 
 impl From<ConnectionError> for ConsumerError {
@@ -262,6 +327,7 @@ impl fmt::Display for ConsumerError {
                 "cannot send message to the consumer engine: the channel is closed"
             ),
             ConsumerError::BuildError => write!(f, "Error while building the consumer."),
+            ConsumerError::Transaction(e) => write!(f, "Transaction error: {e}"),
         }
     }
 }

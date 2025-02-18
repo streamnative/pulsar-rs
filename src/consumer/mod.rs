@@ -37,7 +37,7 @@ use crate::{
     executor::Executor,
     message::proto::{command_subscribe::SubType, MessageIdData, Schema},
     proto::CommandConsumerStatsResponse,
-    DeserializeMessage, Pulsar,
+    DeserializeMessage, Pulsar, Transaction,
 };
 
 enum InnerConsumer<T: DeserializeMessage, Exe: Executor> {
@@ -105,6 +105,29 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         match &mut self.inner {
             InnerConsumer::Single(c) => Ok(vec![c.get_stats().await?]),
             InnerConsumer::Multi(c) => c.get_stats().await,
+        }
+    }
+
+    /// acknowledges a single message as part of a transaction
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub async fn txn_ack(&mut self, msg: &Message<T>, txn: &Transaction<Exe>) -> Result<(), Error> {
+        match &mut self.inner {
+            InnerConsumer::Single(c) => c.txn_ack(msg, txn).await,
+            InnerConsumer::Multi(c) => c.txn_ack(msg, txn).await,
+        }
+    }
+
+    /// acknowledges a single message as part of a transaction, with a given ID
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub async fn txn_ack_with_id(
+        &mut self,
+        msg: &Message<T>,
+        msg_id: MessageIdData,
+        txn: &Transaction<Exe>,
+    ) -> Result<(), Error> {
+        match &mut self.inner {
+            InnerConsumer::Single(c) => c.txn_ack_with_id(msg, msg_id, txn).await,
+            InnerConsumer::Multi(c) => c.txn_ack_with_id(msg, msg_id, txn).await,
         }
     }
 

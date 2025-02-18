@@ -30,7 +30,22 @@ jobs:
         pulsar-version: [ 2.10.6, 2.11.4, 3.0.8, 3.2.4, 3.3.3, 4.0.1 ]
     steps:
       - name: Start Pulsar Standalone Container
-        run: docker run --name pulsar -p 6650:6650 -p 8080:8080 -d -e GITHUB_ACTIONS=true -e CI=true apachepulsar/pulsar:${{ matrix.pulsar-version }} bin/pulsar standalone
+        run: |
+          docker run --name pulsar \
+            -p 6650:6650 \
+            -p 8080:8080 \
+            -d \
+            -e GITHUB_ACTIONS=true \
+            -e CI=true \
+            -e PULSAR_PREFIX_transactionCoordinatorEnabled="true" \
+            -e PULSAR_PREFIX_systemTopicEnabled="true" \
+            -e PULSAR_PREFIX_metadataStoreUrl="zk:127.0.0.1:2181" \
+            apachepulsar/pulsar:${{ matrix.pulsar-version }} sh -c \
+            "bin/apply-config-from-env.py \
+            conf/standalone.conf && \
+            bin/pulsar-daemon start zookeeper && \
+            bin/pulsar initialize-transaction-coordinator-metadata -cs 127.0.0.1:2181 -c standalone && \
+            bin/pulsar standalone"
       - uses: actions/checkout@v3
       - uses: Swatinem/rust-cache@v2
       - name: Run tests

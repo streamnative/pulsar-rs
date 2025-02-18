@@ -115,6 +115,28 @@ impl Message {
             | BaseCommand {
                 get_schema_response: Some(CommandGetSchemaResponse { request_id, .. }),
                 ..
+            }
+            | BaseCommand {
+                new_txn_response: Some(CommandNewTxnResponse { request_id, .. }),
+                ..
+            }
+            | BaseCommand {
+                tc_client_connect_response: Some(CommandTcClientConnectResponse { request_id, .. }),
+                ..
+            }
+            | BaseCommand {
+                add_partition_to_txn_response:
+                    Some(CommandAddPartitionToTxnResponse { request_id, .. }),
+                ..
+            }
+            | BaseCommand {
+                add_subscription_to_txn_response:
+                    Some(CommandAddSubscriptionToTxnResponse { request_id, .. }),
+                ..
+            }
+            | BaseCommand {
+                end_txn_response: Some(CommandEndTxnResponse { request_id, .. }),
+                ..
             } => Some(RequestKey::RequestId(*request_id)),
             BaseCommand {
                 send:
