@@ -54,23 +54,23 @@ pub async fn handle_retry_error<Exe: Executor>(
             return Err(err.into());
         }
     };
-    if operation_retry_options.allow_retry(current_retries) {
-        let max_retries= operation_retry_options.max_retries.unwrap_or(0);
-        error!(
-            "{operation_name}({topic}) answered {kind}{text}, retrying request after {:?} (max_retries = {max_retries})",
-            operation_retry_options.retry_delay
-        );
-        client
-            .executor
-            .delay(operation_retry_options.retry_delay)
-            .await;
-
-        *addr = client.lookup_topic(topic).await?;
-        *connection = client.manager.get_connection(addr).await?;
-        return Ok(());
+    if !(operation_retry_options.allow_retry(current_retries)) {
+        error!("{operation_name}({topic}) answered {kind}{text}, reached max retries");
+        return Err(err.into());
     }
-    error!("{operation_name}({topic}) answered {kind}{text}, reached max retries");
-    Err(err.into())
+    error!(
+        "{operation_name}({topic}) answered {kind}{text}, retrying request after {:?} (max_retries = {:?})",
+        operation_retry_options.retry_delay,
+        operation_retry_options.max_retries
+    );
+    client
+        .executor
+        .delay(operation_retry_options.retry_delay)
+        .await;
+
+    *addr = client.lookup_topic(topic).await?;
+    *connection = client.manager.get_connection(addr).await?;
+    Ok(())
 }
 
 pub async fn retry_subscribe_consumer<Exe: Executor>(
