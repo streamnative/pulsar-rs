@@ -504,6 +504,8 @@ struct TopicProducer<Exe: Executor> {
     batch: Option<Mutex<Batch>>,
     compression: Option<Compression>,
     options: ProducerOptions,
+    epoch: std::sync::atomic::AtomicU64,
+    user_provided_producer_name: bool,
 }
 
 impl<Exe: Executor> TopicProducer<Exe> {
@@ -526,6 +528,8 @@ impl<Exe: Executor> TopicProducer<Exe> {
         let batch_byte_size = options.batch_byte_size;
         let compression = options.compression.clone();
         let mut connection = client.manager.get_connection(&addr).await?;
+        let epoch = std::sync::atomic::AtomicU64::new(0);
+        let user_provided_producer_name = name.is_some();
 
         let producer_name = retry_create_producer(
             &client,
@@ -535,6 +539,8 @@ impl<Exe: Executor> TopicProducer<Exe> {
             producer_id,
             name,
             &options,
+            &epoch,
+            user_provided_producer_name,
         )
         .await?;
 
@@ -552,6 +558,8 @@ impl<Exe: Executor> TopicProducer<Exe> {
             batch,
             compression,
             options,
+            epoch,
+            user_provided_producer_name,
         })
     }
 
@@ -814,6 +822,8 @@ impl<Exe: Executor> TopicProducer<Exe> {
             self.id,
             Some(self.name.clone()),
             &self.options,
+            &self.epoch,
+            self.user_provided_producer_name,
         )
         .await?;
 
