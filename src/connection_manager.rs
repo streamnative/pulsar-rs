@@ -393,6 +393,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                     self.executor.delay(current_backoff).await;
                 }
                 Err(e) => {
+                    error!("connection error, not retryable: {}", e);
                     return Err(e);
                 }
             }
