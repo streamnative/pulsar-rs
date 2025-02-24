@@ -21,6 +21,7 @@ use crate::{
     },
     producer::{self, ProducerBuilder, SendFuture},
     service_discovery::ServiceDiscovery,
+    transaction::{coord::TransactionCoordinatorClient, TransactionBuilder},
 };
 
 /// Helper trait for consumer deserialization
@@ -156,6 +157,8 @@ impl SerializeMessage for &str {
 pub struct Pulsar<Exe: Executor> {
     pub(crate) manager: Arc<ConnectionManager<Exe>>,
     service_discovery: Arc<ServiceDiscovery<Exe>>,
+    /// The transaction coordinator client, if transactions are enabled.
+    tc_client: Option<Arc<TransactionCoordinatorClient<Exe>>>,
     // this field is an Option to avoid a cyclic dependency between Pulsar
     // and run_producer: the run_producer loop needs a client to create
     // a multitopic producer, this producer stores internally a copy
@@ -179,6 +182,7 @@ impl<Exe: Executor> Pulsar<Exe> {
         connection_retry_parameters: Option<ConnectionRetryOptions>,
         operation_retry_parameters: Option<OperationRetryOptions>,
         tls_options: Option<TlsOptions>,
+        transactions_enabled: bool,
         outbound_channel_size: Option<usize>,
         executor: Exe,
     ) -> Result<Self, Error> {
@@ -221,17 +225,24 @@ impl<Exe: Executor> Pulsar<Exe> {
         let (producer, producer_rx) = mpsc::unbounded();
 
         let mut client = Pulsar {
-            manager,
+            manager: Arc::clone(&manager),
             service_discovery,
+            tc_client: None,
             producer: None,
             operation_retry_options,
             executor,
         };
 
+        if transactions_enabled {
+            let tc_client = TransactionCoordinatorClient::new(client.clone(), manager).await?;
+            client.tc_client = Some(Arc::new(tc_client));
+        }
+
         let _ = client
             .executor
             .spawn(Box::pin(run_producer(client.clone(), producer_rx)));
         client.producer = Some(producer);
+
         Ok(client)
     }
 
@@ -256,7 +267,30 @@ impl<Exe: Executor> Pulsar<Exe> {
             operation_retry_options: None,
             tls_options: None,
             outbound_channel_size: None,
+            transactions_enabled: false,
             executor,
+        }
+    }
+
+    /// Creates a new transaction builder. If transactions were not enabled when creating the
+    /// Pulsar client, this will return an error.
+    ///
+    /// ```rust,no_run
+    /// use std::time::Duration;
+    /// use pulsar::Transaction;
+    ///
+    /// # async fn run(pulsar: pulsar::Pulsar<pulsar::TokioExecutor>) -> Result<(), pulsar::Error> {
+    /// let txn = pulsar.new_txn()?.with_timeout(Duration::from_millis(1000)).build().await?;
+    /// # Ok(())
+    /// # }
+    pub fn new_txn(&self) -> Result<TransactionBuilder<Exe>, Error> {
+        if let Some(tc_client) = self.tc_client.as_ref() {
+            Ok(TransactionBuilder::new(
+                Arc::clone(&self.executor),
+                Arc::clone(tc_client),
+            ))
+        } else {
+            Err(Error::Custom("Transactions are not enabled".into()))
         }
     }
 
@@ -457,6 +491,7 @@ pub struct PulsarBuilder<Exe: Executor> {
     operation_retry_options: Option<OperationRetryOptions>,
     tls_options: Option<TlsOptions>,
     outbound_channel_size: Option<usize>,
+    transactions_enabled: bool,
     executor: Exe,
 }
 
@@ -560,6 +595,13 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
         self
     }
 
+    /// Enable transactions on this Pulsar client
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn with_transactions(mut self) -> Self {
+        self.transactions_enabled = true;
+        self
+    }
+
     /// creates the Pulsar client and connects it
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn build(self) -> Result<Pulsar<Exe>, Error> {
@@ -570,6 +612,7 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
             operation_retry_options,
             tls_options,
             outbound_channel_size,
+            transactions_enabled,
             executor,
         } = self;
 
@@ -579,6 +622,7 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
             connection_retry_options,
             operation_retry_options,
             tls_options,
+            transactions_enabled,
             outbound_channel_size,
             executor,
         )

@@ -29,7 +29,8 @@ use crate::{
         BatchedMessage,
     },
     retry_op::retry_create_producer,
-    BrokerAddress, Error, Pulsar,
+    transaction::TransactionId,
+    BrokerAddress, Error, Pulsar, Transaction,
 };
 
 type ProducerId = u64;
@@ -81,6 +82,8 @@ pub struct Message {
     pub event_time: ::std::option::Option<u64>,
     /// current version of the schema
     pub schema_version: ::std::option::Option<Vec<u8>>,
+    /// Transaction ID
+    pub txn_id: ::std::option::Option<TransactionId>,
 }
 
 /// internal message type carrying options that must be defined
@@ -113,6 +116,8 @@ pub(crate) struct ProducerMessage {
     /// UTC Unix timestamp in milliseconds, time at which the message should be
     /// delivered to consumers
     pub deliver_at_time: ::std::option::Option<i64>,
+    /// Transaction ID
+    pub txn_id: ::std::option::Option<TransactionId>,
 }
 
 impl From<Message> for ProducerMessage {
@@ -126,6 +131,7 @@ impl From<Message> for ProducerMessage {
             replicate_to: m.replicate_to,
             event_time: m.event_time,
             schema_version: m.schema_version,
+            txn_id: m.txn_id,
             ..Default::default()
         }
     }
@@ -754,7 +760,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
         message: ProducerMessage,
     ) -> Result<impl Future<Output = Result<CommandSendReceipt, Error>>, Error> {
         loop {
-            let msg = message.clone();
+            let msg: ProducerMessage = message.clone();
             match self.connection.sender().send(
                 self.id,
                 self.name.clone(),
@@ -1076,6 +1082,7 @@ pub struct MessageBuilder<'a, T, Exe: Executor> {
     partition_key: Option<String>,
     ordering_key: Option<Vec<u8>>,
     deliver_at_time: Option<i64>,
+    txn: Option<&'a Transaction<Exe>>,
     event_time: Option<u64>,
     content: T,
 }
@@ -1090,6 +1097,7 @@ impl<'a, Exe: Executor> MessageBuilder<'a, (), Exe> {
             partition_key: None,
             ordering_key: None,
             deliver_at_time: None,
+            txn: None,
             event_time: None,
             content: (),
         }
@@ -1107,6 +1115,7 @@ impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
             ordering_key: self.ordering_key,
             deliver_at_time: self.deliver_at_time,
             event_time: self.event_time,
+            txn: self.txn,
             content,
         }
     }
@@ -1139,6 +1148,13 @@ impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_property<S1: Into<String>, S2: Into<String>>(mut self, key: S1, value: S2) -> Self {
         self.properties.insert(key.into(), value.into());
+        self
+    }
+
+    /// adds the message to the specified transaction
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn with_txn(mut self, txn: &'a Transaction<Exe>) -> Self {
+        self.txn = Some(txn);
         self
     }
 
@@ -1191,7 +1207,18 @@ impl<T: SerializeMessage + Sized, Exe: Executor> MessageBuilder<'_, T, Exe> {
 
     /// sends the message through the producer that created it
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub async fn send_non_blocking(self) -> Result<SendFuture, Error> {
+    pub async fn send_non_blocking(mut self) -> Result<SendFuture, Error> {
+        if let Some(txn) = self.txn.as_mut() {
+            // Register the partitions that will be a part of this transaction, if they
+            // are not already registered
+            let partitions = self
+                .producer
+                .partitions()
+                .unwrap_or(vec![self.producer.topic().to_owned()]);
+
+            txn.register_produced_partitions(partitions).await?;
+        }
+
         let MessageBuilder {
             producer,
             properties,
@@ -1200,6 +1227,7 @@ impl<T: SerializeMessage + Sized, Exe: Executor> MessageBuilder<'_, T, Exe> {
             content,
             deliver_at_time,
             event_time,
+            txn,
         } = self;
 
         let mut message = T::serialize_message(content)?;
@@ -1207,6 +1235,7 @@ impl<T: SerializeMessage + Sized, Exe: Executor> MessageBuilder<'_, T, Exe> {
         message.partition_key = partition_key;
         message.ordering_key = ordering_key;
         message.event_time = event_time;
+        message.txn_id = txn.map(|txn| txn.id());
 
         let mut producer_message: ProducerMessage = message.into();
         producer_message.deliver_at_time = deliver_at_time;
