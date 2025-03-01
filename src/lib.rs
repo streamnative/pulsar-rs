@@ -388,6 +388,76 @@ mod tests {
 
     #[tokio::test]
     #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
+    async fn round_trip_tls() {
+        let _result = log::set_logger(&TEST_LOGGER);
+        log::set_max_level(LevelFilter::Debug);
+
+        let addr = "pulsar+ssl://127.0.0.1:6651";
+        let pulsar: Pulsar<_> = Pulsar::builder(addr, TokioExecutor)
+            .with_identity_files(&"./.github/certs/client.cert.pem", &"./.github/certs/client.key-pk8.pem").unwrap()
+            .with_certificate_chain_file(&"./.github/certs/ca.cert.pem").unwrap()
+            .with_allow_insecure_connection(false)
+            .with_tls_hostname_verification_enabled(false)
+            .build().await.unwrap();
+
+        // random topic to better allow multiple test runs while debugging
+        let topic = format!("test_{}", rand::random::<u16>());
+
+        let mut producer = pulsar.producer().with_topic(&topic).build().await.unwrap();
+        info!("producer created");
+
+        let message_ids: BTreeSet<u64> = (0..100).collect();
+
+        info!("will send message");
+        let mut sends = Vec::new();
+        for &id in &message_ids {
+            let message = TestData {
+                data: "data".to_string(),
+                id,
+            };
+            sends.push(producer.send_non_blocking(&message).await.unwrap());
+        }
+        try_join_all(sends).await.unwrap();
+
+        info!("sent");
+
+        let mut consumer: Consumer<TestData, _> = pulsar
+            .consumer()
+            .with_topic(&topic)
+            .with_consumer_name("test_consumer")
+            .with_subscription_type(SubType::Exclusive)
+            .with_subscription("test_subscription")
+            .with_options(ConsumerOptions {
+                initial_position: InitialPosition::Earliest,
+                ..Default::default()
+            })
+            .build()
+            .await
+            .unwrap();
+
+        info!("consumer created");
+
+        let topics = consumer.topics();
+        debug!("consumer connected to {:?}", topics);
+        assert_eq!(topics.len(), 1);
+        assert!(topics[0].ends_with(&topic));
+
+        let mut received = BTreeSet::new();
+        while let Ok(Some(msg)) = timeout(Duration::from_secs(10), consumer.next()).await {
+            let msg: Message<TestData> = msg.unwrap();
+            info!("id: {:?}", msg.message_id());
+            received.insert(msg.deserialize().unwrap().id);
+            consumer.ack(&msg).await.unwrap();
+            if received.len() == message_ids.len() {
+                break;
+            }
+        }
+        assert_eq!(received.len(), message_ids.len());
+        assert_eq!(received, message_ids);
+    }
+
+    #[tokio::test]
+    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
     async fn unsized_data() {
         let _result = log::set_logger(&TEST_LOGGER);
         log::set_max_level(LevelFilter::Debug);

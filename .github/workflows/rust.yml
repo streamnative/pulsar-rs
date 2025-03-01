@@ -30,7 +30,7 @@ jobs:
         pulsar-version: [ 2.10.4, 2.11.2, 3.0.4, 3.1.3 ]
     steps:
       - name: Start Pulsar Standalone Container
-        run: docker run --name pulsar -p 6650:6650 -p 8080:8080 -d -e GITHUB_ACTIONS=true -e CI=true apachepulsar/pulsar:${{ matrix.pulsar-version }} bin/pulsar standalone
+        run: docker run --name pulsar -p 6650:6650 -p 8080:8080 -p 8081:8081 -p 6651:6651 -p 8443:8443 -v $PWD/.github/certs:/certs -d -e GITHUB_ACTIONS=true -e CI=true -e PULSAR_PREFIX_brokerServicePortTls=6651 -e PULSAR_PREFIX_webServicePortTls=8443 -e PULSAR_PREFIX_tlsEnabled=true -e PULSAR_PREFIX_tlsCertificateFilePath=/certs/server.cert.pem -e PULSAR_PREFIX_tlsKeyFilePath=/certs/server.key-pk8.pem -e PULSAR_PREFIX_tlsTrustCertsFilePath=/certs/ca.cert.pem apachepulsar/pulsar:3.1.3 bash -c “/pulsar/bin/apply-config-from-env.py /pulsar/conf/standalone.conf && /pulsar/bin/pulsar standalone”
       - uses: actions/checkout@v3
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
