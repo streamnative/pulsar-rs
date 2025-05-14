@@ -1157,11 +1157,6 @@ impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn delay(mut self, delay: Duration) -> Result<Self, std::time::SystemTimeError> {
         let date = SystemTime::now() + delay;
-        println!(
-            "current date: {}, deliver_at: {}",
-            SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
-            date.duration_since(UNIX_EPOCH)?.as_millis()
-        );
         self.deliver_at_time = Some(date.duration_since(UNIX_EPOCH)?.as_millis() as i64);
         Ok(self)
     }
