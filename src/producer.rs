@@ -81,6 +81,9 @@ pub struct Message {
     pub event_time: ::std::option::Option<u64>,
     /// current version of the schema
     pub schema_version: ::std::option::Option<Vec<u8>>,
+    /// UTC Unix timestamp in milliseconds, time at which the message should be
+    /// delivered to consumers
+    pub deliver_at_time: ::std::option::Option<i64>,
 }
 
 /// internal message type carrying options that must be defined
@@ -126,6 +129,7 @@ impl From<Message> for ProducerMessage {
             replicate_to: m.replicate_to,
             event_time: m.event_time,
             schema_version: m.schema_version,
+            deliver_at_time: m.deliver_at_time,
             ..Default::default()
         }
     }
