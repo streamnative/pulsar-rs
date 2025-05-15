@@ -207,8 +207,7 @@ impl Message {
                     Err(unknown_enum) => {
                         warn!(
                             "Received BaseCommand of unexpected type {}: {}",
-                            self.command.r#type,
-                            unknown_enum.to_string()
+                            self.command.r#type, unknown_enum
                         );
                     }
                 }
