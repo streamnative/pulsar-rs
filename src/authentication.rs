@@ -64,7 +64,7 @@ pub mod oauth2 {
     use nom::lib::std::ops::Add;
     use oauth2::{
         basic::{BasicClient, BasicTokenResponse},
-        reqwest::async_http_client,
+        reqwest,
         AuthType::RequestBody,
         AuthUrl, ClientId, ClientSecret, Scope, TokenResponse, TokenUrl,
     };
@@ -261,9 +261,10 @@ pub mod oauth2 {
             match &self.token_url {
                 Some(url) => Ok(Some(url.clone())),
                 None => {
+                    let client = reqwest::Client::new();
                     let metadata = CoreProviderMetadata::discover_async(
                         IssuerUrl::from_url(Url::parse(self.params.issuer_url.as_str())?),
-                        async_http_client,
+                        &client,
                     )
                     .await?;
                     if let Some(token_endpoint) = metadata.token_endpoint() {
@@ -293,16 +294,17 @@ pub mod oauth2 {
                 self.params.issuer_url.as_str()
             };
 
-            let client = BasicClient::new(
-                ClientId::new(private_params.client_id.clone()),
-                Some(ClientSecret::new(private_params.client_secret.clone())),
-                AuthUrl::from_url(Url::parse(issuer_url)?),
-                self.token_url().await?,
-            )
-            .set_auth_type(RequestBody);
+            let client = BasicClient::new(ClientId::new(private_params.client_id.clone()))
+                .set_client_secret(ClientSecret::new(private_params.client_secret.clone()))
+                .set_auth_uri(AuthUrl::from_url(Url::parse(issuer_url)?))
+                .set_token_uri(
+                    self.token_url()
+                        .await?
+                        .ok_or_else(|| "token endpoint is unavailable".to_string())?,
+                )
+                .set_auth_type(RequestBody);
 
             let mut request = client.exchange_client_credentials();
-
             if let Some(audience) = &self.params.audience {
                 request = request.add_extra_param("audience", audience.clone());
             }
@@ -311,7 +313,8 @@ pub mod oauth2 {
                 request = request.add_scope(Scope::new(scope.clone()));
             }
 
-            let token = request.request_async(async_http_client).await?;
+            let client = reqwest::Client::new();
+            let token = request.request_async(&client).await?;
             debug!("Got a new oauth2 token for [{}]", self.params);
             Ok(token)
         }

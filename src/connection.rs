@@ -892,8 +892,7 @@ impl<Exe: Executor> Connection<Exe> {
 
         if retryable_errors.is_empty() {
             error!("connection error, not retryable: {:?}", fatal_errors);
-            Err(ConnectionError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            Err(ConnectionError::Io(std::io::Error::other(
                 "fatal error when connecting to the Pulsar server",
             )))
         } else {

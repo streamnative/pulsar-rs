@@ -726,21 +726,14 @@ impl<Exe: Executor> TopicProducer<Exe> {
             }
             #[cfg(feature = "snap")]
             Some(Compression::Snappy(..)) => {
-                let compressed_payload: Vec<u8> = Vec::new();
-                let mut encoder = snap::write::FrameEncoder::new(compressed_payload);
-                encoder
-                    .write(&message.payload[..])
-                    .map_err(ProducerError::Io)?;
-                let compressed_payload = encoder
-                    .into_inner()
-                    //FIXME
-                    .map_err(|e| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            format!("Snappy compression error: {e:?}"),
-                        )
-                    })
-                    .map_err(ProducerError::Io)?;
+                let mut compressed_payload = Vec::new();
+                {
+                    let mut encoder = snap::write::FrameEncoder::new(&mut compressed_payload);
+                    encoder
+                        .write_all(&message.payload[..])
+                        .map_err(ProducerError::Io)?;
+                    encoder.flush().map_err(ProducerError::Io)?;
+                }
 
                 message.uncompressed_size = Some(message.payload.len() as u32);
                 message.payload = compressed_payload;
