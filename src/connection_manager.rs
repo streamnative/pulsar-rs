@@ -202,15 +202,12 @@ impl<Exe: Executor> ConnectionManager<Exe> {
             None => vec![],
             Some(certificate_chain) => {
                 let mut v = vec![];
-                let certificates = pem::parse_many(certificate_chain)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                let certificates =
+                    pem::parse_many(certificate_chain).map_err(std::io::Error::other)?;
 
                 for cert in certificates.iter().rev() {
                     #[cfg(any(feature = "tokio-runtime", feature = "async-std-runtime"))]
-                    v.push(
-                        Certificate::from_der(cert.contents())
-                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?,
-                    );
+                    v.push(Certificate::from_der(cert.contents()).map_err(std::io::Error::other)?);
 
                     #[cfg(all(
                         any(

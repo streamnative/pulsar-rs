@@ -1,7 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
-    io::ErrorKind,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -440,10 +439,9 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             None => proto::CompressionType::None,
             Some(compression) => proto::CompressionType::try_from(compression).map_err(|err| {
                 error!("unknown compression type: {}", compression);
-                Error::Consumer(ConsumerError::Io(std::io::Error::new(
-                    ErrorKind::Other,
-                    format!("unknown compression type {compression}: {err}"),
-                )))
+                Error::Consumer(ConsumerError::Io(std::io::Error::other(format!(
+                    "unknown compression type {compression}: {err}"
+                ))))
             })?,
         };
 
@@ -452,11 +450,9 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             proto::CompressionType::Lz4 => {
                 #[cfg(not(feature = "lz4"))]
                 {
-                    return Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
-                        std::io::ErrorKind::Other,
+                    return Err(Error::Consumer(ConsumerError::Io(std::io::Error::other(
                         "got a LZ4 compressed message but 'lz4' cargo feature is deactivated",
-                    )))
-                    .into());
+                    ))));
                 }
 
                 #[cfg(feature = "lz4")]
@@ -474,11 +470,9 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             proto::CompressionType::Zlib => {
                 #[cfg(not(feature = "flate2"))]
                 {
-                    return Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
-                        std::io::ErrorKind::Other,
+                    return Err(Error::Consumer(ConsumerError::Io(std::io::Error::other(
                         "got a zlib compressed message but 'flate2' cargo feature is deactivated",
-                    )))
-                    .into());
+                    ))));
                 }
 
                 #[cfg(feature = "flate2")]
@@ -499,11 +493,9 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             proto::CompressionType::Zstd => {
                 #[cfg(not(feature = "zstd"))]
                 {
-                    return Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
-                        std::io::ErrorKind::Other,
+                    return Err(Error::Consumer(ConsumerError::Io(std::io::Error::other(
                         "got a zstd compressed message but 'zstd' cargo feature is deactivated",
-                    )))
-                    .into());
+                    ))));
                 }
 
                 #[cfg(feature = "zstd")]
@@ -518,11 +510,9 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             proto::CompressionType::Snappy => {
                 #[cfg(not(feature = "snap"))]
                 {
-                    return Err(Error::Consumer(ConsumerError::Io(std::io::Error::new(
-                        std::io::ErrorKind::Other,
+                    return Err(Error::Consumer(ConsumerError::Io(std::io::Error::other(
                         "got a Snappy compressed message but 'snap' cargo feature is deactivated",
-                    )))
-                    .into());
+                    ))));
                 }
 
                 #[cfg(feature = "snap")]
