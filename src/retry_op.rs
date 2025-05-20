@@ -154,6 +154,8 @@ pub async fn retry_create_producer<Exe: Executor>(
     producer_id: u64,
     producer_name: Option<String>,
     options: &ProducerOptions,
+    epoch: &std::sync::atomic::AtomicU64,
+    user_provided_producer_name: bool,
 ) -> Result<String, Error> {
     *connection = client.manager.get_connection(&addr).await?;
     let mut current_retries = 0u32;
@@ -172,6 +174,8 @@ pub async fn retry_create_producer<Exe: Executor>(
                 producer_id,
                 producer_name.clone(),
                 options.clone(),
+                epoch.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                user_provided_producer_name
             )
             .await
         {
