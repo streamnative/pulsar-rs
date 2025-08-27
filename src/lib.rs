@@ -233,7 +233,7 @@ mod tests {
         pub data: String,
     }
 
-    impl<'a> SerializeMessage for &'a TestData {
+    impl SerializeMessage for &TestData {
         fn serialize_message(input: Self) -> Result<producer::Message, PulsarError> {
             let payload =
                 serde_json::to_vec(input).map_err(|e| PulsarError::Custom(e.to_string()))?;
@@ -249,49 +249,6 @@ mod tests {
 
         fn deserialize_message(payload: &Payload) -> Self::Output {
             serde_json::from_slice(&payload.data)
-        }
-    }
-
-    #[derive(Debug)]
-    enum Error {
-        Pulsar(PulsarError),
-        Timeout(std::io::Error),
-        Serde(serde_json::Error),
-        Utf8(std::string::FromUtf8Error),
-    }
-
-    impl From<std::io::Error> for Error {
-        fn from(e: std::io::Error) -> Self {
-            Error::Timeout(e)
-        }
-    }
-
-    impl From<PulsarError> for Error {
-        fn from(e: PulsarError) -> Self {
-            Error::Pulsar(e)
-        }
-    }
-
-    impl From<serde_json::Error> for Error {
-        fn from(e: serde_json::Error) -> Self {
-            Error::Serde(e)
-        }
-    }
-
-    impl From<std::string::FromUtf8Error> for Error {
-        fn from(err: std::string::FromUtf8Error) -> Self {
-            Error::Utf8(err)
-        }
-    }
-
-    impl std::fmt::Display for Error {
-        fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            match self {
-                Error::Pulsar(e) => write!(f, "{e}"),
-                Error::Timeout(e) => write!(f, "{e}"),
-                Error::Serde(e) => write!(f, "{e}"),
-                Error::Utf8(e) => write!(f, "{e}"),
-            }
         }
     }
 

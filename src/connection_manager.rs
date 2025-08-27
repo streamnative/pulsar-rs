@@ -70,6 +70,59 @@ impl Default for OperationRetryOptions {
     }
 }
 
+impl OperationRetryOptions {
+    pub fn allow_retry(&self, current: u32) -> bool {
+        self.max_retries.is_none() || current < self.max_retries.unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_allow_retry_no_max_retries() {
+        let options = OperationRetryOptions {
+            operation_timeout: Duration::from_secs(30),
+            retry_delay: Duration::from_secs(5),
+            max_retries: None,
+        };
+
+        // If max_retries is None, it should always allow retries
+        assert!(options.allow_retry(0));
+        assert!(options.allow_retry(100));
+        assert!(options.allow_retry(u32::MAX));
+    }
+
+    #[test]
+    fn test_allow_retry_with_max_retries() {
+        let options = OperationRetryOptions {
+            operation_timeout: Duration::from_secs(30),
+            retry_delay: Duration::from_secs(5),
+            max_retries: Some(3),
+        };
+
+        // If max_retries is set to 3, we allow retries for current < 3
+        assert!(options.allow_retry(0)); // current < 3
+        assert!(options.allow_retry(2)); // current < 3
+        assert!(!options.allow_retry(3)); // current == 3
+        assert!(!options.allow_retry(4)); // current > 3
+    }
+
+    #[test]
+    fn test_allow_retry_max_retries_is_zero() {
+        let options = OperationRetryOptions {
+            operation_timeout: Duration::from_secs(30),
+            retry_delay: Duration::from_secs(5),
+            max_retries: Some(0),
+        };
+
+        // If max_retries is 0, it should not allow any retries
+        assert!(!options.allow_retry(0)); // current == 0
+        assert!(!options.allow_retry(1)); // current > 0
+    }
+}
+
 /// configuration for TLS connections
 #[derive(Debug, Clone)]
 pub struct TlsOptions {
@@ -161,15 +214,12 @@ impl<Exe: Executor> ConnectionManager<Exe> {
             None => vec![],
             Some(certificate_chain) => {
                 let mut v = vec![];
-                let certificates = pem::parse_many(certificate_chain)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                let certificates =
+                    pem::parse_many(certificate_chain).map_err(std::io::Error::other)?;
 
                 for cert in certificates.iter().rev() {
                     #[cfg(any(feature = "tokio-runtime", feature = "async-std-runtime"))]
-                    v.push(
-                        Certificate::from_der(cert.contents())
-                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?,
-                    );
+                    v.push(Certificate::from_der(cert.contents()).map_err(std::io::Error::other)?);
 
                     #[cfg(all(
                         any(
@@ -513,13 +563,15 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                     // in a mutex, and a case appears where the Arc is cloned
                     // somewhere at the same time, that just means the manager
                     // will create a new connection the next time it is asked
+                    let strong_count = Arc::strong_count(conn);
                     trace!(
                         "checking connection {}, is valid? {}, strong_count {}",
                         conn.id(),
                         conn.is_valid(),
-                        Arc::strong_count(conn)
+                        strong_count
                     );
-                    conn.is_valid() && Arc::strong_count(conn) > 1
+
+                    conn.is_valid() && strong_count > 1
                 }
             });
     }

@@ -207,8 +207,7 @@ impl Message {
                     Err(unknown_enum) => {
                         warn!(
                             "Received BaseCommand of unexpected type {}: {}",
-                            self.command.r#type,
-                            unknown_enum.to_string()
+                            self.command.r#type, unknown_enum
                         );
                     }
                 }
@@ -448,7 +447,7 @@ struct CommandFrame<'a> {
 }
 
 #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-fn command_frame(i: &[u8]) -> IResult<&[u8], CommandFrame> {
+fn command_frame<'a>(i: &'a [u8]) -> IResult<&'a [u8], CommandFrame<'a>> {
     let (i, total_size) = be_u32(i)?;
     let (i, command_size) = be_u32(i)?;
     let (i, command) = take(command_size)(i)?;
@@ -474,7 +473,7 @@ struct PayloadFrame<'a> {
 }
 
 #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-fn payload_frame(i: &[u8]) -> IResult<&[u8], PayloadFrame> {
+fn payload_frame<'a>(i: &'a [u8]) -> IResult<&'a [u8], PayloadFrame<'a>> {
     let (i, magic_number) = be_u16(i)?;
     let (i, checksum) = be_u32(i)?;
     let (i, metadata_size) = be_u32(i)?;

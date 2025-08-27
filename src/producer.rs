@@ -81,6 +81,9 @@ pub struct Message {
     pub event_time: ::std::option::Option<u64>,
     /// current version of the schema
     pub schema_version: ::std::option::Option<Vec<u8>>,
+    /// UTC Unix timestamp in milliseconds, time at which the message should be
+    /// delivered to consumers
+    pub deliver_at_time: ::std::option::Option<i64>,
 }
 
 /// internal message type carrying options that must be defined
@@ -126,6 +129,7 @@ impl From<Message> for ProducerMessage {
             replicate_to: m.replicate_to,
             event_time: m.event_time,
             schema_version: m.schema_version,
+            deliver_at_time: m.deliver_at_time,
             ..Default::default()
         }
     }
@@ -337,7 +341,7 @@ impl<Exe: Executor> Producer<Exe> {
     ///
     /// the created message will ber sent by this producer in [MessageBuilder::send]
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub fn create_message(&mut self) -> MessageBuilder<(), Exe> {
+    pub fn create_message<'a>(&'a mut self) -> MessageBuilder<'a, (), Exe> {
         MessageBuilder::new(self)
     }
 
@@ -359,8 +363,8 @@ impl<Exe: Executor> Producer<Exe> {
     /// this function returns a `SendFuture` because the receipt can come long after
     /// this function was called, for various reasons:
     /// - the message was sent successfully but Pulsar did not send the receipt yet
-    /// - the producer is batching messages, so this function must return immediately,
-    /// and the receipt will come when the batched messages are actually sent
+    /// - the producer is batching messages, so this function must return immediately, and the
+    ///   receipt will come when the batched messages are actually sent
     ///
     /// Usage:
     ///
@@ -722,21 +726,14 @@ impl<Exe: Executor> TopicProducer<Exe> {
             }
             #[cfg(feature = "snap")]
             Some(Compression::Snappy(..)) => {
-                let compressed_payload: Vec<u8> = Vec::new();
-                let mut encoder = snap::write::FrameEncoder::new(compressed_payload);
-                encoder
-                    .write(&message.payload[..])
-                    .map_err(ProducerError::Io)?;
-                let compressed_payload = encoder
-                    .into_inner()
-                    //FIXME
-                    .map_err(|e| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            format!("Snappy compression error: {e:?}"),
-                        )
-                    })
-                    .map_err(ProducerError::Io)?;
+                let mut compressed_payload = Vec::new();
+                {
+                    let mut encoder = snap::write::FrameEncoder::new(&mut compressed_payload);
+                    encoder
+                        .write_all(&message.payload[..])
+                        .map_err(ProducerError::Io)?;
+                    encoder.flush().map_err(ProducerError::Io)?;
+                }
 
                 message.uncompressed_size = Some(message.payload.len() as u32);
                 message.payload = compressed_payload;
@@ -1157,11 +1154,6 @@ impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn delay(mut self, delay: Duration) -> Result<Self, std::time::SystemTimeError> {
         let date = SystemTime::now() + delay;
-        println!(
-            "current date: {}, deliver_at: {}",
-            SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
-            date.duration_since(UNIX_EPOCH)?.as_millis()
-        );
         self.deliver_at_time = Some(date.duration_since(UNIX_EPOCH)?.as_millis() as i64);
         Ok(self)
     }
@@ -1178,7 +1170,7 @@ impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
     }
 }
 
-impl<'a, T: SerializeMessage + Sized, Exe: Executor> MessageBuilder<'a, T, Exe> {
+impl<T: SerializeMessage + Sized, Exe: Executor> MessageBuilder<'_, T, Exe> {
     /// sends the message through the producer that created it
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     #[deprecated = "instead use send_non_blocking"]

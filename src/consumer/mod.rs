@@ -454,7 +454,7 @@ mod tests {
         msg: u32,
     }
 
-    impl<'a> SerializeMessage for &'a TestData {
+    impl SerializeMessage for &TestData {
         fn serialize_message(input: Self) -> Result<producer::Message, Error> {
             let payload = serde_json::to_vec(&input).map_err(|e| Error::Custom(e.to_string()))?;
             Ok(producer::Message {
