@@ -588,22 +588,22 @@ impl<Exe: Executor> TopicProducer<Exe> {
         match self.batch.as_ref() {
             None => Err(ProducerError::Custom("not a batching producer".to_string()).into()),
             Some(batch) => {
-                let mut payload: Vec<u8> = Vec::new();
-                let mut receipts = Vec::new();
-                let message_count;
-
-                {
-                    let batch = batch.lock().await;
-                    let messages = batch.get_messages().await;
-                    message_count = messages.len();
-                    for (tx, message) in messages {
-                        receipts.push(tx);
-                        message.serialize(&mut payload);
-                    }
-                }
+                let messages = {
+                    let guard = batch.lock().await;
+                    guard.get_messages().await
+                };
+                let message_count = messages.len();
 
                 if message_count == 0 {
                     return Ok(());
+                }
+
+                let mut payload: Vec<u8> = Vec::new();
+                let mut receipts = Vec::new();
+
+                for (tx, message) in messages {
+                    receipts.push(tx);
+                    message.serialize(&mut payload);
                 }
 
                 let message = ProducerMessage {
