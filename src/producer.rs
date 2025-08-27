@@ -1205,3 +1205,270 @@ impl<T: SerializeMessage + Sized, Exe: Executor> MessageBuilder<'_, T, Exe> {
         producer.send_raw(producer_message).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::executor::block_on;
+
+    fn pm_with(
+        payload: Vec<u8>,
+        props: &[(&str, &str)],
+        partition_key: Option<&str>,
+        ordering_key: Option<&[u8]>,
+        event_time: Option<u64>,
+    ) -> ProducerMessage {
+        let mut properties = HashMap::new();
+        for (k, v) in props {
+            properties.insert((*k).to_string(), (*v).to_string());
+        }
+        ProducerMessage {
+            payload,
+            properties,
+            partition_key: partition_key.map(|s| s.to_string()),
+            ordering_key: ordering_key.map(|b| b.to_vec()),
+            event_time,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn send_future_errors_when_sender_dropped() {
+        let (tx, rx) = futures::channel::oneshot::channel::<Result<CommandSendReceipt, Error>>();
+        // Drop the sender immediately to simulate an unexpected disconnect:
+        drop(tx);
+
+        let fut = SendFuture(rx);
+        let err = block_on(fut).expect_err("expected an error when sender is dropped");
+
+        // It should be mapped to a ProducerError::Custom inside Error::Producer
+        match err {
+            Error::Producer(ProducerError::Custom(msg)) => {
+                assert!(
+                    msg.contains("unexpectedly disconnected"),
+                    "unexpected error message: {msg}"
+                );
+            }
+            other => panic!("unexpected error variant: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn message_converts_into_producer_message() {
+        let mut props = HashMap::new();
+        props.insert("a".to_string(), "1".to_string());
+        props.insert("b".to_string(), "2".to_string());
+
+        let m = Message {
+            payload: b"hello".to_vec(),
+            properties: props.clone(),
+            partition_key: Some("key".into()),
+            ordering_key: Some(vec![1, 2, 3]),
+            replicate_to: vec!["r1".into(), "r2".into()],
+            event_time: Some(42),
+            schema_version: Some(vec![9, 9]),
+            deliver_at_time: Some(123456789),
+        };
+
+        let pm: ProducerMessage = m.clone().into();
+
+        assert_eq!(pm.payload, m.payload);
+        assert_eq!(pm.properties, m.properties);
+        assert_eq!(pm.partition_key, m.partition_key);
+        assert_eq!(pm.ordering_key, m.ordering_key);
+        assert_eq!(pm.replicate_to, m.replicate_to);
+        assert_eq!(pm.event_time, m.event_time);
+        assert_eq!(pm.schema_version, m.schema_version);
+        assert_eq!(pm.deliver_at_time, m.deliver_at_time);
+
+        // And defaults that the producer fills later:
+        assert!(pm.num_messages_in_batch.is_none());
+        assert!(pm.compression.is_none());
+        assert!(pm.uncompressed_size.is_none());
+    }
+
+    #[test]
+    fn batch_fills_on_length_threshold_and_drains() {
+        block_on(async {
+            let batch = Batch::new(3, None);
+
+            // Not full initially
+            assert!(!batch.is_full().await);
+
+            // Push 3 small messages; should become full because length == 3
+            for i in 0..3 {
+                let (tx, _rx) = oneshot::channel::<Result<CommandSendReceipt, Error>>();
+                let msg = pm_with(
+                    vec![i as u8],
+                    &[("k", "v")],
+                    Some("p"),
+                    Some(&[7, 8]),
+                    Some(99),
+                );
+                batch.push_back((tx, msg)).await;
+            }
+
+            assert!(
+                batch.is_full().await,
+                "batch should be full at length threshold"
+            );
+
+            // Drain and validate contents -> Batch creates BatchedMessage with mapped fields
+            let drained = batch.get_messages().await;
+            assert_eq!(drained.len(), 3);
+
+            for (_tx, bm) in drained {
+                // properties
+                let kvs: HashMap<_, _> = bm
+                    .metadata
+                    .properties
+                    .iter()
+                    .map(|kv| (kv.key.clone(), kv.value.clone()))
+                    .collect();
+                assert_eq!(kvs.get("k").map(String::as_str), Some("v"));
+
+                // partition key & ordering key
+                assert_eq!(bm.metadata.partition_key.as_deref(), Some("p"));
+                assert_eq!(bm.metadata.ordering_key.as_deref(), Some(&[7, 8][..]));
+
+                // event time & payload size
+                assert_eq!(bm.metadata.event_time, Some(99));
+                assert_eq!(bm.metadata.payload_size as usize, bm.payload.len());
+            }
+
+            // After draining, no longer full
+            assert!(!batch.is_full().await);
+        });
+    }
+
+    #[test]
+    fn batch_fills_on_size_threshold_even_if_length_not_reached() {
+        block_on(async {
+            // Allow up to 10 messages, but set size threshold at 10 bytes
+            let batch = Batch::new(10, Some(10));
+
+            // Push two messages of 6 bytes -> total 12 >= 10, should be full
+            for _ in 0..2 {
+                let (tx, _rx) = oneshot::channel::<Result<CommandSendReceipt, Error>>();
+                let msg = pm_with(vec![0; 6], &[], None, None, None);
+                batch.push_back((tx, msg)).await;
+            }
+
+            assert!(
+                batch.is_full().await,
+                "batch should be full when total payload meets size threshold"
+            );
+
+            // Drain resets size accounting
+            let drained = batch.get_messages().await;
+            assert_eq!(drained.len(), 2);
+            assert!(
+                !batch.is_full().await,
+                "after drain, batch shouldn't be full"
+            );
+        });
+    }
+
+    #[test]
+    fn batch_storage_tracks_and_resets_size() {
+        // Directly test the inner size accounting behavior
+        let mut storage = BatchStorage::new(5);
+
+        // Build two batched messages with payload_size 3 and 4
+        let mut meta1 = proto::SingleMessageMetadata::default();
+        meta1.payload_size = 3;
+        let bm1 = BatchedMessage {
+            metadata: meta1,
+            payload: vec![0; 3],
+        };
+
+        let mut meta2 = proto::SingleMessageMetadata::default();
+        meta2.payload_size = 4;
+        let bm2 = BatchedMessage {
+            metadata: meta2,
+            payload: vec![0; 4],
+        };
+
+        let (tx1, _rx1) = oneshot::channel::<Result<CommandSendReceipt, Error>>();
+        let (tx2, _rx2) = oneshot::channel::<Result<CommandSendReceipt, Error>>();
+
+        storage.push_back(tx1, bm1);
+        assert_eq!(storage.size, 3);
+
+        storage.push_back(tx2, bm2);
+        assert_eq!(storage.size, 7);
+
+        // Draining resets the tracked size
+        let drained = storage.get_messages();
+        assert_eq!(drained.len(), 2);
+        assert_eq!(storage.size, 0);
+        assert!(storage.storage.is_empty());
+    }
+
+    // Guards that we treat "exactly at threshold" as full.
+    #[test]
+    fn batch_is_full_when_size_exactly_matches_threshold() {
+        block_on(async {
+            // Allow many messages but fix a small byte threshold.
+            let batch = Batch::new(10, Some(10));
+
+            // 4 + 6 == 10 exactly.
+            for &n in &[4usize, 6usize] {
+                let (tx, _rx) = oneshot::channel::<Result<CommandSendReceipt, Error>>();
+                let msg = ProducerMessage {
+                    payload: vec![0; n],
+                    ..Default::default()
+                };
+                batch.push_back((tx, msg)).await;
+            }
+
+            assert!(
+                batch.is_full().await,
+                "batch should be full when total payload equals the size threshold"
+            );
+
+            // drain & ensure we reset fullness afterwards
+            let drained = batch.get_messages().await;
+            assert_eq!(drained.len(), 2);
+            assert!(
+                !batch.is_full().await,
+                "after draining, a fresh batch should not be full"
+            );
+        });
+    }
+
+    // Ensures empty properties/keys/event_time remain unset in batched metadata,
+    // while payload_size is tracked correctly.
+    #[test]
+    fn batch_mapping_when_optional_fields_absent() {
+        block_on(async {
+            let batch = Batch::new(5, None);
+
+            let (tx, _rx) = oneshot::channel::<Result<CommandSendReceipt, Error>>();
+            let msg = ProducerMessage {
+                // No properties / keys / event_time
+                payload: vec![1, 2, 3, 4, 5], // 5 bytes
+                ..Default::default()
+            };
+
+            batch.push_back((tx, msg)).await;
+
+            // Not full by length; just verifying mapping here.
+            assert!(!batch.is_full().await);
+
+            let drained = batch.get_messages().await;
+            assert_eq!(drained.len(), 1);
+
+            let (_tx, bm) = drained.into_iter().next().unwrap();
+            // properties empty
+            assert!(bm.metadata.properties.is_empty());
+            // optional fields should be None
+            assert!(bm.metadata.partition_key.is_none());
+            assert!(bm.metadata.ordering_key.is_none());
+            assert!(bm.metadata.event_time.is_none());
+            // payload_size must match actual payload length
+            assert_eq!(bm.metadata.payload_size as usize, 5);
+            assert_eq!(bm.payload.len(), 5);
+        });
+    }
+}
