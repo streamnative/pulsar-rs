@@ -588,22 +588,22 @@ impl<Exe: Executor> TopicProducer<Exe> {
         match self.batch.as_ref() {
             None => Err(ProducerError::Custom("not a batching producer".to_string()).into()),
             Some(batch) => {
-                let mut payload: Vec<u8> = Vec::new();
-                let mut receipts = Vec::new();
-                let message_count;
-
-                {
-                    let batch = batch.lock().await;
-                    let messages = batch.get_messages().await;
-                    message_count = messages.len();
-                    for (tx, message) in messages {
-                        receipts.push(tx);
-                        message.serialize(&mut payload);
-                    }
-                }
+                let messages = {
+                    let guard = batch.lock().await;
+                    guard.get_messages().await
+                };
+                let message_count = messages.len();
 
                 if message_count == 0 {
                     return Ok(());
+                }
+
+                let mut payload: Vec<u8> = Vec::new();
+                let mut receipts = Vec::with_capacity(message_count);
+
+                for (tx, message) in messages {
+                    receipts.push(tx);
+                    message.serialize(&mut payload);
                 }
 
                 let message = ProducerMessage {
@@ -613,24 +613,14 @@ impl<Exe: Executor> TopicProducer<Exe> {
                 };
 
                 trace!("sending a batched message of size {}", message_count);
+
                 let compressed_message = self.compress_message(message)?;
 
-                let receipt_fut = self.send_inner(compressed_message).await?;
-
-                let (tx, rx) = oneshot::channel();
-                self.client
-                    .executor
-                    .spawn(Box::pin(async move {
-                        let res = receipt_fut.await.map_err(Arc::new);
-                        let _ = tx.send(res); // deliver the batch receipt to this function
-                    }))
-                    .map_err(|_| Error::Executor)?;
-
-                let send_receipt = rx.await.unwrap_or_else(|_| {
-                    Err(Arc::new(Error::Producer(ProducerError::Custom(
-                        "executor dropped task".into(),
-                    ))))
-                });
+                let send_receipt = self
+                    .send_inner(compressed_message)
+                    .await?
+                    .await
+                    .map_err(Arc::new);
 
                 for resolver in receipts {
                     let _ = resolver.send(
@@ -648,7 +638,6 @@ impl<Exe: Executor> TopicProducer<Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub(crate) async fn send_raw(&mut self, message: ProducerMessage) -> Result<SendFuture, Error> {
         let (tx, rx) = oneshot::channel();
-
         match self.batch.as_ref() {
             None => {
                 let compressed_message = self.compress_message(message)?;
@@ -661,38 +650,44 @@ impl<Exe: Executor> TopicProducer<Exe> {
                         let _ = tx.send(fut.await);
                     }))
                     .map_err(|_| Error::Executor)?;
-
                 Ok(SendFuture(rx))
             }
             Some(batch) => {
-                let mut payload: Vec<u8> = Vec::new();
-                let mut receipts = Vec::new();
-                let mut counter = 0i32;
+                // Push into batch while holding the lock, and conditionally drain.
+                let (maybe_drained, counter) = {
+                    let guard = batch.lock().await;
+                    guard.push_back((tx, message)).await;
 
-                {
-                    let batch = batch.lock().await;
-                    batch.push_back((tx, message)).await;
-
-                    if batch.is_full().await {
-                        for (tx, message) in batch.get_messages().await {
-                            receipts.push(tx);
-                            message.serialize(&mut payload);
-                            counter += 1;
-                        }
+                    if guard.is_full().await {
+                        let drained = guard.get_messages().await; // await inner storage lock
+                        let count = drained.len() as i32;
+                        (Some(drained), count)
+                    } else {
+                        (None, 0)
                     }
-                }
+                };
 
                 if counter == 0 {
                     return Ok(SendFuture(rx));
                 }
 
-                trace!("sending a batched message of size {}", counter);
+                let mut payload: Vec<u8> = Vec::new();
+                let mut receipts = Vec::new();
+
+                if let Some(messages) = maybe_drained {
+                    for (tx, message) in messages {
+                        receipts.push(tx);
+                        message.serialize(&mut payload);
+                    }
+                }
 
                 let message = ProducerMessage {
                     payload,
                     num_messages_in_batch: Some(counter),
                     ..Default::default()
                 };
+
+                trace!("sending a batched message of size {}", counter);
 
                 let compressed_message = self.compress_message(message)?;
 
@@ -767,56 +762,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
                 message
             }
         };
-
         Ok(compressed_message)
-    }
-
-    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    fn start_send_once(
-        &mut self,
-        message: ProducerMessage,
-    ) -> Result<impl Future<Output = Result<CommandSendReceipt, Error>>, Error> {
-        let fut = self.connection.sender().send(
-            self.id,
-            self.name.clone(),
-            self.message_id.get(),
-            message,
-        )?;
-
-        let f = async move {
-            let res = fut.await;
-            res.map_err(|e| {
-                error!("wait send receipt got error: {:?}", e);
-                Error::Producer(ProducerError::Connection(e))
-            })
-        };
-
-        Ok(f)
-    }
-
-    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    async fn ensure_connected(&mut self) -> Result<(), Error> {
-        if self.connection.sender().send_ping().await.is_ok() {
-            return Ok(());
-        }
-
-        loop {
-            error!(
-                "send_inner: connection {} disconnected",
-                self.connection.id()
-            );
-
-            match self.reconnect().await {
-                Ok(()) => {
-                    if self.connection.sender().send_ping().await.is_ok() {
-                        return Ok(());
-                    }
-                }
-                Err(e) => {
-                    return Err(e);
-                }
-            }
-        }
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
@@ -825,16 +771,25 @@ impl<Exe: Executor> TopicProducer<Exe> {
         message: ProducerMessage,
     ) -> Result<impl Future<Output = Result<CommandSendReceipt, Error>>, Error> {
         loop {
-            self.ensure_connected().await?;
-
-            match self.start_send_once(message.clone()) {
+            let msg = message.clone();
+            match self.connection.sender().send(
+                self.id,
+                self.name.clone(),
+                self.message_id.get(),
+                msg,
+            ) {
                 Ok(fut) => {
+                    let fut = async move {
+                        let res = fut.await;
+                        res.map_err(|e| {
+                            error!("wait send receipt got error: {:?}", e);
+                            Error::Producer(ProducerError::Connection(e))
+                        })
+                    };
                     return Ok(fut);
                 }
-                Err(Error::Producer(ProducerError::Connection(ConnectionError::Disconnected))) => {
-                    continue;
-                }
-                Err(Error::Producer(ProducerError::Connection(ConnectionError::Io(e)))) => {
+                Err(ConnectionError::Disconnected) => {}
+                Err(ConnectionError::Io(e)) => {
                     if e.kind() != std::io::ErrorKind::TimedOut {
                         error!("send_inner got io error: {:?}", e);
                         return Err(ProducerError::Connection(ConnectionError::Io(e)).into());
@@ -842,9 +797,16 @@ impl<Exe: Executor> TopicProducer<Exe> {
                 }
                 Err(e) => {
                     error!("send_inner got error: {:?}", e);
-                    return Err(e);
+                    return Err(ProducerError::Connection(e).into());
                 }
             };
+
+            error!(
+                "send_inner: connection {} disconnected",
+                self.connection.id()
+            );
+
+            self.reconnect().await?;
         }
     }
 
