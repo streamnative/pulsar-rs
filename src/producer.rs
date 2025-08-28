@@ -341,7 +341,7 @@ impl<Exe: Executor> Producer<Exe> {
     ///
     /// the created message will ber sent by this producer in [MessageBuilder::send]
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub fn create_message(&mut self) -> MessageBuilder<(), Exe> {
+    pub fn create_message<'a>(&'a mut self) -> MessageBuilder<'a, (), Exe> {
         MessageBuilder::new(self)
     }
 

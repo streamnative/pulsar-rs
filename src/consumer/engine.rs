@@ -110,7 +110,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
 
             let send_end_res = event_tx.send(mapper(None)).await;
             if let Err(err) = send_end_res {
-                log::error!("Error sending end event to channel - {err}");
+                log::debug!("Error sending close event to channel - {err}");
             }
 
             log::warn!("rx terminated");
