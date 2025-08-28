@@ -1211,6 +1211,33 @@ mod tests {
     use super::*;
     use futures::executor::block_on;
 
+    async fn drain_messages_from_full_batch(
+        batch: &Batch,
+        ctx: &str,
+    ) -> Vec<(
+        oneshot::Sender<Result<CommandSendReceipt, Error>>,
+        BatchedMessage,
+    )> {
+        assert!(batch.is_full().await, "batch should be full: {}", ctx);
+        let drained = batch.get_messages().await;
+        assert!(
+            !batch.is_full().await,
+            "after draining, batch shouldn't be full: {}",
+            ctx
+        );
+        assert!(
+            !drained.is_empty(),
+            "after draining, batch should have messages: {}",
+            ctx
+        );
+        assert!(
+            batch.storage.lock().await.storage.is_empty(),
+            "after draining, internal storage should be empty: {}",
+            ctx
+        );
+        drained
+    }
+
     fn pm_with(
         payload: Vec<u8>,
         props: &[(&str, &str)],
@@ -1308,13 +1335,8 @@ mod tests {
                 batch.push_back((tx, msg)).await;
             }
 
-            assert!(
-                batch.is_full().await,
-                "batch should be full at length threshold"
-            );
-
             // Drain and validate contents -> Batch creates BatchedMessage with mapped fields
-            let drained = batch.get_messages().await;
+            let drained = drain_messages_from_full_batch(&batch, "length threshold").await;
             assert_eq!(drained.len(), 3);
 
             for (_tx, bm) in drained {
@@ -1335,9 +1357,6 @@ mod tests {
                 assert_eq!(bm.metadata.event_time, Some(99));
                 assert_eq!(bm.metadata.payload_size as usize, bm.payload.len());
             }
-
-            // After draining, no longer full
-            assert!(!batch.is_full().await);
         });
     }
 
@@ -1354,18 +1373,9 @@ mod tests {
                 batch.push_back((tx, msg)).await;
             }
 
-            assert!(
-                batch.is_full().await,
-                "batch should be full when total payload meets size threshold"
-            );
-
             // Drain resets size accounting
-            let drained = batch.get_messages().await;
+            let drained = drain_messages_from_full_batch(&batch, "size threshold").await;
             assert_eq!(drained.len(), 2);
-            assert!(
-                !batch.is_full().await,
-                "after drain, batch shouldn't be full"
-            );
         });
     }
 
@@ -1375,15 +1385,21 @@ mod tests {
         let mut storage = BatchStorage::new(5);
 
         // Build two batched messages with payload_size 3 and 4
-        let mut meta1 = proto::SingleMessageMetadata::default();
-        meta1.payload_size = 3;
+        let meta1 = proto::SingleMessageMetadata {
+            payload_size: 3,
+            ..Default::default()
+        };
+
         let bm1 = BatchedMessage {
             metadata: meta1,
             payload: vec![0; 3],
         };
 
-        let mut meta2 = proto::SingleMessageMetadata::default();
-        meta2.payload_size = 4;
+        let meta2 = proto::SingleMessageMetadata {
+            payload_size: 4,
+            ..Default::default()
+        };
+
         let bm2 = BatchedMessage {
             metadata: meta2,
             payload: vec![0; 4],
@@ -1422,18 +1438,9 @@ mod tests {
                 batch.push_back((tx, msg)).await;
             }
 
-            assert!(
-                batch.is_full().await,
-                "batch should be full when total payload equals the size threshold"
-            );
-
             // drain & ensure we reset fullness afterwards
-            let drained = batch.get_messages().await;
+            let drained = drain_messages_from_full_batch(&batch, "size == threshold").await;
             assert_eq!(drained.len(), 2);
-            assert!(
-                !batch.is_full().await,
-                "after draining, a fresh batch should not be full"
-            );
         });
     }
 
