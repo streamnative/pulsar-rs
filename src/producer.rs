@@ -1208,8 +1208,9 @@ impl<T: SerializeMessage + Sized, Exe: Executor> MessageBuilder<'_, T, Exe> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use futures::executor::block_on;
+
+    use super::*;
 
     async fn drain_messages_from_full_batch(
         batch: &Batch,
