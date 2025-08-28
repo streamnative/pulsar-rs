@@ -588,22 +588,22 @@ impl<Exe: Executor> TopicProducer<Exe> {
         match self.batch.as_ref() {
             None => Err(ProducerError::Custom("not a batching producer".to_string()).into()),
             Some(batch) => {
-                let mut payload: Vec<u8> = Vec::new();
-                let mut receipts = Vec::new();
-                let message_count;
-
-                {
-                    let batch = batch.lock().await;
-                    let messages = batch.get_messages().await;
-                    message_count = messages.len();
-                    for (tx, message) in messages {
-                        receipts.push(tx);
-                        message.serialize(&mut payload);
-                    }
-                }
+                let messages = {
+                    let guard = batch.lock().await;
+                    guard.get_messages().await
+                };
+                let message_count = messages.len();
 
                 if message_count == 0 {
                     return Ok(());
+                }
+
+                let mut payload: Vec<u8> = Vec::new();
+                let mut receipts = Vec::with_capacity(message_count);
+
+                for (tx, message) in messages {
+                    receipts.push(tx);
+                    message.serialize(&mut payload);
                 }
 
                 let message = ProducerMessage {
@@ -642,43 +642,52 @@ impl<Exe: Executor> TopicProducer<Exe> {
                 Ok(SendFuture(rx))
             }
             Some(batch) => {
+                // Push into batch while holding the lock, and conditionally drain.
+                let (maybe_drained, counter) = {
+                    let guard = batch.lock().await;
+                    guard.push_back((tx, message)).await;
+
+                    if guard.is_full().await {
+                        let drained = guard.get_messages().await; // await inner storage lock
+                        let count = drained.len() as i32;
+                        (Some(drained), count)
+                    } else {
+                        (None, 0)
+                    }
+                };
+
+                if counter == 0 {
+                    return Ok(SendFuture(rx));
+                }
+
                 let mut payload: Vec<u8> = Vec::new();
                 let mut receipts = Vec::new();
-                let mut counter = 0i32;
 
-                {
-                    let batch = batch.lock().await;
-                    batch.push_back((tx, message)).await;
-
-                    if batch.is_full().await {
-                        for (tx, message) in batch.get_messages().await {
-                            receipts.push(tx);
-                            message.serialize(&mut payload);
-                            counter += 1;
-                        }
+                if let Some(messages) = maybe_drained {
+                    for (tx, message) in messages {
+                        receipts.push(tx);
+                        message.serialize(&mut payload);
                     }
                 }
 
-                if counter > 0 {
-                    let message = ProducerMessage {
-                        payload,
-                        num_messages_in_batch: Some(counter),
-                        ..Default::default()
-                    };
+                let message = ProducerMessage {
+                    payload,
+                    num_messages_in_batch: Some(counter),
+                    ..Default::default()
+                };
 
-                    trace!("sending a batched message of size {}", counter);
-                    let receipt_fut = self.send_compress(message).await?;
-                    self.client
-                        .executor
-                        .spawn(Box::pin(async move {
-                            let res = receipt_fut.await.map_err(Arc::new);
-                            for tx in receipts.drain(..) {
-                                let _ = tx
-                                    .send(res.clone().map_err(|e| ProducerError::Batch(e).into()));
-                            }
-                        }))
-                        .map_err(|_| Error::Executor)?;
-                }
+                trace!("sending a batched message of size {}", counter);
+                let receipt_fut = self.send_compress(message).await?;
+                self.client
+                    .executor
+                    .spawn(Box::pin(async move {
+                        let res = receipt_fut.await.map_err(Arc::new);
+                        for tx in receipts.drain(..) {
+                            let _ =
+                                tx.send(res.clone().map_err(|e| ProducerError::Batch(e).into()));
+                        }
+                    }))
+                    .map_err(|_| Error::Executor)?;
 
                 Ok(SendFuture(rx))
             }
