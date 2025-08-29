@@ -22,13 +22,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
-        run: cargo build --workspace --features protobuf-src --locked
+        run: cargo build --features protobuf-src --locked
 
       - name: Clippy (feature set A)
-        run: cargo clippy --workspace --tests --features telemetry,protobuf-src -- -D warnings
+        run: cargo clippy --tests --features telemetry,protobuf-src -- -D warnings
 
       - name: Clippy (feature set B)
-        run: cargo clippy --workspace --tests --no-default-features --features compression,tokio-rustls-runtime,async-std-rustls-runtime,auth-oauth2,telemetry,protobuf-src -- -D warnings
+        run: cargo clippy --tests --no-default-features --features compression,tokio-rustls-runtime,async-std-rustls-runtime,auth-oauth2,telemetry,protobuf-src -- -D warnings
 
       - name: Check format
         run: cargo fmt --all --check
@@ -89,7 +89,7 @@ jobs:
           RUST_BACKTRACE: 1
           RUST_LOG: pulsar=debug
           RUST_TEST_THREADS: 1
-        run: cargo test --workspace --features protobuf-src --locked -- --nocapture
+        run: cargo test --features protobuf-src --locked -- --nocapture
 
       - name: Dump Pulsar logs on failure
         if: failure()
