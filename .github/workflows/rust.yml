@@ -6,32 +6,98 @@ on:
   pull_request:
     branches: [ master ]
 
+concurrency:
+  group: rust-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
       - uses: Swatinem/rust-cache@v2
+
       - name: Build
-        run: cargo build --features protobuf-src
-      - name: Check Clippy
-        run: |
-          cargo clippy --tests --features telemetry,protobuf-src -- -D warnings
-          cargo clippy --tests --no-default-features --features compression,tokio-rustls-runtime,async-std-rustls-runtime,auth-oauth2,telemetry,protobuf-src -- -D warnings
-      - name: Install nightly rustfmt
-        run: rustup toolchain install nightly --component rustfmt
+        run: cargo build --workspace --features protobuf-src --locked
+
+      - name: Clippy (feature set A)
+        run: cargo clippy --workspace --tests --features telemetry,protobuf-src -- -D warnings
+
+      - name: Clippy (feature set B)
+        run: cargo clippy --workspace --tests --no-default-features --features compression,tokio-rustls-runtime,async-std-rustls-runtime,auth-oauth2,telemetry,protobuf-src -- -D warnings
+
       - name: Check format
-        run: cargo +nightly fmt --all --check
+        run: cargo fmt --all --check
 
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
+      fail-fast: false
       matrix:
-        pulsar-version: [ 2.10.6, 2.11.4, 3.0.8, 3.2.4, 3.3.3, 4.0.1 ]
+        pulsar-version: [2.10.6, 2.11.4, 3.0.8, 3.2.4, 3.3.3, 4.0.1]
     steps:
-      - name: Start Pulsar Standalone Container
-        run: docker run --name pulsar -p 6650:6650 -p 8080:8080 -d -e GITHUB_ACTIONS=true -e CI=true apachepulsar/pulsar:${{ matrix.pulsar-version }} bin/pulsar standalone
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Run tests
-        run: cargo test --features protobuf-src -- --nocapture
+
+      - name: Start Pulsar Standalone Container
+        run: |
+          docker run --name pulsar \
+            -p 6650:6650 -p 8080:8080 \
+            -d \
+            -e GITHUB_ACTIONS=true -e CI=true \
+            -e PULSAR_PREFIX_advertisedAddress=127.0.0.1 \
+            -e PULSAR_PREFIX_advertisedListeners=pulsar://127.0.0.1:6650 \
+            -e PULSAR_PREFIX_brokerServicePort=6650 \
+            -e PULSAR_PREFIX_webServicePort=8080 \
+            apachepulsar/pulsar:${{ matrix.pulsar-version }} \
+            bin/pulsar standalone
+
+      - name: Wait for Pulsar readiness
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Waiting for 6650..."
+          for i in {1..90}; do
+            (echo > /dev/tcp/127.0.0.1/6650) >/dev/null 2>&1 && break
+            sleep 1
+          done
+          (echo > /dev/tcp/127.0.0.1/6650) >/dev/null 2>&1 || { echo "Port 6650 not ready"; exit 1; }
+
+          echo "Waiting for HTTP health..."
+          for i in {1..90}; do
+            if curl -sf http://127.0.0.1:8080/admin/v2/brokers/health >/dev/null; then
+              echo "Broker health OK"
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "Health endpoint didn't respond in time:"
+          docker logs --tail=200 pulsar || true
+          exit 1
+
+      - name: Run tests (serial, verbose)
+        env:
+          RUST_BACKTRACE: 1
+          RUST_LOG: pulsar=debug
+          RUST_TEST_THREADS: 1
+        run: cargo test --workspace --features protobuf-src --locked -- --nocapture
+
+      - name: Dump Pulsar logs on failure
+        if: failure()
+        run: |
+          echo "==== PULSAR CONTAINER LOGS ===="
+          docker logs pulsar || true
+
+      - name: Stop Pulsar
+        if: always()
+        run: docker rm -f pulsar || true
+
