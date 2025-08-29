@@ -433,7 +433,7 @@ mod tests {
 
     use futures::{
         future::{select, Either},
-        StreamExt, TryStreamExt,
+        StreamExt,
     };
     use log::LevelFilter;
     use regex::Regex;
@@ -469,6 +469,23 @@ mod tests {
 
         fn deserialize_message(payload: &Payload) -> Self::Output {
             serde_json::from_slice(&payload.data)
+        }
+    }
+
+    const DEFAULT_RECV_TIMEOUT: Duration = Duration::from_secs(5);
+
+    async fn recv_within<T>(
+        c: &mut Consumer<T, TokioExecutor>,
+        dur: Duration,
+    ) -> Result<Message<T>, String>
+    where
+        T: DeserializeMessage + 'static,
+    {
+        match tokio::time::timeout(dur, c.next()).await {
+            Err(_) => Err(format!("timed out waiting for next() after {:?}", dur)),
+            Ok(None) => Err("stream ended (None) while waiting for a message".into()),
+            Ok(Some(Err(e))) => Err(format!("consumer error: {e:?}")),
+            Ok(Some(Ok(m))) => Ok(m),
         }
     }
 
@@ -717,7 +734,10 @@ mod tests {
         client.send(&topic, &message).await.unwrap().await.unwrap();
         println!("producer sends done");
 
-        let msg = consumer.next().await.unwrap().unwrap();
+        let msg = recv_within(&mut consumer, DEFAULT_RECV_TIMEOUT)
+            .await
+            .unwrap();
+
         println!("got message: {:?}", msg.payload);
         assert_eq!(
             message,
@@ -727,7 +747,10 @@ mod tests {
         // Nacking message to send it to DLQ
         consumer.nack(&msg).await.unwrap();
 
-        let dlq_msg = dlq_consumer.next().await.unwrap().unwrap();
+        let dlq_msg = recv_within(&mut dlq_consumer, DEFAULT_RECV_TIMEOUT)
+            .await
+            .unwrap();
+
         println!("got message: {:?}", msg.payload);
         assert_eq!(
             message,
@@ -811,7 +834,9 @@ mod tests {
         println!("producer sends done");
 
         for message in messages {
-            let msg = consumer.next().await.unwrap().unwrap();
+            let msg = recv_within(&mut consumer, DEFAULT_RECV_TIMEOUT)
+                .await
+                .unwrap();
             println!("got message: {:?}", msg.payload);
             assert_eq!(
                 message,
@@ -821,7 +846,9 @@ mod tests {
             // Nacking message to send it to DLQ
             consumer.nack(&msg).await.unwrap();
 
-            let dlq_msg = dlq_consumer.next().await.unwrap().unwrap();
+            let dlq_msg = recv_within(&mut dlq_consumer, DEFAULT_RECV_TIMEOUT)
+                .await
+                .unwrap();
             println!("got message: {:?}", dlq_msg.payload);
             assert_eq!(
                 message,
@@ -925,6 +952,11 @@ mod tests {
             .with_subscription("seek_single_test")
             .with_subscription_type(SubType::Shared)
             .with_topic(&topic)
+            // Ensure we see the messages that were published before subscribing.
+            .with_options(ConsumerOptions {
+                initial_position: InitialPosition::Earliest,
+                ..Default::default()
+            })
             .build()
             .await
             .unwrap();
@@ -932,31 +964,23 @@ mod tests {
         log::info!("built the consumer");
 
         let mut consumed_1 = 0_u32;
-        while let Some(msg) = consumer_1.try_next().await.unwrap() {
-            consumer_1.ack(&msg).await.unwrap();
-            let publish_time = msg.metadata().publish_time;
-            let data = match msg.deserialize() {
-                Ok(data) => data,
-                Err(e) => {
-                    log::error!("could not deserialize message: {:?}", e);
-                    break;
-                }
-            };
 
-            consumed_1 += 1;
+        while consumed_1 < msg_count / 2 {
+            let msg = recv_within(&mut consumer_1, DEFAULT_RECV_TIMEOUT)
+                .await
+                .expect("first loop failed to receive");
+            let publish_time = msg.metadata().publish_time;
+            let data = msg.deserialize().expect("deserialize");
             log::info!(
                 "first loop, got {} messages, content: {}, publish time: {}",
-                consumed_1,
+                consumed_1 + 1,
                 data,
                 publish_time
             );
-
-            // break after enough half of the messages were received
-            if consumed_1 >= msg_count / 2 {
-                log::info!("first loop, received {} messages, so break", consumed_1);
-                break;
-            }
+            consumer_1.ack(&msg).await.unwrap();
+            consumed_1 += 1;
         }
+        log::info!("first loop, received {} messages, so break", consumed_1);
 
         // // call seek(timestamp), roll back the consumer to start_time
         log::info!("calling seek method");
@@ -980,31 +1004,26 @@ mod tests {
         // .unwrap();
 
         // then read the messages again
-        let mut consumed_2 = 0_u32;
         log::info!("reading messages again");
-        while let Some(msg) = consumer_1.try_next().await.unwrap() {
-            let publish_time = msg.metadata().publish_time;
-            consumer_1.ack(&msg).await.unwrap();
-            let data = match msg.deserialize() {
-                Ok(data) => data,
-                Err(e) => {
-                    log::error!("could not deserialize message: {:?}", e);
-                    break;
-                }
-            };
-            consumed_2 += 1;
-            log::info!(
-                "second loop, got {} messages, content: {},  publish time: {}",
-                consumed_2,
-                data,
-                publish_time,
-            );
 
-            if consumed_2 >= msg_count {
-                log::info!("received {} messagses, so break", consumed_2);
-                break;
-            }
+        let mut consumed_2 = 0_u32;
+
+        while consumed_2 < msg_count {
+            let msg = recv_within(&mut consumer_1, DEFAULT_RECV_TIMEOUT)
+                .await
+                .expect("second loop failed to receive after seek");
+            let publish_time = msg.metadata().publish_time;
+            let data = msg.deserialize().expect("deserialize");
+            log::info!(
+                "second loop, got {} messages, content: {}, publish time: {}",
+                consumed_2 + 1,
+                data,
+                publish_time
+            );
+            consumer_1.ack(&msg).await.unwrap();
+            consumed_2 += 1;
         }
+        log::info!("received {} messages in second loop, so break", consumed_2);
 
         // then check if all messages were received
         assert_eq!(50, consumed_1);
@@ -1094,7 +1113,7 @@ mod tests {
             log::info!("built the consumer");
             tx.send(true).unwrap();
 
-            if let Some(msg) = consumer.try_next().await.unwrap() {
+            if let Ok(msg) = recv_within(&mut consumer, DEFAULT_RECV_TIMEOUT).await {
                 let schema_version = msg.payload.metadata.schema_version.clone();
                 let schema = consumer
                     .get_schema(&topic, schema_version)
@@ -1108,6 +1127,8 @@ mod tests {
                 assert_eq!(json_schema, schema_resolved);
 
                 consumer.ack(&msg).await.unwrap();
+            } else {
+                panic!("timed out waiting for schema_test message");
             }
         });
 
