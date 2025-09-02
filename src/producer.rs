@@ -11,11 +11,10 @@ use std::{
 };
 
 use futures::{
-    channel::oneshot,
-    future::try_join_all,
-    lock::Mutex,
+    channel::{mpsc, oneshot},
+    future::{self, try_join_all, Either},
     task::{Context, Poll},
-    Future,
+    Future, SinkExt, StreamExt,
 };
 
 use crate::{
@@ -149,11 +148,23 @@ pub struct ProducerOptions {
     /// batch size in bytes treshold (only relevant when batch_size active).
     /// batch is sent when batch size in bytes is reached
     pub batch_byte_size: Option<usize>,
+    /// the batch will be sent if this timeout is reached after the 1st message is added into the
+    /// batch even if it does not reach the size or byte size limit.
+    pub batch_timeout: Option<Duration>,
     /// algorithm used to compress the messages
     pub compression: Option<Compression>,
     /// producer access mode: shared = 0, exclusive = 1, waitforexclusive =2,
     /// exclusivewithoutfencing =3
     pub access_mode: Option<i32>,
+}
+
+impl ProducerOptions {
+    fn enabled_batching(&self) -> bool {
+        match self.batch_size {
+            Some(batch_size) => batch_size > 1,
+            None => self.batch_byte_size.is_some() || self.batch_timeout.is_some(),
+        }
+    }
 }
 
 /// Wrapper structure that manges multiple producers at once, creating them as needed
@@ -502,12 +513,12 @@ struct TopicProducer<Exe: Executor> {
     id: ProducerId,
     name: ProducerName,
     topic: String,
-    message_id: SerialId,
-    // putting it in a mutex because we must send multiple messages at once
-    // while we might be pushing more messages from elsewhere
-    batch: Option<Mutex<Batch>>,
+    sequence_id: SerialId,
     compression: Option<Compression>,
     options: ProducerOptions,
+    // When batching is enabled, `send_non_blocking` will send the batch to the
+    // `batch_process_loop` task instead of sending it directly.
+    batch_msg_sender: Option<mpsc::Sender<Option<SingleMessage>>>,
 }
 
 impl<Exe: Executor> TopicProducer<Exe> {
@@ -523,11 +534,9 @@ impl<Exe: Executor> TopicProducer<Exe> {
 
         let topic = topic.into();
         let producer_id = PRODUCER_ID_GENERATOR.fetch_add(1, Ordering::SeqCst);
-        let sequence_ids = SerialId::new();
+        let sequence_id = SerialId::new();
 
         let topic = topic.clone();
-        let batch_size = options.batch_size;
-        let batch_byte_size = options.batch_byte_size;
         let compression = options.compression.clone();
         let mut connection = client.manager.get_connection(&addr).await?;
 
@@ -542,9 +551,42 @@ impl<Exe: Executor> TopicProducer<Exe> {
         )
         .await?;
 
-        let batch = batch_size
-            .map(|batch_size| Batch::new(batch_size, batch_byte_size))
-            .map(Mutex::new);
+        let executor = client.executor.clone();
+        let batch_msg_sender = if options.enabled_batching() {
+            let batch_storage = BatchStorage {
+                max_size: options.batch_size,
+                max_byte_size: options.batch_byte_size,
+                timeout: options.batch_timeout,
+                size: 0,
+                storage: match options.batch_size {
+                    Some(batch_size) => VecDeque::with_capacity(batch_size as usize),
+                    None => VecDeque::new(),
+                },
+            };
+            // the message should be received quickly, so a small buffer is okay
+            let (sender, receiver) = mpsc::channel::<Option<SingleMessage>>(100);
+            let executor_clone = executor.clone();
+            let (batch_sender, batch_receiver) = mpsc::channel::<Vec<SingleMessage>>(1);
+            let _ = executor.spawn(Box::pin(batch_process_loop(
+                batch_storage,
+                receiver,
+                batch_sender,
+                executor_clone,
+            )));
+            let _ = executor.spawn(Box::pin(message_send_loop(
+                batch_receiver,
+                client.clone(),
+                connection.clone(),
+                topic.clone(),
+                producer_id,
+                producer_name.clone(),
+                sequence_id.clone(),
+                options.compression.clone(),
+            )));
+            Some(sender)
+        } else {
+            None
+        };
 
         Ok(TopicProducer {
             client,
@@ -552,10 +594,10 @@ impl<Exe: Executor> TopicProducer<Exe> {
             id: producer_id,
             name: producer_name,
             topic,
-            message_id: sequence_ids,
-            batch,
+            sequence_id,
             compression,
             options,
+            batch_msg_sender,
         })
     }
 
@@ -585,257 +627,197 @@ impl<Exe: Executor> TopicProducer<Exe> {
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn send_batch(&mut self) -> Result<(), Error> {
-        match self.batch.as_ref() {
+        match &mut self.batch_msg_sender {
             None => Err(ProducerError::Custom("not a batching producer".to_string()).into()),
-            Some(batch) => {
-                let messages = {
-                    let guard = batch.lock().await;
-                    guard.get_messages().await
-                };
-                let message_count = messages.len();
-
-                if message_count == 0 {
-                    return Ok(());
-                }
-
-                let mut payload: Vec<u8> = Vec::new();
-                let mut receipts = Vec::with_capacity(message_count);
-
-                for (tx, message) in messages {
-                    receipts.push(tx);
-                    message.serialize(&mut payload);
-                }
-
-                let message = ProducerMessage {
-                    payload,
-                    num_messages_in_batch: Some(message_count as i32),
-                    ..Default::default()
-                };
-
-                trace!("sending a batched message of size {}", message_count);
-                let send_receipt = self.send_compress(message).await?.await.map_err(Arc::new);
-                for resolver in receipts {
-                    let _ = resolver.send(
-                        send_receipt
-                            .clone()
-                            .map_err(|e| ProducerError::Batch(e).into()),
-                    );
-                }
-
-                Ok(())
-            }
+            Some(sender) => sender.send(None).await.map_err(|_| {
+                Error::Producer(ProducerError::Custom(
+                    "could not send batch trigger to batch task".to_string(),
+                ))
+            }),
         }
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub(crate) async fn send_raw(&mut self, message: ProducerMessage) -> Result<SendFuture, Error> {
         let (tx, rx) = oneshot::channel();
-        match self.batch.as_ref() {
+        match &mut self.batch_msg_sender {
             None => {
-                let fut = self.send_compress(message).await?;
+                let compressed_message = compress_message(message, self.compression.clone())?;
+                let fut = send_message(
+                    &self.client,
+                    &self.topic,
+                    &mut self.connection,
+                    compressed_message,
+                    self.id,
+                    &self.name,
+                    &self.sequence_id,
+                )
+                .await?;
                 self.client
                     .executor
                     .spawn(Box::pin(async move {
                         let _ = tx.send(fut.await);
                     }))
                     .map_err(|_| Error::Executor)?;
-                Ok(SendFuture(rx))
             }
-            Some(batch) => {
-                // Push into batch while holding the lock, and conditionally drain.
-                let (maybe_drained, counter) = {
-                    let guard = batch.lock().await;
-                    guard.push_back((tx, message)).await;
-
-                    if guard.is_full().await {
-                        let drained = guard.get_messages().await; // await inner storage lock
-                        let count = drained.len() as i32;
-                        (Some(drained), count)
-                    } else {
-                        (None, 0)
-                    }
+            Some(sender) => {
+                let properties = message
+                    .properties
+                    .into_iter()
+                    .map(|(key, value)| proto::KeyValue { key, value })
+                    .collect();
+                let batched = BatchedMessage {
+                    metadata: proto::SingleMessageMetadata {
+                        properties,
+                        partition_key: message.partition_key,
+                        ordering_key: message.ordering_key,
+                        payload_size: message.payload.len() as i32,
+                        event_time: message.event_time,
+                        ..Default::default()
+                    },
+                    payload: message.payload,
                 };
-
-                if counter == 0 {
-                    return Ok(SendFuture(rx));
-                }
-
-                let mut payload: Vec<u8> = Vec::new();
-                let mut receipts = Vec::new();
-
-                if let Some(messages) = maybe_drained {
-                    for (tx, message) in messages {
-                        receipts.push(tx);
-                        message.serialize(&mut payload);
-                    }
-                }
-
-                let message = ProducerMessage {
-                    payload,
-                    num_messages_in_batch: Some(counter),
-                    ..Default::default()
-                };
-
-                trace!("sending a batched message of size {}", counter);
-                let receipt_fut = self.send_compress(message).await?;
-                self.client
-                    .executor
-                    .spawn(Box::pin(async move {
-                        let res = receipt_fut.await.map_err(Arc::new);
-                        for tx in receipts.drain(..) {
-                            let _ =
-                                tx.send(res.clone().map_err(|e| ProducerError::Batch(e).into()));
-                        }
-                    }))
-                    .map_err(|_| Error::Executor)?;
-
-                Ok(SendFuture(rx))
+                let _ = sender.send(Some((tx, batched))).await;
             }
         }
-    }
-
-    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    async fn send_compress(
-        &mut self,
-        mut message: ProducerMessage,
-    ) -> Result<impl Future<Output = Result<CommandSendReceipt, Error>>, Error> {
-        let compressed_message = match self.compression.clone() {
-            None | Some(Compression::None) => message,
-            #[cfg(feature = "lz4")]
-            Some(Compression::Lz4(compression)) => {
-                let compressed_payload: Vec<u8> =
-                    lz4::block::compress(&message.payload[..], Some(compression.mode), false)
-                        .map_err(ProducerError::Io)?;
-
-                message.uncompressed_size = Some(message.payload.len() as u32);
-                message.payload = compressed_payload;
-                message.compression = Some(proto::CompressionType::Lz4.into());
-                message
-            }
-            #[cfg(feature = "flate2")]
-            Some(Compression::Zlib(compression)) => {
-                let mut e = flate2::write::ZlibEncoder::new(Vec::new(), compression.level);
-                e.write_all(&message.payload[..])
-                    .map_err(ProducerError::Io)?;
-                let compressed_payload = e.finish().map_err(ProducerError::Io)?;
-
-                message.uncompressed_size = Some(message.payload.len() as u32);
-                message.payload = compressed_payload;
-                message.compression = Some(proto::CompressionType::Zlib.into());
-                message
-            }
-            #[cfg(feature = "zstd")]
-            Some(Compression::Zstd(compression)) => {
-                let compressed_payload = zstd::encode_all(&message.payload[..], compression.level)
-                    .map_err(ProducerError::Io)?;
-                message.uncompressed_size = Some(message.payload.len() as u32);
-                message.payload = compressed_payload;
-                message.compression = Some(proto::CompressionType::Zstd.into());
-                message
-            }
-            #[cfg(feature = "snap")]
-            Some(Compression::Snappy(..)) => {
-                let mut compressed_payload = Vec::new();
-                {
-                    let mut encoder = snap::write::FrameEncoder::new(&mut compressed_payload);
-                    encoder
-                        .write_all(&message.payload[..])
-                        .map_err(ProducerError::Io)?;
-                    encoder.flush().map_err(ProducerError::Io)?;
-                }
-
-                message.uncompressed_size = Some(message.payload.len() as u32);
-                message.payload = compressed_payload;
-                message.compression = Some(proto::CompressionType::Snappy.into());
-                message
-            }
-        };
-
-        self.send_inner(compressed_message).await
-    }
-
-    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    async fn send_inner(
-        &mut self,
-        message: ProducerMessage,
-    ) -> Result<impl Future<Output = Result<CommandSendReceipt, Error>>, Error> {
-        loop {
-            let msg = message.clone();
-            match self.connection.sender().send(
-                self.id,
-                self.name.clone(),
-                self.message_id.get(),
-                msg,
-            ) {
-                Ok(fut) => {
-                    let fut = async move {
-                        let res = fut.await;
-                        res.map_err(|e| {
-                            error!("wait send receipt got error: {:?}", e);
-                            Error::Producer(ProducerError::Connection(e))
-                        })
-                    };
-                    return Ok(fut);
-                }
-                Err(ConnectionError::Disconnected) => {}
-                Err(ConnectionError::Io(e)) => {
-                    if e.kind() != std::io::ErrorKind::TimedOut {
-                        error!("send_inner got io error: {:?}", e);
-                        return Err(ProducerError::Connection(ConnectionError::Io(e)).into());
-                    }
-                }
-                Err(e) => {
-                    error!("send_inner got error: {:?}", e);
-                    return Err(ProducerError::Connection(e).into());
-                }
-            };
-
-            error!(
-                "send_inner: connection {} disconnected",
-                self.connection.id()
-            );
-
-            self.reconnect().await?;
-        }
-    }
-
-    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    async fn reconnect(&mut self) -> Result<(), Error> {
-        debug!("reconnecting producer for topic: {}", self.topic);
-
-        if let Err(e) = self.connection.sender().close_producer(self.id).await {
-            error!(
-                "could not close producer {:?}({}) for topic {}: {:?}",
-                self.name, self.id, self.topic, e
-            );
-        }
-        let broker_address = self.client.lookup_topic(&self.topic).await?;
-
-        // should we ignore, test or use producer_name?
-        let _producer_name = retry_create_producer(
-            &self.client,
-            &mut self.connection,
-            broker_address,
-            &self.topic,
-            self.id,
-            Some(self.name.clone()),
-            &self.options,
-        )
-        .await?;
-
-        self.batch = self
-            .options
-            .batch_size
-            .map(|batch_size| Batch::new(batch_size, self.options.batch_byte_size))
-            .map(Mutex::new);
-
-        Ok(())
+        Ok(SendFuture(rx))
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn close(&self) -> Result<(), Error> {
         self.connection.sender().close_producer(self.id).await?;
         Ok(())
+    }
+}
+
+#[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+fn compress_message(
+    mut message: ProducerMessage,
+    compression: Option<Compression>,
+) -> Result<ProducerMessage, Error> {
+    let compressed_message = match compression {
+        None | Some(Compression::None) => message,
+        #[cfg(feature = "lz4")]
+        Some(Compression::Lz4(compression)) => {
+            let compressed_payload: Vec<u8> =
+                lz4::block::compress(&message.payload[..], Some(compression.mode), false)
+                    .map_err(ProducerError::Io)?;
+
+            message.uncompressed_size = Some(message.payload.len() as u32);
+            message.payload = compressed_payload;
+            message.compression = Some(proto::CompressionType::Lz4.into());
+            message
+        }
+        #[cfg(feature = "flate2")]
+        Some(Compression::Zlib(compression)) => {
+            let mut e = flate2::write::ZlibEncoder::new(Vec::new(), compression.level);
+            e.write_all(&message.payload[..])
+                .map_err(ProducerError::Io)?;
+            let compressed_payload = e.finish().map_err(ProducerError::Io)?;
+
+            message.uncompressed_size = Some(message.payload.len() as u32);
+            message.payload = compressed_payload;
+            message.compression = Some(proto::CompressionType::Zlib.into());
+            message
+        }
+        #[cfg(feature = "zstd")]
+        Some(Compression::Zstd(compression)) => {
+            let compressed_payload = zstd::encode_all(&message.payload[..], compression.level)
+                .map_err(ProducerError::Io)?;
+            message.uncompressed_size = Some(message.payload.len() as u32);
+            message.payload = compressed_payload;
+            message.compression = Some(proto::CompressionType::Zstd.into());
+            message
+        }
+        #[cfg(feature = "snap")]
+        Some(Compression::Snappy(..)) => {
+            let mut compressed_payload = Vec::new();
+            {
+                let mut encoder = snap::write::FrameEncoder::new(&mut compressed_payload);
+                encoder
+                    .write_all(&message.payload[..])
+                    .map_err(ProducerError::Io)?;
+                encoder.flush().map_err(ProducerError::Io)?;
+            }
+
+            message.uncompressed_size = Some(message.payload.len() as u32);
+            message.payload = compressed_payload;
+            message.compression = Some(proto::CompressionType::Snappy.into());
+            message
+        }
+    };
+    Ok(compressed_message)
+}
+
+#[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+async fn send_message<Exe>(
+    client: &Pulsar<Exe>,
+    topic: &String,
+    connection: &mut Arc<Connection<Exe>>,
+    message: ProducerMessage,
+    producer_id: ProducerId,
+    producer_name: &ProducerName,
+    sequence_id: &SerialId,
+) -> Result<impl Future<Output = Result<CommandSendReceipt, Error>>, Error>
+where
+    Exe: Executor,
+{
+    loop {
+        let message = message.clone();
+        match connection.sender().send(
+            producer_id,
+            producer_name.clone(),
+            sequence_id.get(),
+            message,
+        ) {
+            Ok(fut) => {
+                let fut = async move {
+                    let res = fut.await;
+                    res.map_err(|e| {
+                        error!("wait send receipt got error: {:?}", e);
+                        Error::Producer(ProducerError::Connection(e))
+                    })
+                };
+                return Ok(fut);
+            }
+            Err(ConnectionError::Disconnected) => {}
+            Err(ConnectionError::Io(e)) => {
+                if e.kind() != std::io::ErrorKind::TimedOut {
+                    error!("send_message got io error: {:?}", e);
+                    return Err(ProducerError::Connection(ConnectionError::Io(e)).into());
+                }
+            }
+            Err(e) => {
+                error!("send_message got error: {:?}", e);
+                return Err(ProducerError::Connection(e).into());
+            }
+        };
+
+        error!(
+            "send_message: connection {} disconnected, reconnecting producer for topic: {}",
+            connection.id(),
+            &topic
+        );
+
+        if let Err(e) = connection.sender().close_producer(producer_id).await {
+            error!(
+                "could not close producer {:?}({}) for topic {}: {:?}",
+                producer_name, producer_id, &topic, e
+            );
+        }
+
+        let broker_address = client.lookup_topic(topic).await?;
+
+        let _producer_name = retry_create_producer(
+            client,
+            connection,
+            broker_address,
+            topic,
+            producer_id,
+            Some(producer_name.clone()),
+            &ProducerOptions::default(),
+        )
+        .await?;
     }
 }
 
@@ -934,7 +916,7 @@ impl<Exe: Executor> ProducerBuilder<Exe> {
             0 => {
                 return Err(Error::Custom(format!(
                     "Unexpected error: Partition lookup returned no topics for {topic}"
-                )))
+                )));
             }
             1 => ProducerInner::Single(producers.into_iter().next().unwrap()),
             _ => {
@@ -965,111 +947,180 @@ impl<Exe: Executor> ProducerBuilder<Exe> {
 }
 
 struct BatchStorage {
+    max_size: Option<u32>,
+    max_byte_size: Option<usize>,
+    timeout: Option<Duration>,
     size: usize,
-    storage: VecDeque<(
-        oneshot::Sender<Result<CommandSendReceipt, Error>>,
-        BatchedMessage,
-    )>,
+    storage: VecDeque<SingleMessage>,
 }
 
 impl BatchStorage {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub fn new(length: u32) -> BatchStorage {
-        BatchStorage {
-            size: 0,
-            storage: VecDeque::with_capacity(length as usize),
-        }
+    pub fn push_back(&mut self, single_msg: SingleMessage) {
+        self.size += single_msg.1.metadata.payload_size as usize;
+        self.storage.push_back(single_msg);
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub fn push_back(
-        &mut self,
-        tx: oneshot::Sender<Result<CommandSendReceipt, Error>>,
-        batched: BatchedMessage,
-    ) {
-        self.size += batched.metadata.payload_size as usize;
-        self.storage.push_back((tx, batched))
-    }
-
-    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub fn get_messages(
-        &mut self,
-    ) -> Vec<(
-        oneshot::Sender<Result<CommandSendReceipt, Error>>,
-        BatchedMessage,
-    )> {
+    pub fn get_messages(&mut self) -> Vec<SingleMessage> {
         self.size = 0;
         self.storage.drain(..).collect()
     }
-}
 
-struct Batch {
-    // max number of message
-    pub length: u32,
-    // message bytes threshold
-    pub size: Option<usize>,
-    // put it in a mutex because the design of Producer requires an immutable TopicProducer,
-    // so we cannot have a mutable Batch in a send_raw(&mut self, ...)
-    pub storage: Mutex<BatchStorage>,
-}
-
-impl Batch {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub fn new(length: u32, size: Option<usize>) -> Batch {
-        Batch {
-            length,
-            size,
-            storage: Mutex::new(BatchStorage::new(length)),
+    pub fn ready_to_flush(&self) -> bool {
+        if let Some(max_size) = self.max_size {
+            if self.storage.len() >= max_size as usize {
+                return true;
+            }
         }
+        if let Some(max_byte_size) = self.max_byte_size {
+            if self.size >= max_byte_size {
+                return true;
+            }
+        }
+        false
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub async fn is_full(&self) -> bool {
-        let s = self.storage.lock().await;
-        match self.size {
-            None => s.storage.len() >= self.length as usize,
-            Some(size) => s.storage.len() >= self.length as usize || s.size >= size,
-        }
+    pub fn ready_to_start_timer(&self) -> bool {
+        self.timeout.is_some() && self.storage.len() == 1
     }
+}
 
-    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub async fn push_back(
-        &self,
-        msg: (
-            oneshot::Sender<Result<CommandSendReceipt, Error>>,
-            ProducerMessage,
-        ),
-    ) {
-        let (tx, message) = msg;
+type SingleMessage = (
+    oneshot::Sender<Result<CommandSendReceipt, Error>>,
+    BatchedMessage,
+);
 
-        let properties = message
-            .properties
-            .into_iter()
-            .map(|(key, value)| proto::KeyValue { key, value })
-            .collect();
+async fn batch_process_loop(
+    mut batch_storage: BatchStorage,
+    mut msg_receiver: mpsc::Receiver<Option<SingleMessage>>,
+    batch_sender: mpsc::Sender<Vec<SingleMessage>>,
+    executor: impl Executor,
+) {
+    let mut recv_future = msg_receiver.next();
+    let mut timer_future: Pin<Box<dyn Future<Output = ()> + Send + 'static>> =
+        Box::pin(future::pending());
 
-        let batched = BatchedMessage {
-            metadata: proto::SingleMessageMetadata {
-                properties,
-                partition_key: message.partition_key,
-                ordering_key: message.ordering_key,
-                payload_size: message.payload.len() as i32,
-                event_time: message.event_time,
-                ..Default::default()
+    loop {
+        let mut batch_sender = batch_sender.clone();
+        match future::select(recv_future, timer_future).await {
+            Either::Left((Some(opt_single_msg), previous_timer_future)) => match opt_single_msg {
+                None => {
+                    let _ = batch_sender.send(batch_storage.get_messages()).await;
+                    timer_future = Box::pin(future::pending());
+                    recv_future = msg_receiver.next();
+                }
+                Some(single_msg) => {
+                    batch_storage.push_back(single_msg);
+                    if batch_storage.ready_to_flush() {
+                        timer_future = Box::pin(future::pending());
+                        let _ = batch_sender.send(batch_storage.get_messages()).await;
+                    } else if batch_storage.ready_to_start_timer() {
+                        timer_future = Box::pin(executor.delay(batch_storage.timeout.unwrap()));
+                    } else {
+                        timer_future = previous_timer_future;
+                    }
+                    recv_future = msg_receiver.next();
+                }
             },
-            payload: message.payload,
-        };
-        self.storage.lock().await.push_back(tx, batched)
+            Either::Left((None, _)) => {
+                debug!("batch_process_loop: channel closed, exiting");
+                break;
+            }
+            Either::Right((_, previous_recv_future)) => {
+                if batch_storage.timeout.is_some() {
+                    let _ = batch_sender.send(batch_storage.get_messages()).await;
+                }
+                timer_future = Box::pin(future::pending());
+                recv_future = previous_recv_future;
+            }
+        }
     }
+}
 
-    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub async fn get_messages(
-        &self,
-    ) -> Vec<(
-        oneshot::Sender<Result<CommandSendReceipt, Error>>,
-        BatchedMessage,
-    )> {
-        self.storage.lock().await.get_messages()
+async fn message_send_loop<Exe>(
+    mut msg_receiver: mpsc::Receiver<Vec<SingleMessage>>,
+    client: Pulsar<Exe>,
+    mut connection: Arc<Connection<Exe>>,
+    topic: String,
+    producer_id: ProducerId,
+    producer_name: ProducerName,
+    sequence_id: SerialId,
+    compression: Option<Compression>,
+) where
+    Exe: Executor,
+{
+    loop {
+        match msg_receiver.next().await {
+            Some(messages) => {
+                if messages.is_empty() {
+                    continue;
+                }
+                let mut payload: Vec<u8> = Vec::new();
+                let mut receipts = Vec::new();
+
+                let counter = messages.len();
+                for (tx, message) in messages {
+                    receipts.push(tx);
+                    message.serialize(&mut payload);
+                }
+
+                let fail = |receipts: Vec<oneshot::Sender<Result<CommandSendReceipt, Error>>>,
+                            description: &str,
+                            e: Error| {
+                    let error = Arc::new(Error::Custom(format!("{description}: {e}")));
+                    for tx in receipts {
+                        let _ = tx.send(Err(Error::Producer(ProducerError::Batch(error.clone()))));
+                    }
+                };
+
+                let message = ProducerMessage {
+                    payload,
+                    num_messages_in_batch: Some(counter as i32),
+                    ..Default::default()
+                };
+
+                trace!("sending a batched message of size {}", counter);
+
+                match compress_message(message, compression.clone()) {
+                    Ok(compressed_message) => {
+                        match send_message(
+                            &client,
+                            &topic,
+                            &mut connection,
+                            compressed_message,
+                            producer_id,
+                            &producer_name,
+                            &sequence_id,
+                        )
+                        .await
+                        {
+                            Ok(fut) => match fut.await {
+                                Ok(receipt) => {
+                                    for (batch_index, tx) in receipts.into_iter().enumerate() {
+                                        let mut receipt = receipt.clone();
+                                        if let Some(msg_id) = &mut receipt.message_id {
+                                            msg_id.batch_index = Some(batch_index as i32);
+                                            msg_id.batch_size = Some(counter as i32);
+                                        }
+                                        let _ = tx.send(Ok(receipt));
+                                    }
+                                }
+                                Err(e) => fail(receipts, "failed to send message", e),
+                            },
+                            Err(e) => fail(receipts, "failed to send message", e),
+                        }
+                    }
+                    Err(e) => fail(receipts, "failed to compress message", e),
+                };
+            }
+            None => {
+                debug!("message_send_loop: channel closed, exiting");
+                break;
+            }
+        }
     }
 }
 
@@ -1221,54 +1272,6 @@ mod tests {
 
     use super::*;
 
-    async fn drain_messages_from_full_batch(
-        batch: &Batch,
-        ctx: &str,
-    ) -> Vec<(
-        oneshot::Sender<Result<CommandSendReceipt, Error>>,
-        BatchedMessage,
-    )> {
-        assert!(batch.is_full().await, "batch should be full: {}", ctx);
-        let drained = batch.get_messages().await;
-        assert!(
-            !batch.is_full().await,
-            "after draining, batch shouldn't be full: {}",
-            ctx
-        );
-        assert!(
-            !drained.is_empty(),
-            "after draining, batch should have messages: {}",
-            ctx
-        );
-        assert!(
-            batch.storage.lock().await.storage.is_empty(),
-            "after draining, internal storage should be empty: {}",
-            ctx
-        );
-        drained
-    }
-
-    fn pm_with(
-        payload: Vec<u8>,
-        props: &[(&str, &str)],
-        partition_key: Option<&str>,
-        ordering_key: Option<&[u8]>,
-        event_time: Option<u64>,
-    ) -> ProducerMessage {
-        let mut properties = HashMap::new();
-        for (k, v) in props {
-            properties.insert((*k).to_string(), (*v).to_string());
-        }
-        ProducerMessage {
-            payload,
-            properties,
-            partition_key: partition_key.map(|s| s.to_string()),
-            ordering_key: ordering_key.map(|b| b.to_vec()),
-            event_time,
-            ..Default::default()
-        }
-    }
-
     #[test]
     fn send_future_errors_when_sender_dropped() {
         let (tx, rx) = futures::channel::oneshot::channel::<Result<CommandSendReceipt, Error>>();
@@ -1322,170 +1325,5 @@ mod tests {
         assert!(pm.num_messages_in_batch.is_none());
         assert!(pm.compression.is_none());
         assert!(pm.uncompressed_size.is_none());
-    }
-
-    #[test]
-    fn batch_fills_on_length_threshold_and_drains() {
-        block_on(async {
-            let batch = Batch::new(3, None);
-
-            // Not full initially
-            assert!(!batch.is_full().await);
-
-            // Push 3 small messages; should become full because length == 3
-            for i in 0..3 {
-                let (tx, _rx) = oneshot::channel::<Result<CommandSendReceipt, Error>>();
-                let msg = pm_with(
-                    vec![i as u8],
-                    &[("k", "v")],
-                    Some("p"),
-                    Some(&[7, 8]),
-                    Some(99),
-                );
-                batch.push_back((tx, msg)).await;
-            }
-
-            // Drain and validate contents -> Batch creates BatchedMessage with mapped fields
-            let drained = drain_messages_from_full_batch(&batch, "length threshold").await;
-            assert_eq!(drained.len(), 3);
-
-            for (_tx, bm) in drained {
-                // properties
-                let kvs: HashMap<_, _> = bm
-                    .metadata
-                    .properties
-                    .iter()
-                    .map(|kv| (kv.key.clone(), kv.value.clone()))
-                    .collect();
-                assert_eq!(kvs.get("k").map(String::as_str), Some("v"));
-
-                // partition key & ordering key
-                assert_eq!(bm.metadata.partition_key.as_deref(), Some("p"));
-                assert_eq!(bm.metadata.ordering_key.as_deref(), Some(&[7, 8][..]));
-
-                // event time & payload size
-                assert_eq!(bm.metadata.event_time, Some(99));
-                assert_eq!(bm.metadata.payload_size as usize, bm.payload.len());
-            }
-        });
-    }
-
-    #[test]
-    fn batch_fills_on_size_threshold_even_if_length_not_reached() {
-        block_on(async {
-            // Allow up to 10 messages, but set size threshold at 10 bytes
-            let batch = Batch::new(10, Some(10));
-
-            // Push two messages of 6 bytes -> total 12 >= 10, should be full
-            for _ in 0..2 {
-                let (tx, _rx) = oneshot::channel::<Result<CommandSendReceipt, Error>>();
-                let msg = pm_with(vec![0; 6], &[], None, None, None);
-                batch.push_back((tx, msg)).await;
-            }
-
-            // Drain resets size accounting
-            let drained = drain_messages_from_full_batch(&batch, "size threshold").await;
-            assert_eq!(drained.len(), 2);
-        });
-    }
-
-    #[test]
-    fn batch_storage_tracks_and_resets_size() {
-        // Directly test the inner size accounting behavior
-        let mut storage = BatchStorage::new(5);
-
-        // Build two batched messages with payload_size 3 and 4
-        let meta1 = proto::SingleMessageMetadata {
-            payload_size: 3,
-            ..Default::default()
-        };
-
-        let bm1 = BatchedMessage {
-            metadata: meta1,
-            payload: vec![0; 3],
-        };
-
-        let meta2 = proto::SingleMessageMetadata {
-            payload_size: 4,
-            ..Default::default()
-        };
-
-        let bm2 = BatchedMessage {
-            metadata: meta2,
-            payload: vec![0; 4],
-        };
-
-        let (tx1, _rx1) = oneshot::channel::<Result<CommandSendReceipt, Error>>();
-        let (tx2, _rx2) = oneshot::channel::<Result<CommandSendReceipt, Error>>();
-
-        storage.push_back(tx1, bm1);
-        assert_eq!(storage.size, 3);
-
-        storage.push_back(tx2, bm2);
-        assert_eq!(storage.size, 7);
-
-        // Draining resets the tracked size
-        let drained = storage.get_messages();
-        assert_eq!(drained.len(), 2);
-        assert_eq!(storage.size, 0);
-        assert!(storage.storage.is_empty());
-    }
-
-    // Guards that we treat "exactly at threshold" as full.
-    #[test]
-    fn batch_is_full_when_size_exactly_matches_threshold() {
-        block_on(async {
-            // Allow many messages but fix a small byte threshold.
-            let batch = Batch::new(10, Some(10));
-
-            // 4 + 6 == 10 exactly.
-            for &n in &[4usize, 6usize] {
-                let (tx, _rx) = oneshot::channel::<Result<CommandSendReceipt, Error>>();
-                let msg = ProducerMessage {
-                    payload: vec![0; n],
-                    ..Default::default()
-                };
-                batch.push_back((tx, msg)).await;
-            }
-
-            // drain & ensure we reset fullness afterwards
-            let drained = drain_messages_from_full_batch(&batch, "size == threshold").await;
-            assert_eq!(drained.len(), 2);
-        });
-    }
-
-    // Ensures empty properties/keys/event_time remain unset in batched metadata,
-    // while payload_size is tracked correctly.
-    #[test]
-    fn batch_mapping_when_optional_fields_absent() {
-        block_on(async {
-            let batch = Batch::new(5, None);
-
-            let (tx, _rx) = oneshot::channel::<Result<CommandSendReceipt, Error>>();
-            let msg = ProducerMessage {
-                // No properties / keys / event_time
-                payload: vec![1, 2, 3, 4, 5], // 5 bytes
-                ..Default::default()
-            };
-
-            batch.push_back((tx, msg)).await;
-
-            // Not full by length; just verifying mapping here.
-            assert!(!batch.is_full().await);
-
-            let drained = batch.get_messages().await;
-            assert_eq!(drained.len(), 1);
-
-            let (_tx, bm) = drained.into_iter().next().unwrap();
-            // properties empty
-            assert!(bm.metadata.properties.is_empty());
-            // optional fields should be None
-            assert!(bm.metadata.partition_key.is_none());
-            assert!(bm.metadata.ordering_key.is_none());
-            assert!(bm.metadata.event_time.is_none());
-            // payload_size must match actual payload length
-            assert_eq!(bm.metadata.payload_size as usize, 5);
-            assert_eq!(bm.payload.len(), 5);
-        });
     }
 }

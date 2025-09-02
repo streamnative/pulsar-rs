@@ -224,6 +224,7 @@ mod tests {
         client::SerializeMessage,
         consumer::{InitialPosition, Message},
         message::{proto::command_subscribe::SubType, Payload},
+        producer::SendFuture,
         Error as PulsarError,
     };
 
@@ -485,69 +486,189 @@ mod tests {
         let topic = format!("test_batching_{}", rand::random::<u16>());
 
         let pulsar: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await.unwrap();
-        let mut producer = pulsar
-            .producer()
-            .with_topic(&topic)
-            .with_options(ProducerOptions {
-                batch_size: Some(5),
-                ..Default::default()
-            })
-            .build()
-            .await
-            .unwrap();
-
         let mut consumer: Consumer<String, _> =
-            pulsar.consumer().with_topic(topic).build().await.unwrap();
+            pulsar.consumer().with_topic(&topic).build().await.unwrap();
 
-        let mut send_receipts = Vec::new();
-        for i in 0..4 {
-            send_receipts.push(producer.send_non_blocking(i.to_string()).await.unwrap());
-        }
-        assert!(timeout(Duration::from_millis(100), consumer.next())
-            .await
-            .is_err());
+        let new_batched_producer =
+            async |pulsar: Pulsar<_>, batch_size, batch_byte_size, batch_timeout| {
+                pulsar
+                    .producer()
+                    .with_topic(&topic)
+                    .with_options(ProducerOptions {
+                        batch_size,
+                        batch_byte_size,
+                        batch_timeout,
+                        ..Default::default()
+                    })
+                    .build()
+                    .await
+                    .unwrap()
+            };
 
-        send_receipts.push(producer.send_non_blocking(5.to_string()).await.unwrap());
+        const EMPTY_VALUES: Vec<String> = vec![];
+        let to_strings = |v: Vec<&str>| v.iter().map(|s| s.to_string()).collect::<Vec<String>>();
 
-        timeout(Duration::from_millis(100), try_join_all(send_receipts))
-            .await
-            .unwrap()
-            .unwrap();
+        // Case 1: batching with size enabled
+        let mut producer = new_batched_producer(pulsar.clone(), Some(5), None, None).await;
+        let mut send_futures = send_messages(&mut producer, vec!["0", "1", "2", "3"]).await;
+        assert_eq!(receive_messages(&mut consumer, 1, 500).await, EMPTY_VALUES);
 
-        let mut count = 0;
-        while let Some(message) = timeout(Duration::from_millis(100), consumer.next())
-            .await
-            .unwrap()
-        {
-            let message = message.unwrap();
-            count += 1;
-            let _ = consumer.ack(&message).await;
-            if count >= 5 {
-                break;
-            }
-        }
+        send_futures.append(send_messages(&mut producer, vec!["4"]).await.as_mut());
+        assert_eq!(
+            receive_messages(&mut consumer, 5, 500).await,
+            to_strings(vec!["0", "1", "2", "3", "4"])
+        );
+        assert_eq!(
+            get_send_msg_ids(send_futures).await,
+            vec![(0, 0, 5), (0, 1, 5), (0, 2, 5), (0, 3, 5), (0, 4, 5)]
+        );
 
-        assert_eq!(count, 5);
-        let mut send_receipts = Vec::new();
+        let mut send_futures = Vec::new();
         for i in 5..9 {
-            send_receipts.push(producer.send_non_blocking(i.to_string()).await.unwrap());
+            send_futures.push(producer.send_non_blocking(i.to_string()).await.unwrap());
         }
         producer.send_batch().await.unwrap();
-        timeout(Duration::from_millis(100), try_join_all(send_receipts))
+        assert_eq!(
+            receive_messages(&mut consumer, 4, 500).await,
+            to_strings(vec!["5", "6", "7", "8"])
+        );
+
+        // Case 2: batching with byte size enabled
+        let mut producer = new_batched_producer(pulsar.clone(), None, Some(500), None).await;
+        let mut send_futures = send_messages(&mut producer, vec!["first"]).await;
+        assert_eq!(receive_messages(&mut consumer, 1, 500).await, EMPTY_VALUES);
+
+        let value_with_large_size = "a".repeat(500);
+        send_futures.push(
+            producer
+                .send_non_blocking(value_with_large_size.clone())
+                .await
+                .unwrap(),
+        );
+        assert_eq!(
+            receive_messages(&mut consumer, 2, 500).await,
+            vec!["first".to_string(), value_with_large_size.clone()]
+        );
+        assert_eq!(
+            get_send_msg_ids(send_futures).await,
+            vec![(2, 0, 2), (2, 1, 2)]
+        );
+
+        // Case 3: batching with timeout enabled
+        let mut producer =
+            new_batched_producer(pulsar.clone(), None, None, Some(Duration::from_secs(1))).await;
+        let send_futures = send_messages(&mut producer, vec!["a"]).await;
+        assert_eq!(receive_messages(&mut consumer, 1, 700).await, EMPTY_VALUES);
+        assert_eq!(
+            receive_messages(&mut consumer, 1, 700).await,
+            vec!["a".to_string()]
+        );
+        assert_eq!(get_send_msg_ids(send_futures).await, vec![(3, 0, 1)]);
+
+        pulsar.executor.delay(Duration::from_millis(800)).await;
+        // If the previous timer was not reset after flushing, the batched messages will be flushed
+        // again 200ms later. Here we verify the batch timer will only be scheduled after the 1st
+        // message is sent.
+        let send_futures = send_messages(&mut producer, vec!["b"]).await;
+        assert_eq!(receive_messages(&mut consumer, 1, 300).await, EMPTY_VALUES);
+        assert_eq!(
+            receive_messages(&mut consumer, 1, 800).await,
+            vec!["b".to_string()]
+        );
+        assert_eq!(get_send_msg_ids(send_futures).await, vec![(4, 0, 1)]);
+
+        // Case 4: batching with multiple limitations
+        let mut producer = new_batched_producer(
+            pulsar.clone(),
+            Some(3),
+            Some(500),
+            Some(Duration::from_secs(1)),
+        )
+        .await;
+        // size limit reached
+        let send_futures = send_messages(&mut producer, vec!["a", "b", "c"]).await;
+        assert_eq!(
+            receive_messages(&mut consumer, 3, 500).await,
+            to_strings(vec!["a", "b", "c"])
+        );
+        assert_eq!(
+            get_send_msg_ids(send_futures).await,
+            vec![(5, 0, 3), (5, 1, 3), (5, 2, 3)]
+        );
+        // byte size limit reached
+        let send_receipt = producer
+            .send_non_blocking(value_with_large_size.clone())
             .await
-            .unwrap()
             .unwrap();
-        while let Some(message) = timeout(Duration::from_millis(100), consumer.next())
+        assert_eq!(
+            receive_messages(&mut consumer, 3, 500).await,
+            vec![value_with_large_size.clone()]
+        );
+        assert_eq!(get_send_msg_ids(vec![send_receipt]).await, vec![(6, 0, 1)]);
+        // timeout reached
+        let send_futures = send_messages(&mut producer, vec!["d", "e"]).await;
+        assert_eq!(
+            receive_messages(&mut consumer, 2, 1300).await,
+            to_strings(vec!["d", "e"])
+        );
+        assert_eq!(
+            get_send_msg_ids(send_futures).await,
+            vec![(7, 0, 2), (7, 1, 2)]
+        );
+    }
+
+    async fn get_send_msg_ids(send_futures: Vec<SendFuture>) -> Vec<(u64, i32, i32)> {
+        timeout(Duration::from_millis(100), try_join_all(send_futures))
             .await
             .unwrap()
-        {
-            let message = message.unwrap();
-            count += 1;
-            let _ = consumer.ack(&message).await;
-            if count >= 9 {
-                break;
+            .unwrap()
+            .into_iter()
+            .map(|receipt| {
+                let msg_id = receipt.message_id.unwrap();
+                (
+                    msg_id.entry_id,
+                    msg_id.batch_index.unwrap_or(-1),
+                    msg_id.batch_size.unwrap_or(-1),
+                )
+            })
+            .collect()
+    }
+
+    async fn send_messages(
+        producer: &mut Producer<impl Executor>,
+        values: Vec<&str>,
+    ) -> Vec<SendFuture> {
+        let mut send_receipts = Vec::new();
+        for v in values {
+            send_receipts.push(producer.send_non_blocking(v.to_string()).await.unwrap());
+        }
+        send_receipts
+    }
+
+    async fn receive_messages(
+        consumer: &mut Consumer<String, impl Executor>,
+        max_num_messages: usize,
+        receive_timeout_ms: u64,
+    ) -> Vec<String> {
+        let mut actual_values = Vec::new();
+        loop {
+            match timeout(Duration::from_millis(receive_timeout_ms), consumer.next()).await {
+                Ok(Some(msg)) => {
+                    let msg = msg.unwrap();
+                    consumer.ack(&msg).await.unwrap();
+                    let data = msg.deserialize().unwrap();
+                    actual_values.push(data);
+                    if actual_values.len() >= max_num_messages {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    info!("timed out waiting for messages: {}", e);
+                    break;
+                }
             }
         }
-        assert_eq!(count, 9);
+        actual_values
     }
 }
