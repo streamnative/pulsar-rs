@@ -613,7 +613,15 @@ impl<Exe: Executor> TopicProducer<Exe> {
                 };
 
                 trace!("sending a batched message of size {}", message_count);
-                let send_receipt = self.send_compress(message).await?.await.map_err(Arc::new);
+
+                let compressed_message = self.compress_message(message)?;
+
+                let send_receipt = self
+                    .send_inner(compressed_message)
+                    .await?
+                    .await
+                    .map_err(Arc::new);
+
                 for resolver in receipts {
                     let _ = resolver.send(
                         send_receipt
@@ -632,7 +640,10 @@ impl<Exe: Executor> TopicProducer<Exe> {
         let (tx, rx) = oneshot::channel();
         match self.batch.as_ref() {
             None => {
-                let fut = self.send_compress(message).await?;
+                let compressed_message = self.compress_message(message)?;
+
+                let fut = self.send_inner(compressed_message).await?;
+
                 self.client
                     .executor
                     .spawn(Box::pin(async move {
@@ -677,7 +688,11 @@ impl<Exe: Executor> TopicProducer<Exe> {
                 };
 
                 trace!("sending a batched message of size {}", counter);
-                let receipt_fut = self.send_compress(message).await?;
+
+                let compressed_message = self.compress_message(message)?;
+
+                let receipt_fut = self.send_inner(compressed_message).await?;
+
                 self.client
                     .executor
                     .spawn(Box::pin(async move {
@@ -695,10 +710,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    async fn send_compress(
-        &mut self,
-        mut message: ProducerMessage,
-    ) -> Result<impl Future<Output = Result<CommandSendReceipt, Error>>, Error> {
+    fn compress_message(&mut self, mut message: ProducerMessage) -> Result<ProducerMessage, Error> {
         let compressed_message = match self.compression.clone() {
             None | Some(Compression::None) => message,
             #[cfg(feature = "lz4")]
@@ -750,8 +762,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
                 message
             }
         };
-
-        self.send_inner(compressed_message).await
+        Ok(compressed_message)
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
