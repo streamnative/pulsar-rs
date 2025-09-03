@@ -22,7 +22,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
-        run: cargo build --features protobuf-src --locked
+        run: cargo build --features protobuf-src
 
       - name: Clippy (feature set A)
         run: cargo clippy --tests --features telemetry,protobuf-src -- -D warnings
@@ -89,7 +89,7 @@ jobs:
           RUST_BACKTRACE: 1
           RUST_LOG: pulsar=debug
           RUST_TEST_THREADS: 1
-        run: cargo test --features protobuf-src --locked -- --nocapture
+        run: cargo test --features protobuf-src -- --nocapture
 
       - name: Dump Pulsar logs on failure
         if: failure()
