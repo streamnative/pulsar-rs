@@ -226,6 +226,7 @@ mod tests {
         error::ProducerError,
         message::{proto::command_subscribe::SubType, Payload},
         producer::SendFuture,
+        proto::MessageIdData,
         Error as PulsarError,
     };
 
@@ -529,6 +530,26 @@ mod tests {
             send_futures.push(producer.send_non_blocking(i.to_string()).await.unwrap());
         }
         producer.send_batch().await.unwrap();
+        // All send futures should be resolved immediately after send_batch
+        let send_msg_ids = send_futures
+            .into_iter()
+            .map(|mut future| {
+                let msg_id = future
+                    .0
+                    .try_recv()
+                    .unwrap()
+                    .unwrap()
+                    .unwrap()
+                    .message_id
+                    .unwrap();
+                msg_id_to_tuple(&msg_id)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            send_msg_ids,
+            vec![(1, 0, 4), (1, 1, 4), (1, 2, 4), (1, 3, 4)]
+        );
+
         assert_eq!(
             receive_messages(&mut consumer, 4, 500).await,
             to_strings(vec!["5", "6", "7", "8"])
@@ -641,13 +662,17 @@ mod tests {
             .into_iter()
             .map(|receipt| {
                 let msg_id = receipt.message_id.unwrap();
-                (
-                    msg_id.entry_id,
-                    msg_id.batch_index.unwrap_or(-1),
-                    msg_id.batch_size.unwrap_or(-1),
-                )
+                msg_id_to_tuple(&msg_id)
             })
             .collect()
+    }
+
+    fn msg_id_to_tuple(msg_id: &MessageIdData) -> (u64, i32, i32) {
+        (
+            msg_id.entry_id,
+            msg_id.batch_index.unwrap_or(-1),
+            msg_id.batch_size.unwrap_or(-1),
+        )
     }
 
     async fn send_messages(
