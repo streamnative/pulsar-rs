@@ -478,6 +478,8 @@ mod tests {
         assert!(redelivery < Duration::from_secs(1));
     }
 
+    const EMPTY_VALUES: Vec<String> = vec![];
+
     #[tokio::test]
     #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
     async fn batching() {
@@ -491,27 +493,11 @@ mod tests {
         let mut consumer: Consumer<String, _> =
             pulsar.consumer().with_topic(&topic).build().await.unwrap();
 
-        let new_batched_producer =
-            async |pulsar: Pulsar<_>, batch_size, batch_byte_size, batch_timeout| {
-                pulsar
-                    .producer()
-                    .with_topic(&topic)
-                    .with_options(ProducerOptions {
-                        batch_size,
-                        batch_byte_size,
-                        batch_timeout,
-                        ..Default::default()
-                    })
-                    .build()
-                    .await
-                    .unwrap()
-            };
-
-        const EMPTY_VALUES: Vec<String> = vec![];
         let to_strings = |v: Vec<&str>| v.iter().map(|s| s.to_string()).collect::<Vec<String>>();
 
         // Case 1: batching with size enabled
-        let mut producer = new_batched_producer(pulsar.clone(), Some(5), None, None).await;
+        let mut producer =
+            create_batched_producer(pulsar.clone(), &topic, Some(5), None, None).await;
         let mut send_futures = send_messages(&mut producer, vec!["0", "1", "2", "3"]).await;
         assert_eq!(receive_messages(&mut consumer, 1, 500).await, EMPTY_VALUES);
 
@@ -525,38 +511,9 @@ mod tests {
             vec![(0, 0, 5), (0, 1, 5), (0, 2, 5), (0, 3, 5), (0, 4, 5)]
         );
 
-        let mut send_futures = Vec::new();
-        for i in 5..9 {
-            send_futures.push(producer.send_non_blocking(i.to_string()).await.unwrap());
-        }
-        producer.send_batch().await.unwrap();
-        // All send futures should be resolved immediately after send_batch
-        let send_msg_ids = send_futures
-            .into_iter()
-            .map(|mut future| {
-                let msg_id = future
-                    .0
-                    .try_recv()
-                    .unwrap()
-                    .unwrap()
-                    .unwrap()
-                    .message_id
-                    .unwrap();
-                msg_id_to_tuple(&msg_id)
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            send_msg_ids,
-            vec![(1, 0, 4), (1, 1, 4), (1, 2, 4), (1, 3, 4)]
-        );
-
-        assert_eq!(
-            receive_messages(&mut consumer, 4, 500).await,
-            to_strings(vec!["5", "6", "7", "8"])
-        );
-
         // Case 2: batching with byte size enabled
-        let mut producer = new_batched_producer(pulsar.clone(), None, Some(500), None).await;
+        let mut producer =
+            create_batched_producer(pulsar.clone(), &topic, None, Some(500), None).await;
         let mut send_futures = send_messages(&mut producer, vec!["first"]).await;
         assert_eq!(receive_messages(&mut consumer, 1, 500).await, EMPTY_VALUES);
 
@@ -573,19 +530,25 @@ mod tests {
         );
         assert_eq!(
             get_send_msg_ids(send_futures).await,
-            vec![(2, 0, 2), (2, 1, 2)]
+            vec![(1, 0, 2), (1, 1, 2)]
         );
 
         // Case 3: batching with timeout enabled
-        let mut producer =
-            new_batched_producer(pulsar.clone(), None, None, Some(Duration::from_secs(1))).await;
+        let mut producer = create_batched_producer(
+            pulsar.clone(),
+            &topic,
+            None,
+            None,
+            Some(Duration::from_secs(1)),
+        )
+        .await;
         let send_futures = send_messages(&mut producer, vec!["a"]).await;
         assert_eq!(receive_messages(&mut consumer, 1, 700).await, EMPTY_VALUES);
         assert_eq!(
             receive_messages(&mut consumer, 1, 700).await,
             vec!["a".to_string()]
         );
-        assert_eq!(get_send_msg_ids(send_futures).await, vec![(3, 0, 1)]);
+        assert_eq!(get_send_msg_ids(send_futures).await, vec![(2, 0, 1)]);
 
         pulsar.executor.delay(Duration::from_millis(800)).await;
         // If the previous timer was not reset after flushing, the batched messages will be flushed
@@ -597,11 +560,12 @@ mod tests {
             receive_messages(&mut consumer, 1, 800).await,
             vec!["b".to_string()]
         );
-        assert_eq!(get_send_msg_ids(send_futures).await, vec![(4, 0, 1)]);
+        assert_eq!(get_send_msg_ids(send_futures).await, vec![(3, 0, 1)]);
 
         // Case 4: batching with multiple limitations
-        let mut producer = new_batched_producer(
+        let mut producer = create_batched_producer(
             pulsar.clone(),
+            &topic,
             Some(3),
             Some(500),
             Some(Duration::from_secs(1)),
@@ -615,7 +579,7 @@ mod tests {
         );
         assert_eq!(
             get_send_msg_ids(send_futures).await,
-            vec![(5, 0, 3), (5, 1, 3), (5, 2, 3)]
+            vec![(4, 0, 3), (4, 1, 3), (4, 2, 3)]
         );
         // byte size limit reached
         let send_receipt = producer
@@ -626,7 +590,7 @@ mod tests {
             receive_messages(&mut consumer, 3, 500).await,
             vec![value_with_large_size.clone()]
         );
-        assert_eq!(get_send_msg_ids(vec![send_receipt]).await, vec![(6, 0, 1)]);
+        assert_eq!(get_send_msg_ids(vec![send_receipt]).await, vec![(5, 0, 1)]);
         // timeout reached
         let send_futures = send_messages(&mut producer, vec!["d", "e"]).await;
         assert_eq!(
@@ -635,23 +599,83 @@ mod tests {
         );
         assert_eq!(
             get_send_msg_ids(send_futures).await,
-            vec![(7, 0, 2), (7, 1, 2)]
+            vec![(6, 0, 2), (6, 1, 2)]
         );
 
         // send operations after close will fail
         let _ = producer.close().await;
-        let error = producer.send_batch().await.err().unwrap();
-        info!("send_batch failed: {}", &error);
-        if let PulsarError::Producer(ProducerError::Fenced) = error {
-        } else {
-            panic!();
-        }
         let error = producer.send_non_blocking("msg").await.err().unwrap();
-        info!("send failed: {error}");
         if let PulsarError::Producer(ProducerError::Fenced) = error {
         } else {
             panic!();
         }
+    }
+
+    #[tokio::test]
+    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
+    async fn flush() {
+        let _result = log::set_logger(&TEST_LOGGER);
+        log::set_max_level(LevelFilter::Debug);
+
+        let addr = "pulsar://127.0.0.1:6650";
+        let topic = format!("test_flush_{}", rand::random::<u16>());
+
+        let pulsar: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await.unwrap();
+        let mut consumer: Consumer<String, _> =
+            pulsar.consumer().with_topic(&topic).build().await.unwrap();
+        let mut producer =
+            create_batched_producer(pulsar.clone(), &topic, Some(100), None, None).await;
+        let send_futures = send_messages(&mut producer, vec!["0", "1", "2"]).await;
+        assert_eq!(receive_messages(&mut consumer, 1, 500).await, EMPTY_VALUES);
+
+        producer.send_batch().await.unwrap();
+        // The send futures should be all completed after flush
+        let msg_ids: Vec<(u64, i32, i32)> = send_futures
+            .into_iter()
+            .map(|mut future| {
+                future
+                    .0
+                    .try_recv()
+                    .unwrap()
+                    .unwrap()
+                    .unwrap()
+                    .message_id
+                    .unwrap()
+            })
+            .map(|msg_id| msg_id_to_tuple(&msg_id))
+            .collect();
+        assert_eq!(msg_ids, vec![(0, 0, 3), (0, 1, 3), (0, 2, 3)]);
+
+        producer.close().await.unwrap();
+        let error = producer.send_batch().await.err().unwrap();
+        if let PulsarError::Producer(ProducerError::Fenced) = error {
+        } else {
+            panic!();
+        }
+    }
+
+    async fn create_batched_producer<Exe>(
+        pulsar: Pulsar<Exe>,
+        topic: &str,
+        batch_size: Option<u32>,
+        batch_byte_size: Option<usize>,
+        batch_timeout: Option<Duration>,
+    ) -> Producer<Exe>
+    where
+        Exe: Executor,
+    {
+        pulsar
+            .producer()
+            .with_topic(topic)
+            .with_options(ProducerOptions {
+                batch_size,
+                batch_byte_size,
+                batch_timeout,
+                ..Default::default()
+            })
+            .build()
+            .await
+            .unwrap()
     }
 
     async fn get_send_msg_ids(send_futures: Vec<SendFuture>) -> Vec<(u64, i32, i32)> {
