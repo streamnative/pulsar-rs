@@ -629,10 +629,10 @@ impl<Exe: Executor> TopicProducer<Exe> {
     async fn send_batch(&mut self) -> Result<(), Error> {
         match &mut self.batch_msg_sender {
             None => Err(ProducerError::Custom("not a batching producer".to_string()).into()),
-            Some(sender) => sender.send(None).await.map_err(|_| {
-                Error::Producer(ProducerError::Custom(
-                    "could not send batch trigger to batch task".to_string(),
-                ))
+            Some(sender) => sender.send(None).await.map_err(|e| {
+                Error::Producer(ProducerError::Custom(format!(
+                    "could not trigger send_batch to batch task: {e}"
+                )))
             }),
         }
     }
