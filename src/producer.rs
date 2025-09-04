@@ -517,11 +517,23 @@ struct TopicProducer<Exe: Executor> {
     sequence_id: SerialId,
     compression: Option<Compression>,
     options: ProducerOptions,
-    // When batching is enabled, `send_non_blocking` will send the batch to the
-    // `batch_process_loop` task instead of sending it directly.
-    // Use RefCell because we need to close the sender when calling `close()` that takes an
-    // immutable reference of itself.
+
+    // When batching is enabled, the following two fields will be set and two tasks are scheduled:
+    // - `batch_process_loop`: receive messages from the producer and queue them. Once any batch
+    //   config limit is reached, it will flush all batched messages to `message_send_loop`.
+    // - `message_send_loop`: receive batched messages from `batch_process_loop` and send them to
+    //   broker. After receiving the send receipt, complete the send future.
+    // Separating these two loops since we don't want to await the send future in the same loop
+    // when queuing messages.
+    // Specially, the `send_batch` method will send `None` to `batch_process_loop` to flush
+    // messages manually.
+    // When closing the producer via the `close` method, it will close the `batch_msg_sender` and
+    // then `batch_process_loop` will exit and send will exit and send a message to
+    // `close_receiver`. However, since these operations require mutable references while the
+    // `close` method only accepts an immutable reference, wrap these fields as `RefCell` to
+    // borrow mutable references.
     batch_msg_sender: RefCell<Option<mpsc::Sender<Option<SingleMessage>>>>,
+    close_receiver: RefCell<Option<oneshot::Receiver<()>>>,
 }
 
 impl<Exe: Executor> TopicProducer<Exe> {
@@ -554,43 +566,55 @@ impl<Exe: Executor> TopicProducer<Exe> {
         )
         .await?;
 
+        if !options.enabled_batching() {
+            return Ok(TopicProducer {
+                client,
+                connection,
+                id: producer_id,
+                name: producer_name,
+                topic,
+                sequence_id,
+                compression,
+                options,
+                batch_msg_sender: RefCell::new(None),
+                close_receiver: RefCell::new(None),
+            });
+        }
         let executor = client.executor.clone();
-        let batch_msg_sender = if options.enabled_batching() {
-            let batch_storage = BatchStorage {
-                max_size: options.batch_size,
-                max_byte_size: options.batch_byte_size,
-                timeout: options.batch_timeout,
-                size: 0,
-                storage: match options.batch_size {
-                    Some(batch_size) => VecDeque::with_capacity(batch_size as usize),
-                    None => VecDeque::new(),
-                },
-            };
-            // the message should be received quickly, so a small buffer is okay
-            let (sender, receiver) = mpsc::channel::<Option<SingleMessage>>(100);
-            let executor_clone = executor.clone();
-            let (batch_sender, batch_receiver) = mpsc::channel::<Vec<SingleMessage>>(1);
-            let _ = executor.spawn(Box::pin(batch_process_loop(
-                producer_id,
-                batch_storage,
-                receiver,
-                batch_sender,
-                executor_clone,
-            )));
-            let _ = executor.spawn(Box::pin(message_send_loop(
-                batch_receiver,
-                client.clone(),
-                connection.clone(),
-                topic.clone(),
-                producer_id,
-                producer_name.clone(),
-                sequence_id.clone(),
-                options.clone(),
-            )));
-            Some(sender)
-        } else {
-            None
+        let batch_storage = BatchStorage {
+            max_size: options.batch_size,
+            max_byte_size: options.batch_byte_size,
+            timeout: options.batch_timeout,
+            size: 0,
+            storage: match options.batch_size {
+                Some(batch_size) => VecDeque::with_capacity(batch_size as usize),
+                None => VecDeque::new(),
+            },
         };
+        // the message should be received quickly, so a small buffer is okay
+        let (sender, receiver) = mpsc::channel::<Option<SingleMessage>>(10);
+        let executor_clone = executor.clone();
+        let (batch_sender, batch_receiver) = mpsc::channel::<Vec<SingleMessage>>(1);
+        let (close_sender, close_receiver) = oneshot::channel::<()>();
+
+        let _ = executor.spawn(Box::pin(batch_process_loop(
+            producer_id,
+            batch_storage,
+            receiver,
+            close_sender,
+            batch_sender,
+            executor_clone,
+        )));
+        let _ = executor.spawn(Box::pin(message_send_loop(
+            batch_receiver,
+            client.clone(),
+            connection.clone(),
+            topic.clone(),
+            producer_id,
+            producer_name.clone(),
+            sequence_id.clone(),
+            options.clone(),
+        )));
 
         Ok(TopicProducer {
             client,
@@ -601,7 +625,8 @@ impl<Exe: Executor> TopicProducer<Exe> {
             sequence_id,
             compression,
             options,
-            batch_msg_sender: RefCell::new(batch_msg_sender),
+            batch_msg_sender: RefCell::new(Some(sender)),
+            close_receiver: RefCell::new(Some(close_receiver)),
         })
     }
 
@@ -703,6 +728,26 @@ impl<Exe: Executor> TopicProducer<Exe> {
             }
             Some(sender) => {
                 sender.close_channel();
+                let close_future = {
+                    let mut mut_ref = self.close_receiver.borrow_mut();
+                    mut_ref.take()
+                };
+                match close_future {
+                    None => {
+                        warn!(
+                            "close called multiple times on producer for topic {}",
+                            self.topic
+                        );
+                    }
+                    Some(close_future) => {
+                        let _ = close_future.await.inspect_err(|e| {
+                            warn!(
+                                "{} Failed to receive close confirmation from batch task: {:?}",
+                                self.id, e
+                            );
+                        });
+                    }
+                }
             }
         };
         Ok(())
@@ -854,6 +899,13 @@ impl<Exe: Executor> std::ops::Drop for TopicProducer<Exe> {
         let id = self.id;
         let name = self.name.clone();
         let topic = self.topic.clone();
+        let mut sender = {
+            let mut mut_ref = self.batch_msg_sender.borrow_mut();
+            mut_ref.take()
+        };
+        if let Some(sender) = &mut sender {
+            sender.close_channel();
+        }
         let _ = self.client.executor.spawn(Box::pin(async move {
             if let Err(e) = conn.sender().close_producer(id).await {
                 error!(
@@ -1015,10 +1067,12 @@ type SingleMessage = (
     BatchedMessage,
 );
 
+#[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
 async fn batch_process_loop(
     producer_id: ProducerId,
     mut batch_storage: BatchStorage,
     mut msg_receiver: mpsc::Receiver<Option<SingleMessage>>,
+    close_sender: oneshot::Sender<()>,
     batch_sender: mpsc::Sender<Vec<SingleMessage>>,
     executor: impl Executor,
 ) {
@@ -1052,7 +1106,13 @@ async fn batch_process_loop(
                 }
             },
             Either::Left((None, _)) => {
-                debug!("{producer_id} batch_process_loop: channel closed, exiting");
+                debug!("producer {producer_id} batch_process_loop: channel closed, exiting");
+                let _ = close_sender.send(()).inspect_err(|e| {
+                    warn!(
+                        "{producer_id} could not notify the batch_process_loop is closed: {:?}, the producer might be dropped without closing",
+                        e
+                    );
+                });
                 break;
             }
             Either::Right((_, previous_recv_future)) => {
@@ -1066,6 +1126,7 @@ async fn batch_process_loop(
     }
 }
 
+#[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
 async fn message_send_loop<Exe>(
     mut msg_receiver: mpsc::Receiver<Vec<SingleMessage>>,
     client: Pulsar<Exe>,
@@ -1144,7 +1205,7 @@ async fn message_send_loop<Exe>(
                 };
             }
             None => {
-                debug!("{producer_id} message_send_loop: channel closed, exiting");
+                debug!("producer {producer_id} message_send_loop: channel closed, exiting");
                 break;
             }
         }
