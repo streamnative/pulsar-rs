@@ -514,26 +514,10 @@ struct TopicProducer<Exe: Executor> {
     id: ProducerId,
     name: ProducerName,
     topic: String,
+    batch: RefCell<Option<Batch>>,
     sequence_id: SerialId,
     compression: Option<Compression>,
     options: ProducerOptions,
-
-    // When batching is enabled, the following two fields will be set and two tasks are scheduled:
-    // - `batch_process_loop`: receive messages from the producer and queue them. Once any batch
-    //   config limit is reached, it will flush all batched messages to `message_send_loop`.
-    // - `message_send_loop`: receive batched messages from `batch_process_loop` and send them to
-    //   broker. After receiving the send receipt, complete the send future.
-    // Separating these two loops since we don't want to await the send future in the same loop
-    // when queuing messages.
-    // Specially, the `send_batch` method will send `None` to `batch_process_loop` to flush
-    // messages manually.
-    // When closing the producer via the `close` method, it will close the `batch_msg_sender` and
-    // then `batch_process_loop` will exit and send will exit and send a message to
-    // `close_receiver`. However, since these operations require mutable references while the
-    // `close` method only accepts an immutable reference, wrap these fields as `RefCell` to
-    // borrow mutable references.
-    batch_msg_sender: RefCell<Option<mpsc::Sender<Option<SingleMessage>>>>,
-    close_receiver: RefCell<Option<oneshot::Receiver<()>>>,
 }
 
 impl<Exe: Executor> TopicProducer<Exe> {
@@ -576,8 +560,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
                 sequence_id,
                 compression,
                 options,
-                batch_msg_sender: RefCell::new(None),
-                close_receiver: RefCell::new(None),
+                batch: RefCell::new(None),
             });
         }
         let executor = client.executor.clone();
@@ -592,15 +575,15 @@ impl<Exe: Executor> TopicProducer<Exe> {
             },
         };
         // the message should be received quickly, so a small buffer is okay
-        let (sender, receiver) = mpsc::channel::<Option<SingleMessage>>(10);
+        let (msg_sender, msg_receiver) = mpsc::channel::<BatchItem>(10);
         let executor_clone = executor.clone();
-        let (batch_sender, batch_receiver) = mpsc::channel::<Vec<SingleMessage>>(1);
+        let (batch_sender, batch_receiver) = mpsc::channel::<Vec<BatchItem>>(1);
         let (close_sender, close_receiver) = oneshot::channel::<()>();
 
         let _ = executor.spawn(Box::pin(batch_process_loop(
             producer_id,
             batch_storage,
-            receiver,
+            msg_receiver,
             close_sender,
             batch_sender,
             executor_clone,
@@ -622,11 +605,13 @@ impl<Exe: Executor> TopicProducer<Exe> {
             id: producer_id,
             name: producer_name,
             topic,
+            batch: RefCell::new(Some(Batch {
+                msg_sender,
+                close_receiver,
+            })),
             sequence_id,
             compression,
             options,
-            batch_msg_sender: RefCell::new(Some(sender)),
-            close_receiver: RefCell::new(Some(close_receiver)),
         })
     }
 
@@ -656,23 +641,59 @@ impl<Exe: Executor> TopicProducer<Exe> {
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn send_batch(&mut self) -> Result<(), Error> {
-        let mut sender = self.get_batch_msg_sender();
-        match &mut sender {
-            None => Err(ProducerError::Custom("not a batching producer".to_string()).into()),
-            Some(sender) => sender.send(None).await.map_err(|e| {
-                Error::Producer(ProducerError::Custom(format!(
-                    "could not trigger send_batch to batch task: {e}"
-                )))
-            }),
+        let mut msg_sender = {
+            let mut mut_ref = self.batch.borrow_mut();
+            mut_ref.as_mut().map(|batch| batch.msg_sender.clone())
+        };
+        match &mut msg_sender {
+            Some(msg_sender) => {
+                let (tx, rx) = oneshot::channel::<()>();
+                let item = BatchItem::Flush(tx);
+                let _ = msg_sender.send(item).await;
+                let _ = rx.await; // ignore any error
+                Ok(())
+            }
+            None if self.options.enabled_batching() => Err(ProducerError::Fenced.into()),
+            _ => Err(ProducerError::Custom("not a batching producer".to_string()).into()),
         }
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub(crate) async fn send_raw(&mut self, message: ProducerMessage) -> Result<SendFuture, Error> {
-        let mut sender = self.get_batch_msg_sender();
+        let mut msg_sender = {
+            let mut mut_ref = self.batch.borrow_mut();
+            mut_ref.as_mut().map(|batch| batch.msg_sender.clone())
+        };
         let (tx, rx) = oneshot::channel();
-        match &mut sender {
-            None => {
+        match &mut msg_sender {
+            Some(msg_sender) => {
+                let properties = message
+                    .properties
+                    .into_iter()
+                    .map(|(key, value)| proto::KeyValue { key, value })
+                    .collect();
+                let batched = BatchedMessage {
+                    metadata: proto::SingleMessageMetadata {
+                        properties,
+                        partition_key: message.partition_key,
+                        ordering_key: message.ordering_key,
+                        payload_size: message.payload.len() as i32,
+                        event_time: message.event_time,
+                        ..Default::default()
+                    },
+                    payload: message.payload,
+                };
+                let item = BatchItem::SingleMessage(tx, batched);
+                msg_sender.send(item).await.map_err(|e| {
+                    Error::Producer(ProducerError::Custom(format!(
+                        "failed to send message to batch_process_loop: {e}"
+                    )))
+                })?;
+            }
+            None if self.options.enabled_batching() => {
+                return Err(ProducerError::Fenced.into());
+            }
+            _ => {
                 let compressed_message = compress_message(message, &self.compression)?;
                 let fut = send_message(
                     &self.client,
@@ -692,72 +713,33 @@ impl<Exe: Executor> TopicProducer<Exe> {
                     }))
                     .map_err(|_| Error::Executor)?;
             }
-            Some(sender) => {
-                let properties = message
-                    .properties
-                    .into_iter()
-                    .map(|(key, value)| proto::KeyValue { key, value })
-                    .collect();
-                let batched = BatchedMessage {
-                    metadata: proto::SingleMessageMetadata {
-                        properties,
-                        partition_key: message.partition_key,
-                        ordering_key: message.ordering_key,
-                        payload_size: message.payload.len() as i32,
-                        event_time: message.event_time,
-                        ..Default::default()
-                    },
-                    payload: message.payload,
-                };
-                sender.send(Some((tx, batched))).await.map_err(|e| {
-                    Error::Producer(ProducerError::Custom(format!(
-                        "failed to send message to batch_process_loop: {e}"
-                    )))
-                })?;
-            }
         };
         Ok(SendFuture(rx))
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn close(&self) -> Result<(), Error> {
-        let mut sender = self.get_batch_msg_sender();
-        match &mut sender {
+        let mut batch = {
+            let mut mut_ref = self.batch.borrow_mut();
+            mut_ref.take()
+        };
+        match &mut batch {
             None => {
                 self.connection.sender().close_producer(self.id).await?;
             }
-            Some(sender) => {
-                sender.close_channel();
-                let close_future = {
-                    let mut mut_ref = self.close_receiver.borrow_mut();
-                    mut_ref.take()
-                };
-                match close_future {
-                    None => {
-                        warn!(
-                            "close called multiple times on producer for topic {}",
-                            self.topic
-                        );
-                    }
-                    Some(close_future) => {
-                        let _ = close_future.await.inspect_err(|e| {
-                            warn!(
-                                "{} Failed to receive close confirmation from batch task: {:?}",
-                                self.id, e
-                            );
-                        });
-                    }
-                }
+            Some(batch) if self.options.enabled_batching() => {
+                batch.msg_sender.close_channel();
+                let close_receiver = &mut batch.close_receiver;
+                let _ = close_receiver.await;
+            }
+            _ => {
+                warn!(
+                    "close called multiple times on producer {} for topic {}",
+                    self.id, self.topic
+                );
             }
         };
         Ok(())
-    }
-
-    fn get_batch_msg_sender(&self) -> Option<mpsc::Sender<Option<SingleMessage>>> {
-        self.batch_msg_sender
-            .borrow_mut()
-            .as_mut()
-            .map(|sender| sender.clone())
     }
 }
 
@@ -899,12 +881,12 @@ impl<Exe: Executor> std::ops::Drop for TopicProducer<Exe> {
         let id = self.id;
         let name = self.name.clone();
         let topic = self.topic.clone();
-        let mut sender = {
-            let mut mut_ref = self.batch_msg_sender.borrow_mut();
+        let mut batch = {
+            let mut mut_ref = self.batch.borrow_mut();
             mut_ref.take()
         };
-        if let Some(sender) = &mut sender {
-            sender.close_channel();
+        if let Some(batch) = &mut batch {
+            batch.msg_sender.close_channel();
         }
         let _ = self.client.executor.spawn(Box::pin(async move {
             if let Err(e) = conn.sender().close_producer(id).await {
@@ -1030,18 +1012,20 @@ struct BatchStorage {
     max_byte_size: Option<usize>,
     timeout: Option<Duration>,
     size: usize,
-    storage: VecDeque<SingleMessage>,
+    storage: VecDeque<BatchItem>,
 }
 
 impl BatchStorage {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub fn push_back(&mut self, single_msg: SingleMessage) {
-        self.size += single_msg.1.metadata.payload_size as usize;
-        self.storage.push_back(single_msg);
+    pub fn push_back(&mut self, item: BatchItem) {
+        if let BatchItem::SingleMessage(_, batched_msg) = &item {
+            self.size += batched_msg.metadata.payload_size as usize;
+        }
+        self.storage.push_back(item);
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub fn get_messages(&mut self) -> Vec<SingleMessage> {
+    pub fn get_messages(&mut self) -> Vec<BatchItem> {
         self.size = 0;
         self.storage.drain(..).collect()
     }
@@ -1058,67 +1042,65 @@ impl BatchStorage {
                 return true;
             }
         }
-        false
+        match self.storage.back() {
+            Some(BatchItem::Flush(_)) => return true,
+            _ => false,
+        }
     }
 }
 
-type SingleMessage = (
-    oneshot::Sender<Result<CommandSendReceipt, Error>>,
-    BatchedMessage,
-);
+enum BatchItem {
+    SingleMessage(
+        oneshot::Sender<Result<CommandSendReceipt, Error>>,
+        BatchedMessage,
+    ),
+    Flush(oneshot::Sender<()>),
+}
+
+struct Batch {
+    // sends a message or trigger a flush
+    msg_sender: mpsc::Sender<BatchItem>,
+    // receives the notification when `bath_process_loop` is closed
+    close_receiver: oneshot::Receiver<()>,
+}
 
 #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
 async fn batch_process_loop(
     producer_id: ProducerId,
     mut batch_storage: BatchStorage,
-    mut msg_receiver: mpsc::Receiver<Option<SingleMessage>>,
+    mut msg_receiver: mpsc::Receiver<BatchItem>,
     close_sender: oneshot::Sender<()>,
-    mut batch_sender: mpsc::Sender<Vec<SingleMessage>>,
+    mut batch_sender: mpsc::Sender<Vec<BatchItem>>,
     executor: impl Executor,
 ) {
     let mut recv_future = msg_receiver.next();
     let mut timer_future: Pin<Box<dyn Future<Output = ()> + Send + 'static>> =
         Box::pin(future::pending());
 
-    let flush = async |sender: &mut mpsc::Sender<Vec<SingleMessage>>,
-                       messages: Vec<SingleMessage>| {
-        let count = messages.len();
-        if count == 0 {
-            return;
+    let flush = async |batch_sender: &mut mpsc::Sender<Vec<BatchItem>>,
+                       messages: Vec<BatchItem>| {
+        if !messages.is_empty() {
+            let _ = batch_sender.send(messages).await;
         }
-        let sequence_id = messages.first().unwrap().1.metadata.sequence_id();
-        let _ = sender.send(messages).await.inspect_err(|err| {
-            error!(
-                "producer {} failed to flush messages (first seq: {}, count: {}): {}",
-                producer_id, sequence_id, count, err
-            );
-        });
     };
 
     loop {
         match future::select(recv_future, timer_future).await {
-            Either::Left((Some(opt_single_msg), previous_timer_future)) => match opt_single_msg {
-                None => {
+            Either::Left((Some(batch_item), previous_timer_future)) => {
+                batch_storage.push_back(batch_item);
+                if batch_storage.ready_to_flush() {
                     flush(&mut batch_sender, batch_storage.get_messages()).await;
                     timer_future = Box::pin(future::pending());
-                    recv_future = msg_receiver.next();
+                } else {
+                    timer_future = match batch_storage.timeout {
+                        Some(timeout) if batch_storage.storage.len() == 1 => {
+                            Box::pin(executor.delay(timeout))
+                        }
+                        _ => previous_timer_future,
+                    };
                 }
-                Some(single_msg) => {
-                    batch_storage.push_back(single_msg);
-                    if batch_storage.ready_to_flush() {
-                        flush(&mut batch_sender, batch_storage.get_messages()).await;
-                        timer_future = Box::pin(future::pending());
-                    } else {
-                        timer_future = match batch_storage.timeout {
-                            Some(timeout) if batch_storage.storage.len() == 1 => {
-                                Box::pin(executor.delay(timeout))
-                            }
-                            _ => previous_timer_future,
-                        };
-                    }
-                    recv_future = msg_receiver.next();
-                }
-            },
+                recv_future = msg_receiver.next();
+            }
             Either::Left((None, _)) => {
                 let count = batch_storage.storage.len();
                 if count > 0 {
@@ -1148,7 +1130,7 @@ async fn batch_process_loop(
 
 #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
 async fn message_send_loop<Exe>(
-    mut msg_receiver: mpsc::Receiver<Vec<SingleMessage>>,
+    mut msg_receiver: mpsc::Receiver<Vec<BatchItem>>,
     client: Pulsar<Exe>,
     mut connection: Arc<Connection<Exe>>,
     topic: String,
@@ -1161,17 +1143,39 @@ async fn message_send_loop<Exe>(
 {
     loop {
         match msg_receiver.next().await {
-            Some(messages) => {
-                if messages.is_empty() {
+            Some(mut batch_items) => {
+                if batch_items.is_empty() {
+                    error!(
+                        "producer {}'s message_send_loop received an empty batch unexpectedly",
+                        producer_id
+                    );
                     continue;
                 }
                 let mut payload: Vec<u8> = Vec::new();
                 let mut receipts = Vec::new();
 
-                let counter = messages.len();
-                for (tx, message) in messages {
-                    receipts.push(tx);
-                    message.serialize(&mut payload);
+                let flush_tx = {
+                    if let Some(BatchItem::Flush(_)) = batch_items.last() {
+                        if let BatchItem::Flush(tx) = batch_items.pop().unwrap() {
+                            Some(tx)
+                        } else {
+                            unreachable!()
+                        }
+                    } else {
+                        None
+                    }
+                };
+                let counter = batch_items.len();
+                for item in batch_items {
+                    if let BatchItem::SingleMessage(tx, batched_msg) = item {
+                        receipts.push(tx);
+                        batched_msg.serialize(&mut payload);
+                    } else {
+                        error!(
+                            "producer {}'s message_send_loop received a Flush item unexpectedly",
+                            producer_id
+                        );
+                    }
                 }
 
                 let message = ProducerMessage {
@@ -1206,6 +1210,9 @@ async fn message_send_loop<Exe>(
                                 msg_id.batch_size = Some(counter as i32);
                             }
                             let _ = tx.send(Ok(receipt));
+                        }
+                        if let Some(flush_tx) = flush_tx {
+                            let _ = flush_tx.send(());
                         }
                     }
                     Err(e) => {

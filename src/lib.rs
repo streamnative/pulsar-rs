@@ -621,15 +621,13 @@ mod tests {
         let _ = producer.close().await;
         let error = producer.send_batch().await.err().unwrap();
         info!("send_batch failed: {}", &error);
-        if let PulsarError::Producer(ProducerError::Custom(msg)) = error {
-            assert!(msg.contains("send failed because receiver is gone"));
+        if let PulsarError::Producer(ProducerError::Fenced) = error {
         } else {
             panic!();
         }
         let error = producer.send_non_blocking("msg").await.err().unwrap();
         info!("send failed: {error}");
-        if let PulsarError::Producer(ProducerError::Custom(msg)) = error {
-            assert!(msg.contains("send failed because receiver is gone"));
+        if let PulsarError::Producer(ProducerError::Fenced) = error {
         } else {
             panic!();
         }
