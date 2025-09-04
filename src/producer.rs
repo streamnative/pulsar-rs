@@ -1073,27 +1073,41 @@ async fn batch_process_loop(
     mut batch_storage: BatchStorage,
     mut msg_receiver: mpsc::Receiver<Option<SingleMessage>>,
     close_sender: oneshot::Sender<()>,
-    batch_sender: mpsc::Sender<Vec<SingleMessage>>,
+    mut batch_sender: mpsc::Sender<Vec<SingleMessage>>,
     executor: impl Executor,
 ) {
     let mut recv_future = msg_receiver.next();
     let mut timer_future: Pin<Box<dyn Future<Output = ()> + Send + 'static>> =
         Box::pin(future::pending());
 
+    let flush = async |sender: &mut mpsc::Sender<Vec<SingleMessage>>,
+                       messages: Vec<SingleMessage>| {
+        let count = messages.len();
+        if count == 0 {
+            return;
+        }
+        let sequence_id = messages.first().unwrap().1.metadata.sequence_id();
+        let _ = sender.send(messages).await.inspect_err(|err| {
+            error!(
+                "producer {} failed to flush messages (first seq: {}, count: {}): {}",
+                producer_id, sequence_id, count, err
+            );
+        });
+    };
+
     loop {
-        let mut batch_sender = batch_sender.clone();
         match future::select(recv_future, timer_future).await {
             Either::Left((Some(opt_single_msg), previous_timer_future)) => match opt_single_msg {
                 None => {
-                    let _ = batch_sender.send(batch_storage.get_messages()).await;
+                    flush(&mut batch_sender, batch_storage.get_messages()).await;
                     timer_future = Box::pin(future::pending());
                     recv_future = msg_receiver.next();
                 }
                 Some(single_msg) => {
                     batch_storage.push_back(single_msg);
                     if batch_storage.ready_to_flush() {
+                        flush(&mut batch_sender, batch_storage.get_messages()).await;
                         timer_future = Box::pin(future::pending());
-                        let _ = batch_sender.send(batch_storage.get_messages()).await;
                     } else {
                         timer_future = match batch_storage.timeout {
                             Some(timeout) if batch_storage.storage.len() == 1 => {
@@ -1106,7 +1120,13 @@ async fn batch_process_loop(
                 }
             },
             Either::Left((None, _)) => {
-                debug!("producer {producer_id} batch_process_loop: channel closed, exiting");
+                let count = batch_storage.storage.len();
+                if count > 0 {
+                    warn!("producer {}'s batch_process_loop exits when there are {} messages not flushed",
+                        producer_id, count);
+                } else {
+                    debug!("producer {producer_id}'s batch_process_loop: channel closed, exiting");
+                }
                 let _ = close_sender.send(()).inspect_err(|e| {
                     warn!(
                         "{producer_id} could not notify the batch_process_loop is closed: {:?}, the producer might be dropped without closing",
@@ -1117,7 +1137,7 @@ async fn batch_process_loop(
             }
             Either::Right((_, previous_recv_future)) => {
                 if batch_storage.timeout.is_some() {
-                    let _ = batch_sender.send(batch_storage.get_messages()).await;
+                    flush(&mut batch_sender, batch_storage.get_messages()).await;
                 }
                 timer_future = Box::pin(future::pending());
                 recv_future = previous_recv_future;
@@ -1154,15 +1174,6 @@ async fn message_send_loop<Exe>(
                     message.serialize(&mut payload);
                 }
 
-                let fail = |receipts: Vec<oneshot::Sender<Result<CommandSendReceipt, Error>>>,
-                            description: &str,
-                            e: Error| {
-                    let error = Arc::new(Error::Custom(format!("{description}: {e}")));
-                    for tx in receipts {
-                        let _ = tx.send(Err(Error::Producer(ProducerError::Batch(error.clone()))));
-                    }
-                };
-
                 let message = ProducerMessage {
                     payload,
                     num_messages_in_batch: Some(counter as i32),
@@ -1171,37 +1182,39 @@ async fn message_send_loop<Exe>(
 
                 trace!("sending a batched message of size {}", counter);
 
-                match compress_message(message, &options.compression) {
-                    Ok(compressed_message) => {
-                        match send_message(
-                            &client,
-                            &topic,
-                            &mut connection,
-                            compressed_message,
-                            producer_id,
-                            &producer_name,
-                            &sequence_id,
-                            &options,
-                        )
-                        .await
-                        {
-                            Ok(fut) => match fut.await {
-                                Ok(receipt) => {
-                                    for (batch_index, tx) in receipts.into_iter().enumerate() {
-                                        let mut receipt = receipt.clone();
-                                        if let Some(msg_id) = &mut receipt.message_id {
-                                            msg_id.batch_index = Some(batch_index as i32);
-                                            msg_id.batch_size = Some(counter as i32);
-                                        }
-                                        let _ = tx.send(Ok(receipt));
-                                    }
-                                }
-                                Err(e) => fail(receipts, "failed to send message", e),
-                            },
-                            Err(e) => fail(receipts, "failed to send message", e),
+                let send = async || {
+                    let compressed_message = compress_message(message, &options.compression)?;
+                    send_message(
+                        &client,
+                        &topic,
+                        &mut connection,
+                        compressed_message,
+                        producer_id,
+                        &producer_name,
+                        &sequence_id,
+                        &options,
+                    )
+                    .await?
+                    .await
+                };
+                match send().await {
+                    Ok(receipt) => {
+                        for (batch_index, tx) in receipts.into_iter().enumerate() {
+                            let mut receipt = receipt.clone();
+                            if let Some(msg_id) = &mut receipt.message_id {
+                                msg_id.batch_index = Some(batch_index as i32);
+                                msg_id.batch_size = Some(counter as i32);
+                            }
+                            let _ = tx.send(Ok(receipt));
                         }
                     }
-                    Err(e) => fail(receipts, "failed to compress message", e),
+                    Err(e) => {
+                        let error = Arc::new(e);
+                        for tx in receipts {
+                            let _ =
+                                tx.send(Err(Error::Producer(ProducerError::Batch(error.clone()))));
+                        }
+                    }
                 };
             }
             None => {
