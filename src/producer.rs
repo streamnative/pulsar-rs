@@ -581,7 +581,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
                 producer_id,
                 producer_name.clone(),
                 sequence_id.clone(),
-                options.compression.clone(),
+                options.clone(),
             )));
             Some(sender)
         } else {
@@ -642,7 +642,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
         let (tx, rx) = oneshot::channel();
         match &mut self.batch_msg_sender {
             None => {
-                let compressed_message = compress_message(message, self.compression.clone())?;
+                let compressed_message = compress_message(message, &self.compression)?;
                 let fut = send_message(
                     &self.client,
                     &self.topic,
@@ -651,6 +651,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
                     self.id,
                     &self.name,
                     &self.sequence_id,
+                    &self.options,
                 )
                 .await?;
                 self.client
@@ -693,7 +694,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
 #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
 fn compress_message(
     mut message: ProducerMessage,
-    compression: Option<Compression>,
+    compression: &Option<Compression>,
 ) -> Result<ProducerMessage, Error> {
     let compressed_message = match compression {
         None | Some(Compression::None) => message,
@@ -758,6 +759,7 @@ async fn send_message<Exe>(
     producer_id: ProducerId,
     producer_name: &ProducerName,
     sequence_id: &SerialId,
+    options: &ProducerOptions,
 ) -> Result<impl Future<Output = Result<CommandSendReceipt, Error>>, Error>
 where
     Exe: Executor,
@@ -815,7 +817,7 @@ where
             topic,
             producer_id,
             Some(producer_name.clone()),
-            &ProducerOptions::default(),
+            options,
         )
         .await?;
     }
@@ -981,11 +983,6 @@ impl BatchStorage {
         }
         false
     }
-
-    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub fn ready_to_start_timer(&self) -> bool {
-        self.timeout.is_some() && self.storage.len() == 1
-    }
 }
 
 type SingleMessage = (
@@ -1017,10 +1014,13 @@ async fn batch_process_loop(
                     if batch_storage.ready_to_flush() {
                         timer_future = Box::pin(future::pending());
                         let _ = batch_sender.send(batch_storage.get_messages()).await;
-                    } else if batch_storage.ready_to_start_timer() {
-                        timer_future = Box::pin(executor.delay(batch_storage.timeout.unwrap()));
                     } else {
-                        timer_future = previous_timer_future;
+                        timer_future = match batch_storage.timeout {
+                            Some(timeout) if batch_storage.storage.len() == 1 => {
+                                Box::pin(executor.delay(timeout))
+                            }
+                            _ => previous_timer_future,
+                        };
                     }
                     recv_future = msg_receiver.next();
                 }
@@ -1048,7 +1048,7 @@ async fn message_send_loop<Exe>(
     producer_id: ProducerId,
     producer_name: ProducerName,
     sequence_id: SerialId,
-    compression: Option<Compression>,
+    options: ProducerOptions,
 ) where
     Exe: Executor,
 {
@@ -1084,7 +1084,7 @@ async fn message_send_loop<Exe>(
 
                 trace!("sending a batched message of size {}", counter);
 
-                match compress_message(message, compression.clone()) {
+                match compress_message(message, &options.compression) {
                     Ok(compressed_message) => {
                         match send_message(
                             &client,
@@ -1094,6 +1094,7 @@ async fn message_send_loop<Exe>(
                             producer_id,
                             &producer_name,
                             &sequence_id,
+                            &options,
                         )
                         .await
                         {
