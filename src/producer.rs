@@ -571,6 +571,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
             let executor_clone = executor.clone();
             let (batch_sender, batch_receiver) = mpsc::channel::<Vec<SingleMessage>>(1);
             let _ = executor.spawn(Box::pin(batch_process_loop(
+                producer_id,
                 batch_storage,
                 receiver,
                 batch_sender,
@@ -1015,6 +1016,7 @@ type SingleMessage = (
 );
 
 async fn batch_process_loop(
+    producer_id: ProducerId,
     mut batch_storage: BatchStorage,
     mut msg_receiver: mpsc::Receiver<Option<SingleMessage>>,
     batch_sender: mpsc::Sender<Vec<SingleMessage>>,
@@ -1050,7 +1052,7 @@ async fn batch_process_loop(
                 }
             },
             Either::Left((None, _)) => {
-                debug!("batch_process_loop: channel closed, exiting");
+                debug!("{producer_id} batch_process_loop: channel closed, exiting");
                 break;
             }
             Either::Right((_, previous_recv_future)) => {
@@ -1142,7 +1144,7 @@ async fn message_send_loop<Exe>(
                 };
             }
             None => {
-                debug!("message_send_loop: channel closed, exiting");
+                debug!("{producer_id} message_send_loop: channel closed, exiting");
                 break;
             }
         }
