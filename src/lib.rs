@@ -212,6 +212,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
+    use assert_matches::assert_matches;
     use futures::{future::try_join_all, StreamExt};
     use log::{LevelFilter, Metadata, Record};
     #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
@@ -483,6 +484,8 @@ mod tests {
     #[tokio::test]
     #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
     async fn batching() {
+        use assert_matches::assert_matches;
+
         let _result = log::set_logger(&TEST_LOGGER);
         log::set_max_level(LevelFilter::Debug);
 
@@ -605,10 +608,7 @@ mod tests {
         // send operations after close will fail
         let _ = producer.close().await;
         let error = producer.send_non_blocking("msg").await.err().unwrap();
-        if let PulsarError::Producer(ProducerError::Fenced) = error {
-        } else {
-            panic!();
-        }
+        assert_matches!(error, PulsarError::Producer(ProducerError::Closed));
     }
 
     #[tokio::test]
@@ -646,12 +646,18 @@ mod tests {
             .collect();
         assert_eq!(msg_ids, vec![(0, 0, 3), (0, 1, 3), (0, 2, 3)]);
 
+        // Flush 0 messages should be ok
+        producer.send_batch().await.unwrap();
+
+        let send_futures = send_messages(&mut producer, vec!["3", "4"]).await;
         producer.close().await.unwrap();
-        let error = producer.send_batch().await.err().unwrap();
-        if let PulsarError::Producer(ProducerError::Fenced) = error {
-        } else {
-            panic!();
+        for send_future in send_futures {
+            let error = send_future.await.err().unwrap();
+            assert_matches!(error, PulsarError::Producer(ProducerError::Closed));
         }
+
+        let error = producer.send_batch().await.err().unwrap();
+        assert_matches!(error, PulsarError::Producer(ProducerError::Closed));
     }
 
     async fn create_batched_producer<Exe>(

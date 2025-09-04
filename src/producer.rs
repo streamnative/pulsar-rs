@@ -653,7 +653,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
                 let _ = rx.await; // ignore any error
                 Ok(())
             }
-            None if self.options.enabled_batching() => Err(ProducerError::Fenced.into()),
+            None if self.options.enabled_batching() => Err(ProducerError::Closed.into()),
             _ => Err(ProducerError::Custom("not a batching producer".to_string()).into()),
         }
     }
@@ -691,7 +691,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
                 })?;
             }
             None if self.options.enabled_batching() => {
-                return Err(ProducerError::Fenced.into());
+                return Err(ProducerError::Closed.into());
             }
             _ => {
                 let compressed_message = compress_message(message, &self.compression)?;
@@ -1106,6 +1106,11 @@ async fn batch_process_loop(
                 if count > 0 {
                     warn!("producer {}'s batch_process_loop exits when there are {} messages not flushed",
                         producer_id, count);
+                    for item in batch_storage.get_messages() {
+                        if let BatchItem::SingleMessage(tx, _) = item {
+                            let _ = tx.send(Err(Error::Producer(ProducerError::Closed)));
+                        }
+                    }
                 } else {
                     debug!("producer {producer_id}'s batch_process_loop: channel closed, exiting");
                 }
