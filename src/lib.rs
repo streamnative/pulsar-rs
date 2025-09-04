@@ -615,6 +615,16 @@ mod tests {
             get_send_msg_ids(send_futures).await,
             vec![(7, 0, 2), (7, 1, 2)]
         );
+
+        // Test send_batch after close
+        let _ = producer.close().await;
+        assert!(producer
+            .send_non_blocking("msg")
+            .await
+            .unwrap()
+            .await
+            .is_err());
+        assert!(producer.send_batch().await.is_err());
     }
 
     async fn get_send_msg_ids(send_futures: Vec<SendFuture>) -> Vec<(u64, i32, i32)> {

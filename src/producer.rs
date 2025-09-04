@@ -1,5 +1,6 @@
 //! Message publication
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, HashMap, VecDeque},
     io::Write,
     pin::Pin,
@@ -518,7 +519,9 @@ struct TopicProducer<Exe: Executor> {
     options: ProducerOptions,
     // When batching is enabled, `send_non_blocking` will send the batch to the
     // `batch_process_loop` task instead of sending it directly.
-    batch_msg_sender: Option<mpsc::Sender<Option<SingleMessage>>>,
+    // Use RefCell because we need to close the sender when calling `close()` that takes an
+    // immutable reference of itself.
+    batch_msg_sender: RefCell<Option<mpsc::Sender<Option<SingleMessage>>>>,
 }
 
 impl<Exe: Executor> TopicProducer<Exe> {
@@ -597,7 +600,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
             sequence_id,
             compression,
             options,
-            batch_msg_sender,
+            batch_msg_sender: RefCell::new(batch_msg_sender),
         })
     }
 
@@ -627,7 +630,8 @@ impl<Exe: Executor> TopicProducer<Exe> {
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn send_batch(&mut self) -> Result<(), Error> {
-        match &mut self.batch_msg_sender {
+        let mut sender = self.get_batch_msg_sender();
+        match &mut sender {
             None => Err(ProducerError::Custom("not a batching producer".to_string()).into()),
             Some(sender) => sender.send(None).await.map_err(|e| {
                 Error::Producer(ProducerError::Custom(format!(
@@ -639,8 +643,9 @@ impl<Exe: Executor> TopicProducer<Exe> {
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub(crate) async fn send_raw(&mut self, message: ProducerMessage) -> Result<SendFuture, Error> {
+        let mut sender = self.get_batch_msg_sender();
         let (tx, rx) = oneshot::channel();
-        match &mut self.batch_msg_sender {
+        match &mut sender {
             None => {
                 let compressed_message = compress_message(message, &self.compression)?;
                 let fut = send_message(
@@ -680,14 +685,29 @@ impl<Exe: Executor> TopicProducer<Exe> {
                 };
                 let _ = sender.send(Some((tx, batched))).await;
             }
-        }
+        };
         Ok(SendFuture(rx))
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn close(&self) -> Result<(), Error> {
-        self.connection.sender().close_producer(self.id).await?;
+        let mut sender = self.get_batch_msg_sender();
+        match &mut sender {
+            None => {
+                self.connection.sender().close_producer(self.id).await?;
+            }
+            Some(sender) => {
+                sender.close_channel();
+            }
+        };
         Ok(())
+    }
+
+    fn get_batch_msg_sender(&self) -> Option<mpsc::Sender<Option<SingleMessage>>> {
+        self.batch_msg_sender
+            .borrow_mut()
+            .as_mut()
+            .map(|sender| sender.clone())
     }
 }
 
