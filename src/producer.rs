@@ -683,7 +683,11 @@ impl<Exe: Executor> TopicProducer<Exe> {
                     },
                     payload: message.payload,
                 };
-                let _ = sender.send(Some((tx, batched))).await;
+                sender.send(Some((tx, batched))).await.map_err(|e| {
+                    Error::Producer(ProducerError::Custom(format!(
+                        "failed to send message to batch_process_loop: {e}"
+                    )))
+                })?;
             }
         };
         Ok(SendFuture(rx))

@@ -223,6 +223,7 @@ mod tests {
     use crate::{
         client::SerializeMessage,
         consumer::{InitialPosition, Message},
+        error::ProducerError,
         message::{proto::command_subscribe::SubType, Payload},
         producer::SendFuture,
         Error as PulsarError,
@@ -616,15 +617,22 @@ mod tests {
             vec![(7, 0, 2), (7, 1, 2)]
         );
 
-        // Test send_batch after close
+        // send operations after close will fail
         let _ = producer.close().await;
-        assert!(producer
-            .send_non_blocking("msg")
-            .await
-            .unwrap()
-            .await
-            .is_err());
-        assert!(producer.send_batch().await.is_err());
+        let error = producer.send_batch().await.err().unwrap();
+        info!("send_batch failed: {}", &error);
+        if let PulsarError::Producer(ProducerError::Custom(msg)) = error {
+            assert!(msg.contains("send failed because receiver is gone"));
+        } else {
+            panic!();
+        }
+        let error = producer.send_non_blocking("msg").await.err().unwrap();
+        info!("send failed: {error}");
+        if let PulsarError::Producer(ProducerError::Custom(msg)) = error {
+            assert!(msg.contains("send failed because receiver is gone"));
+        } else {
+            panic!();
+        }
     }
 
     async fn get_send_msg_ids(send_futures: Vec<SendFuture>) -> Vec<(u64, i32, i32)> {
