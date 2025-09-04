@@ -1042,10 +1042,7 @@ impl BatchStorage {
                 return true;
             }
         }
-        match self.storage.back() {
-            Some(BatchItem::Flush(_)) => return true,
-            _ => false,
-        }
+        matches!(self.storage.back(), Some(BatchItem::Flush(_)))
     }
 }
 
