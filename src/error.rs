@@ -286,6 +286,8 @@ pub enum ProducerError {
     /// Indicates this producer has lost exclusive access to the topic. Client can decided whether
     /// to recreate or not
     Fenced,
+    /// Indicates the producer is closed or dropped
+    Closed,
 }
 
 impl From<ConnectionError> for ProducerError {
@@ -333,6 +335,7 @@ impl fmt::Display for ProducerError {
                 Ok(())
             }
             ProducerError::Fenced => write!(f, "Producer is fenced"),
+            ProducerError::Closed => write!(f, "Producer is closed or dropped"),
         }
     }
 }
@@ -359,6 +362,7 @@ impl fmt::Debug for ProducerError {
                 write!(f, ")")
             }
             ProducerError::Fenced => write!(f, "Producer is fenced"),
+            ProducerError::Closed => write!(f, "Producer is closed or dropped"),
         }
     }
 }
@@ -376,6 +380,7 @@ impl std::error::Error for ProducerError {
                 .map(|r| r.as_ref().map(drop).unwrap_err() as _),
             ProducerError::Custom(_) => None,
             ProducerError::Fenced => None,
+            ProducerError::Closed => None,
         }
     }
 }
