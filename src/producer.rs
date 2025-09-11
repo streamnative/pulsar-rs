@@ -1379,8 +1379,10 @@ impl<T: SerializeMessage + Sized, Exe: Executor> MessageBuilder<'_, T, Exe> {
 #[cfg(test)]
 mod tests {
     use futures::executor::block_on;
+    use log::LevelFilter;
 
     use super::*;
+    use crate::{tests::TEST_LOGGER, TokioExecutor};
 
     #[test]
     fn send_future_errors_when_sender_dropped() {
@@ -1435,5 +1437,37 @@ mod tests {
         assert!(pm.num_messages_in_batch.is_none());
         assert!(pm.compression.is_none());
         assert!(pm.uncompressed_size.is_none());
+    }
+
+    #[tokio::test]
+    async fn block_queue_if_full() {
+        let _result = log::set_logger(&TEST_LOGGER);
+        log::set_max_level(LevelFilter::Debug);
+        let pulsar: Pulsar<_> = Pulsar::builder("pulsar://127.0.0.1:6650", TokioExecutor)
+            .with_outbound_channel_size(5)
+            .build()
+            .await
+            .unwrap();
+        let mut producer = pulsar
+            .producer()
+            .with_topic(format!("block_queue_if_full_{}", rand::random::<u16>()))
+            .build()
+            .await
+            .unwrap();
+        let mut send_results = Vec::with_capacity(10);
+        for i in 0..10 {
+            send_results.push(producer.send_non_blocking(format!("msg-{i}")).await);
+        }
+        for (i, result) in send_results.into_iter().enumerate() {
+            match result {
+                Ok(_) => {
+                    // TODO:
+                }
+                Err(e) => {
+                    error!("failed to send {}: {}", i, e);
+                    panic!();
+                }
+            }
+        }
     }
 }
