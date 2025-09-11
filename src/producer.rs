@@ -390,7 +390,7 @@ impl<Exe: Executor> Producer<Exe> {
     /// ```rust,no_run
     /// match producer.send_non_blocking("msg").await {
     ///     Ok(future) => { /* handle the send future */ }
-    ///     Err(Error::Connection(ConnectionError::SlowDown)) => {
+    ///     Err(Error::Producer(ProducerError::Connection(ConnectionError::SlowDown))) => {
     ///         /* wait for a while and resent */
     ///     }
     ///     Err(e) => { /* handle other errors */ }
@@ -837,12 +837,17 @@ where
 {
     loop {
         let message = message.clone();
-        match connection.sender().send(
-            producer_id,
-            producer_name.clone(),
-            sequence_id.get(),
-            message,
-        ) {
+        match connection
+            .sender()
+            .send(
+                producer_id,
+                producer_name.clone(),
+                sequence_id.get(),
+                message,
+                options.block_queue_if_full,
+            )
+            .await
+        {
             Ok(fut) => {
                 let fut = async move {
                     let res = fut.await;
@@ -1459,7 +1464,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn block_queue_if_full() {
+    async fn block_if_queue_full() {
         let _result = log::set_logger(&TEST_LOGGER);
         log::set_max_level(LevelFilter::Debug);
         let pulsar: Pulsar<_> = Pulsar::builder("pulsar://127.0.0.1:6650", TokioExecutor)
@@ -1479,9 +1484,8 @@ mod tests {
         }
         for (i, result) in send_results.into_iter().enumerate() {
             match result {
-                Ok(_) => {
-                    // TODO:
-                }
+                Ok(_)
+                | Err(Error::Producer(ProducerError::Connection(ConnectionError::SlowDown))) => {}
                 Err(e) => {
                     error!("failed to send {}: {}", i, e);
                     panic!();
