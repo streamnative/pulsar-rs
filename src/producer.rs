@@ -1468,7 +1468,7 @@ mod tests {
         let _result = log::set_logger(&TEST_LOGGER);
         log::set_max_level(LevelFilter::Debug);
         let pulsar: Pulsar<_> = Pulsar::builder("pulsar://127.0.0.1:6650", TokioExecutor)
-            .with_outbound_channel_size(5)
+            .with_outbound_channel_size(3)
             .build()
             .await
             .unwrap();
@@ -1482,10 +1482,39 @@ mod tests {
         for i in 0..10 {
             send_results.push(producer.send_non_blocking(format!("msg-{i}")).await);
         }
+        let mut failed_indexes = vec![];
         for (i, result) in send_results.into_iter().enumerate() {
             match result {
-                Ok(_)
-                | Err(Error::Producer(ProducerError::Connection(ConnectionError::SlowDown))) => {}
+                Ok(_) => {}
+                Err(Error::Producer(ProducerError::Connection(ConnectionError::SlowDown))) => {
+                    failed_indexes.push(i);
+                }
+                Err(e) => {
+                    error!("failed to send {}: {}", i, e);
+                    panic!();
+                }
+            }
+        }
+        info!("Messages failed due to SlowDown: {:?}", &failed_indexes);
+        assert!(!failed_indexes.is_empty());
+
+        let mut producer = pulsar
+            .producer()
+            .with_topic(format!("block_queue_if_full_{}", rand::random::<u16>()))
+            .with_options(ProducerOptions {
+                block_queue_if_full: true,
+                ..Default::default()
+            })
+            .build()
+            .await
+            .unwrap();
+        let mut send_results = Vec::with_capacity(10);
+        for i in 0..10 {
+            send_results.push(producer.send_non_blocking(format!("msg-{i}")).await);
+        }
+        for (i, result) in send_results.into_iter().enumerate() {
+            match result {
+                Ok(_) => {}
                 Err(e) => {
                     error!("failed to send {}: {}", i, e);
                     panic!();
