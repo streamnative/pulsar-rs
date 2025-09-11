@@ -388,6 +388,9 @@ impl<Exe: Executor> Producer<Exe> {
     /// like:
     ///
     /// ```rust,no_run
+    /// use pulsar::error::{ConnectionError, Error, ProducerError};
+    ///
+    /// # async fn run(mut producer: pulsar::Producer<pulsar::TokioExecutor>) -> Result<(), pulsar::Error> {
     /// match producer.send_non_blocking("msg").await {
     ///     Ok(future) => { /* handle the send future */ }
     ///     Err(Error::Producer(ProducerError::Connection(ConnectionError::SlowDown))) => {
@@ -395,6 +398,8 @@ impl<Exe: Executor> Producer<Exe> {
     ///     }
     ///     Err(e) => { /* handle other errors */ }
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// Usage:
