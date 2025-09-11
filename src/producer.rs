@@ -157,6 +157,10 @@ pub struct ProducerOptions {
     /// producer access mode: shared = 0, exclusive = 1, waitforexclusive =2,
     /// exclusivewithoutfencing =3
     pub access_mode: Option<i32>,
+    /// Whether to block if the internal pending queue, whose size is configured by
+    /// [`crate::client::PulsarBuilder::with_outbound_channel_size`] is full, when awaiting
+    /// [`Producer::send_non_blocking`]. (default: false)
+    pub block_queue_if_full: bool,
 }
 
 impl ProducerOptions {
@@ -377,6 +381,21 @@ impl<Exe: Executor> Producer<Exe> {
     /// - the message was sent successfully but Pulsar did not send the receipt yet
     /// - the producer is batching messages, so this function must return immediately, and the
     ///   receipt will come when the batched messages are actually sent
+    ///
+    /// If [`ProducerOptions::block_queue_if_full`] is false (by default) and the internal pending
+    /// queue is full, which means the send rate is too fast,
+    /// [`crate::error::ConnectionError::SlowDown`] will be returned. You should handle the error
+    /// like:
+    ///
+    /// ```rust,no_run
+    /// match producer.send_non_blocking("msg").await {
+    ///     Ok(future) => { /* handle the send future */ }
+    ///     Err(Error::Connection(ConnectionError::SlowDown)) => {
+    ///         /* wait for a while and resent */
+    ///     }
+    ///     Err(e) => { /* handle other errors */ }
+    /// }
+    /// ```
     ///
     /// Usage:
     ///
