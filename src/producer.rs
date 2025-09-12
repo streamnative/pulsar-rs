@@ -157,6 +157,10 @@ pub struct ProducerOptions {
     /// producer access mode: shared = 0, exclusive = 1, waitforexclusive =2,
     /// exclusivewithoutfencing =3
     pub access_mode: Option<i32>,
+    /// Whether to block if the internal pending queue, whose size is configured by
+    /// [`crate::client::PulsarBuilder::with_outbound_channel_size`] is full, when awaiting
+    /// [`Producer::send_non_blocking`]. (default: false)
+    pub block_queue_if_full: bool,
 }
 
 impl ProducerOptions {
@@ -377,6 +381,26 @@ impl<Exe: Executor> Producer<Exe> {
     /// - the message was sent successfully but Pulsar did not send the receipt yet
     /// - the producer is batching messages, so this function must return immediately, and the
     ///   receipt will come when the batched messages are actually sent
+    ///
+    /// If [`ProducerOptions::block_queue_if_full`] is false (by default) and the internal pending
+    /// queue is full, which means the send rate is too fast,
+    /// [`crate::error::ConnectionError::SlowDown`] will be returned. You should handle the error
+    /// like:
+    ///
+    /// ```rust,no_run
+    /// use pulsar::error::{ConnectionError, Error, ProducerError};
+    ///
+    /// # async fn run(mut producer: pulsar::Producer<pulsar::TokioExecutor>) -> Result<(), pulsar::Error> {
+    /// match producer.send_non_blocking("msg").await {
+    ///     Ok(future) => { /* handle the send future */ }
+    ///     Err(Error::Producer(ProducerError::Connection(ConnectionError::SlowDown))) => {
+    ///         /* wait for a while and resent */
+    ///     }
+    ///     Err(e) => { /* handle other errors */ }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     ///
     /// Usage:
     ///
@@ -818,12 +842,17 @@ where
 {
     loop {
         let message = message.clone();
-        match connection.sender().send(
-            producer_id,
-            producer_name.clone(),
-            sequence_id.get(),
-            message,
-        ) {
+        match connection
+            .sender()
+            .send(
+                producer_id,
+                producer_name.clone(),
+                sequence_id.get(),
+                message,
+                options.block_queue_if_full,
+            )
+            .await
+        {
             Ok(fut) => {
                 let fut = async move {
                     let res = fut.await;
@@ -1379,8 +1408,10 @@ impl<T: SerializeMessage + Sized, Exe: Executor> MessageBuilder<'_, T, Exe> {
 #[cfg(test)]
 mod tests {
     use futures::executor::block_on;
+    use log::LevelFilter;
 
     use super::*;
+    use crate::{tests::TEST_LOGGER, TokioExecutor};
 
     #[test]
     fn send_future_errors_when_sender_dropped() {
@@ -1435,5 +1466,59 @@ mod tests {
         assert!(pm.num_messages_in_batch.is_none());
         assert!(pm.compression.is_none());
         assert!(pm.uncompressed_size.is_none());
+    }
+
+    #[tokio::test]
+    async fn block_if_queue_full() {
+        let _result = log::set_logger(&TEST_LOGGER);
+        log::set_max_level(LevelFilter::Debug);
+        let pulsar: Pulsar<_> = Pulsar::builder("pulsar://127.0.0.1:6650", TokioExecutor)
+            .with_outbound_channel_size(3)
+            .build()
+            .await
+            .unwrap();
+        let mut producer = pulsar
+            .producer()
+            .with_topic(format!("block_queue_if_full_{}", rand::random::<u16>()))
+            .build()
+            .await
+            .unwrap();
+        let mut send_results = Vec::with_capacity(10);
+        for i in 0..10 {
+            send_results.push(producer.send_non_blocking(format!("msg-{i}")).await);
+        }
+        let mut failed_indexes = vec![];
+        for (i, result) in send_results.into_iter().enumerate() {
+            match result {
+                Ok(_) => {}
+                Err(Error::Producer(ProducerError::Connection(ConnectionError::SlowDown))) => {
+                    failed_indexes.push(i);
+                }
+                Err(e) => panic!("failed to send {}: {}", i, e),
+            }
+        }
+        info!("Messages failed due to SlowDown: {:?}", &failed_indexes);
+        assert!(!failed_indexes.is_empty());
+
+        let mut producer = pulsar
+            .producer()
+            .with_topic(format!("block_queue_if_full_{}", rand::random::<u16>()))
+            .with_options(ProducerOptions {
+                block_queue_if_full: true,
+                ..Default::default()
+            })
+            .build()
+            .await
+            .unwrap();
+        let mut send_results = Vec::with_capacity(10);
+        for i in 0..10 {
+            send_results.push(producer.send_non_blocking(format!("msg-{i}")).await);
+        }
+        for (i, result) in send_results.into_iter().enumerate() {
+            match result {
+                Ok(_) => {}
+                Err(e) => panic!("failed to send {}: {}", i, e),
+            }
+        }
     }
 }
