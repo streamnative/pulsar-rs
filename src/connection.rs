@@ -640,10 +640,10 @@ impl<Exe: Executor> ConnectionSender<Exe> {
     where
         F: FnOnce(Message) -> Option<R> + 'static,
     {
-        // This method is called for RPCs other than CommandSend, if the queue is full due to too
-        // many CommandSend RPCs not processed in time, we should not wait rather than fail fast
+        // This method is called for RPCs other than CommandSend. If the queue is full due to too
+        // many CommandSend RPCs not processed in time, we should wait rather than fail fast
         // because it's a client side issue that can be recovered later. Hence, set
-        // block_if_queue_full with true here.
+        // block_if_queue_full to true here.
         self.send_message_non_blocking(msg, key, extract, true)
             .await?
             .await

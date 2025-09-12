@@ -1494,10 +1494,7 @@ mod tests {
                 Err(Error::Producer(ProducerError::Connection(ConnectionError::SlowDown))) => {
                     failed_indexes.push(i);
                 }
-                Err(e) => {
-                    error!("failed to send {}: {}", i, e);
-                    panic!();
-                }
+                Err(e) => panic!("failed to send {}: {}", i, e),
             }
         }
         info!("Messages failed due to SlowDown: {:?}", &failed_indexes);
@@ -1520,10 +1517,7 @@ mod tests {
         for (i, result) in send_results.into_iter().enumerate() {
             match result {
                 Ok(_) => {}
-                Err(e) => {
-                    error!("failed to send {}: {}", i, e);
-                    panic!();
-                }
+                Err(e) => panic!("failed to send {}: {}", i, e),
             }
         }
     }
