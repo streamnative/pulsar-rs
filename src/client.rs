@@ -554,6 +554,7 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
         Ok(self.with_certificate_chain(v))
     }
 
+    /// The internal pending queue size for each producer on a topic partition. (default: 100)
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_outbound_channel_size(mut self, size: usize) -> Self {
         self.outbound_channel_size = Some(size);
