@@ -437,11 +437,19 @@ mod tests {
     };
     use log::LevelFilter;
     use regex::Regex;
-    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
     use tokio::time::timeout;
 
     use super::*;
-    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
     use crate::executor::TokioExecutor;
     use crate::{
         consumer::initial_position::InitialPosition, producer, proto, tests::TEST_LOGGER,
@@ -493,7 +501,11 @@ mod tests {
         tag: "multi_consumer",
     };
     #[tokio::test]
-    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
     async fn multi_consumer() {
         let _result = log::set_logger(&MULTI_LOGGER);
         log::set_max_level(LevelFilter::Debug);
@@ -584,7 +596,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
     async fn consumer_dropped_with_lingering_acks() {
         use rand::{distributions::Alphanumeric, Rng};
         let _result = log::set_logger(&TEST_LOGGER);
@@ -681,7 +697,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
     async fn dead_letter_queue() {
         let _result = log::set_logger(&TEST_LOGGER);
         log::set_max_level(LevelFilter::Debug);
@@ -761,7 +781,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
     async fn dead_letter_queue_batched() {
         use crate::ProducerOptions;
 
@@ -860,7 +884,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
     async fn failover() {
         let _result = log::set_logger(&MULTI_LOGGER);
         log::set_max_level(LevelFilter::Debug);
@@ -920,7 +948,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
     async fn seek_single_consumer() {
         let _result = log::set_logger(&MULTI_LOGGER);
         log::set_max_level(LevelFilter::Debug);
@@ -1031,7 +1063,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
     async fn schema_test() {
         #[derive(Serialize, Deserialize)]
         struct TestData {

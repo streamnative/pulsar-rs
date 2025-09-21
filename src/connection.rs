@@ -1010,7 +1010,13 @@ impl<Exe: Executor> Connection<Exe> {
                     .await
                 }
             }
-            #[cfg(all(feature = "tokio-rustls-runtime", not(feature = "tokio-runtime")))]
+            #[cfg(all(
+                any(
+                    feature = "tokio-rustls-runtime-aws-lc-rs",
+                    feature = "tokio-rustls-runtime-ring"
+                ),
+                not(feature = "tokio-runtime")
+            ))]
             ExecutorKind::Tokio => {
                 if tls {
                     let stream = tokio::net::TcpStream::connect(&address).await?;
@@ -1061,7 +1067,11 @@ impl<Exe: Executor> Connection<Exe> {
                     .await
                 }
             }
-            #[cfg(all(not(feature = "tokio-runtime"), not(feature = "tokio-rustls-runtime")))]
+            #[cfg(all(
+                not(feature = "tokio-runtime"),
+                not(feature = "tokio-rustls-runtime-aws-lc-rs"),
+                not(feature = "tokio-rustls-runtime-ring")
+            ))]
             ExecutorKind::Tokio => {
                 unimplemented!("the tokio-runtime cargo feature is not active");
             }
@@ -1110,7 +1120,10 @@ impl<Exe: Executor> Connection<Exe> {
                 }
             }
             #[cfg(all(
-                feature = "async-std-rustls-runtime",
+                any(
+                    feature = "async-std-rustls-runtime-aws-lc-rs",
+                    feature = "async-std-rustls-runtime-ring"
+                ),
                 not(feature = "async-std-runtime")
             ))]
             #[allow(deprecated)]
@@ -1166,7 +1179,8 @@ impl<Exe: Executor> Connection<Exe> {
             }
             #[cfg(all(
                 not(feature = "async-std-runtime"),
-                not(feature = "async-std-rustls-runtime")
+                not(feature = "async-std-rustls-runtime-aws-lc-rs"),
+                not(feature = "async-std-rustls-runtime-ring")
             ))]
             ExecutorKind::AsyncStd => {
                 unimplemented!("the async-std-runtime cargo feature is not active");
@@ -1811,7 +1825,11 @@ mod tests {
     use uuid::Uuid;
 
     use super::{Connection, Receiver};
-    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
     use crate::TokioExecutor;
     use crate::{
         authentication::Authentication,
@@ -1821,7 +1839,11 @@ mod tests {
     };
 
     #[tokio::test]
-    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
     async fn receiver_auth_challenge_test() {
         let (message_tx, message_rx) = mpsc::unbounded();
         let (tx, _) = async_channel::bounded(10);
@@ -1879,7 +1901,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
     async fn connection_auth_challenge_test() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
 
