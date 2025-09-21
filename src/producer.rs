@@ -735,7 +735,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub async fn close(&mut self) -> Result<(), Error> {
+    async fn close(&mut self) -> Result<(), Error> {
         match &mut self.batch {
             None => {
                 self.connection.sender().close_producer(self.id).await?;
