@@ -1507,7 +1507,6 @@ mod tests {
         }
     }
 
-
     #[tokio::test]
     async fn move_producer_to_spawned_task() {
         let _result = log::set_logger(&TEST_LOGGER);
