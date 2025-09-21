@@ -736,11 +736,11 @@ impl<Exe: Executor> TopicProducer<Exe> {
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn close(&mut self) -> Result<(), Error> {
-        match &mut self.batch {
+        match self.batch.take() {
             None => {
                 self.connection.sender().close_producer(self.id).await?;
             }
-            Some(batch) if self.options.enabled_batching() => {
+            Some(mut batch) if self.options.enabled_batching() => {
                 batch.msg_sender.close_channel();
                 let close_receiver = &mut batch.close_receiver;
                 let _ = close_receiver.await;
