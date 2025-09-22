@@ -1245,7 +1245,7 @@ async fn message_send_loop<Exe>(
                 let close_result = connection.sender().close_producer(producer_id).await;
                 let _ = close_sender.send(close_result).inspect_err(|e| {
                     warn!(
-                        "{producer_id} could not notify the batch_process_loop is closed: {:?}, the producer might be dropped without closing",
+                        "{producer_id} could not notify the message_send_loop is closed: {:?}, the producer might be dropped without closing",
                         e
                     );
                 });
