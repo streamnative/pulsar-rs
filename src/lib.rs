@@ -750,7 +750,7 @@ mod tests {
         actual_values
     }
 
-    async fn is_publishers_empty(topic: &String) -> bool {
+    async fn is_publishers_empty(topic: &str) -> bool {
         let stats_url =
             format!("http://127.0.0.1:8080/admin/v2/persistent/public/default/{topic}/stats");
         let response = reqwest::get(stats_url).await.unwrap();
