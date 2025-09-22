@@ -1,6 +1,5 @@
 //! Message publication
 use std::{
-    cell::RefCell,
     collections::{BTreeMap, HashMap, VecDeque},
     io::Write,
     pin::Pin,
@@ -504,9 +503,11 @@ impl<Exe: Executor> Producer<Exe> {
     pub async fn close(&mut self) -> Result<(), Error> {
         match &mut self.inner {
             ProducerInner::Single(producer) => producer.close().await,
-            ProducerInner::Partitioned(p) => try_join_all(p.producers.iter().map(|p| p.close()))
-                .await
-                .map(drop),
+            ProducerInner::Partitioned(p) => {
+                try_join_all(p.producers.iter_mut().map(|p| p.close()))
+                    .await
+                    .map(drop)
+            }
         }
     }
 }
@@ -538,7 +539,7 @@ struct TopicProducer<Exe: Executor> {
     id: ProducerId,
     name: ProducerName,
     topic: String,
-    batch: RefCell<Option<Batch>>,
+    batch: Option<Batch>,
     sequence_id: SerialId,
     compression: Option<Compression>,
     options: ProducerOptions,
@@ -584,7 +585,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
                 sequence_id,
                 compression,
                 options,
-                batch: RefCell::new(None),
+                batch: None,
             });
         }
         let executor = client.executor.clone();
@@ -629,10 +630,10 @@ impl<Exe: Executor> TopicProducer<Exe> {
             id: producer_id,
             name: producer_name,
             topic,
-            batch: RefCell::new(Some(Batch {
+            batch: Some(Batch {
                 msg_sender,
                 close_receiver,
-            })),
+            }),
             sequence_id,
             compression,
             options,
@@ -665,11 +666,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn send_batch(&mut self) -> Result<(), Error> {
-        let mut msg_sender = {
-            let mut mut_ref = self.batch.borrow_mut();
-            mut_ref.as_mut().map(|batch| batch.msg_sender.clone())
-        };
-        match &mut msg_sender {
+        match &mut self.batch.as_mut().map(|batch| &mut batch.msg_sender) {
             Some(msg_sender) => {
                 let (tx, rx) = oneshot::channel::<()>();
                 let item = BatchItem::Flush(tx);
@@ -684,12 +681,8 @@ impl<Exe: Executor> TopicProducer<Exe> {
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub(crate) async fn send_raw(&mut self, message: ProducerMessage) -> Result<SendFuture, Error> {
-        let mut msg_sender = {
-            let mut mut_ref = self.batch.borrow_mut();
-            mut_ref.as_mut().map(|batch| batch.msg_sender.clone())
-        };
         let (tx, rx) = oneshot::channel();
-        match &mut msg_sender {
+        match &mut self.batch.as_mut().map(|batch| &mut batch.msg_sender) {
             Some(msg_sender) => {
                 let properties = message
                     .properties
@@ -742,16 +735,12 @@ impl<Exe: Executor> TopicProducer<Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub async fn close(&self) -> Result<(), Error> {
-        let mut batch = {
-            let mut mut_ref = self.batch.borrow_mut();
-            mut_ref.take()
-        };
-        match &mut batch {
+    async fn close(&mut self) -> Result<(), Error> {
+        match self.batch.take() {
             None => {
                 self.connection.sender().close_producer(self.id).await?;
             }
-            Some(batch) if self.options.enabled_batching() => {
+            Some(mut batch) if self.options.enabled_batching() => {
                 batch.msg_sender.close_channel();
                 let close_receiver = &mut batch.close_receiver;
                 let _ = close_receiver.await;
@@ -910,11 +899,7 @@ impl<Exe: Executor> std::ops::Drop for TopicProducer<Exe> {
         let id = self.id;
         let name = self.name.clone();
         let topic = self.topic.clone();
-        let mut batch = {
-            let mut mut_ref = self.batch.borrow_mut();
-            mut_ref.take()
-        };
-        if let Some(batch) = &mut batch {
+        if let Some(mut batch) = self.batch.take() {
             batch.msg_sender.close_channel();
         }
         let _ = self.client.executor.spawn(Box::pin(async move {
@@ -1520,5 +1505,27 @@ mod tests {
                 Err(e) => panic!("failed to send {}: {}", i, e),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn move_producer_to_spawned_task() {
+        let _result = log::set_logger(&TEST_LOGGER);
+        log::set_max_level(LevelFilter::Debug);
+        let pulsar: Pulsar<_> = Pulsar::builder("pulsar://127.0.0.1:6650", TokioExecutor)
+            .with_outbound_channel_size(3)
+            .build()
+            .await
+            .unwrap();
+        let mut producer = pulsar
+            .producer()
+            .with_topic(format!("topic_{}", rand::random::<u16>()))
+            .build()
+            .await
+            .unwrap();
+        let (sender, receiver) = oneshot::channel();
+        let _ = pulsar.executor.spawn(Box::pin(async move {
+            sender.send(producer.close().await).unwrap();
+        }));
+        assert!(receiver.await.is_ok());
     }
 }
