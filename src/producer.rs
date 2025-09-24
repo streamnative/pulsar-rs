@@ -27,6 +27,7 @@ use crate::{
         proto::{self, CommandSendReceipt, EncryptionKeys, Schema},
         BatchedMessage,
     },
+    proto::CommandSuccess,
     retry_op::retry_create_producer,
     BrokerAddress, Error, Pulsar,
 };
@@ -603,18 +604,19 @@ impl<Exe: Executor> TopicProducer<Exe> {
         let (msg_sender, msg_receiver) = mpsc::channel::<BatchItem>(10);
         let executor_clone = executor.clone();
         let (batch_sender, batch_receiver) = mpsc::channel::<Vec<BatchItem>>(1);
-        let (close_sender, close_receiver) = oneshot::channel::<()>();
+        let (close_sender, close_receiver) =
+            oneshot::channel::<Result<CommandSuccess, ConnectionError>>();
 
         let _ = executor.spawn(Box::pin(batch_process_loop(
             producer_id,
             batch_storage,
             msg_receiver,
-            close_sender,
             batch_sender,
             executor_clone,
         )));
         let _ = executor.spawn(Box::pin(message_send_loop(
             batch_receiver,
+            close_sender,
             client.clone(),
             connection.clone(),
             topic.clone(),
@@ -743,7 +745,11 @@ impl<Exe: Executor> TopicProducer<Exe> {
             Some(mut batch) if self.options.enabled_batching() => {
                 batch.msg_sender.close_channel();
                 let close_receiver = &mut batch.close_receiver;
-                let _ = close_receiver.await;
+                return match close_receiver.await {
+                    Ok(Ok(_)) => Ok(()),
+                    Ok(Err(e)) => Err(Error::Producer(ProducerError::Connection(e))),
+                    Err(_) => Err(Error::Producer(ProducerError::Closed)),
+                };
             }
             _ => {
                 warn!(
@@ -1072,7 +1078,7 @@ struct Batch {
     // sends a message or trigger a flush
     msg_sender: mpsc::Sender<BatchItem>,
     // receives the notification when `bath_process_loop` is closed
-    close_receiver: oneshot::Receiver<()>,
+    close_receiver: oneshot::Receiver<Result<CommandSuccess, ConnectionError>>,
 }
 
 #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
@@ -1080,7 +1086,6 @@ async fn batch_process_loop(
     producer_id: ProducerId,
     mut batch_storage: BatchStorage,
     mut msg_receiver: mpsc::Receiver<BatchItem>,
-    close_sender: oneshot::Sender<()>,
     mut batch_sender: mpsc::Sender<Vec<BatchItem>>,
     executor: impl Executor,
 ) {
@@ -1123,14 +1128,8 @@ async fn batch_process_loop(
                         }
                     }
                 } else {
-                    debug!("producer {producer_id}'s batch_process_loop: channel closed, exiting");
+                    info!("producer {producer_id}'s batch_process_loop: channel closed, exiting");
                 }
-                let _ = close_sender.send(()).inspect_err(|e| {
-                    warn!(
-                        "{producer_id} could not notify the batch_process_loop is closed: {:?}, the producer might be dropped without closing",
-                        e
-                    );
-                });
                 break;
             }
             Either::Right((_, previous_recv_future)) => {
@@ -1147,6 +1146,7 @@ async fn batch_process_loop(
 #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
 async fn message_send_loop<Exe>(
     mut msg_receiver: mpsc::Receiver<Vec<BatchItem>>,
+    close_sender: oneshot::Sender<Result<CommandSuccess, ConnectionError>>,
     client: Pulsar<Exe>,
     mut connection: Arc<Connection<Exe>>,
     topic: String,
@@ -1242,6 +1242,13 @@ async fn message_send_loop<Exe>(
             }
             None => {
                 debug!("producer {producer_id} message_send_loop: channel closed, exiting");
+                let close_result = connection.sender().close_producer(producer_id).await;
+                let _ = close_sender.send(close_result).inspect_err(|e| {
+                    warn!(
+                        "{producer_id} could not notify the message_send_loop is closed: {:?}, the producer might be dropped without closing",
+                        e
+                    );
+                });
                 break;
             }
         }

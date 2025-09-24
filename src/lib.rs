@@ -215,6 +215,7 @@ mod tests {
     use assert_matches::assert_matches;
     use futures::{future::try_join_all, StreamExt};
     use log::{LevelFilter, Metadata, Record};
+    use serde_json::Value;
     #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
     use tokio::time::timeout;
 
@@ -649,8 +650,14 @@ mod tests {
         // Flush 0 messages should be ok
         producer.send_batch().await.unwrap();
 
+        assert!(!is_publishers_empty(&topic).await);
+
         let send_futures = send_messages(&mut producer, vec!["3", "4"]).await;
         producer.close().await.unwrap();
+        // After the CloseProducer RPC is done, the producer should be removed from the publishers
+        // list in topic stats
+        assert!(is_publishers_empty(&topic).await);
+
         for send_future in send_futures {
             let error = send_future.await.err().unwrap();
             assert_matches!(error, PulsarError::Producer(ProducerError::Closed));
@@ -741,5 +748,19 @@ mod tests {
             }
         }
         actual_values
+    }
+
+    async fn is_publishers_empty(topic: &str) -> bool {
+        let stats_url =
+            format!("http://127.0.0.1:8080/admin/v2/persistent/public/default/{topic}/stats");
+        let response = reqwest::get(stats_url).await.unwrap();
+        assert!(response.status().is_success());
+        let json_value: Value = response.json().await.unwrap();
+        if let Some(publishers) = json_value.get("publishers") {
+            let publishers = publishers.as_array().unwrap();
+            publishers.is_empty()
+        } else {
+            panic!("No publishers in the stats");
+        }
     }
 }
