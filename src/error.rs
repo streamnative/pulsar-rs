@@ -92,11 +92,21 @@ pub enum ConnectionError {
     #[cfg(any(feature = "tokio-runtime", feature = "async-std-runtime"))]
     Tls(native_tls::Error),
     #[cfg(all(
-        any(feature = "tokio-rustls-runtime", feature = "async-std-rustls-runtime"),
+        any(
+            feature = "tokio-rustls-runtime-aws-lc-rs",
+            feature = "tokio-rustls-runtime-ring",
+            feature = "async-std-rustls-runtime-aws-lc-rs",
+            feature = "async-std-rustls-runtime-ring",
+        ),
         not(any(feature = "tokio-runtime", feature = "async-std-runtime"))
     ))]
     Tls(rustls::Error),
-    #[cfg(any(feature = "tokio-rustls-runtime", feature = "async-std-rustls-runtime"))]
+    #[cfg(any(
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring",
+        feature = "async-std-rustls-runtime-aws-lc-rs",
+        feature = "async-std-rustls-runtime-ring",
+    ))]
     DnsName(rustls::pki_types::InvalidDnsNameError),
     Authentication(AuthenticationError),
     NotFound,
@@ -131,7 +141,12 @@ impl From<native_tls::Error> for ConnectionError {
 }
 
 #[cfg(all(
-    any(feature = "tokio-rustls-runtime", feature = "async-std-rustls-runtime"),
+    any(
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring",
+        feature = "async-std-rustls-runtime-aws-lc-rs",
+        feature = "async-std-rustls-runtime-ring",
+    ),
     not(any(feature = "tokio-runtime", feature = "async-std-runtime"))
 ))]
 impl From<rustls::Error> for ConnectionError {
@@ -141,7 +156,12 @@ impl From<rustls::Error> for ConnectionError {
     }
 }
 
-#[cfg(any(feature = "tokio-rustls-runtime", feature = "async-std-rustls-runtime"))]
+#[cfg(any(
+    feature = "tokio-rustls-runtime-aws-lc-rs",
+    feature = "tokio-rustls-runtime-ring",
+    feature = "async-std-rustls-runtime-aws-lc-rs",
+    feature = "async-std-rustls-runtime-ring",
+))]
 impl From<rustls::pki_types::InvalidDnsNameError> for ConnectionError {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn from(err: rustls::pki_types::InvalidDnsNameError) -> Self {
@@ -188,7 +208,12 @@ impl fmt::Display for ConnectionError {
             ConnectionError::Encoding(e) => write!(f, "Error encoding message: {e}"),
             ConnectionError::SocketAddr(e) => write!(f, "Error obtaining socket address: {e}"),
             ConnectionError::Tls(e) => write!(f, "Error connecting TLS stream: {e}"),
-            #[cfg(any(feature = "tokio-rustls-runtime", feature = "async-std-rustls-runtime"))]
+            #[cfg(any(
+                feature = "tokio-rustls-runtime-aws-lc-rs",
+                feature = "tokio-rustls-runtime-ring",
+                feature = "async-std-rustls-runtime-aws-lc-rs",
+                feature = "async-std-rustls-runtime-ring",
+            ))]
             ConnectionError::DnsName(e) => write!(f, "Error resolving hostname: {e}"),
             ConnectionError::Authentication(e) => write!(f, "Error authentication: {e}"),
             ConnectionError::UnexpectedResponse(e) => {

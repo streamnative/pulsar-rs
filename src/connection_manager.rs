@@ -211,8 +211,10 @@ impl<Exe: Executor> ConnectionManager<Exe> {
 
                     #[cfg(all(
                         any(
-                            feature = "tokio-rustls-runtime",
-                            feature = "async-std-rustls-runtime"
+                            feature = "tokio-rustls-runtime-aws-lc-rs",
+                            feature = "tokio-rustls-runtime-ring",
+                            feature = "async-std-rustls-runtime-aws-lc-rs",
+                            feature = "async-std-rustls-runtime-ring"
                         ),
                         not(any(feature = "tokio-runtime", feature = "async-std-runtime"))
                     ))]

@@ -160,10 +160,30 @@ extern crate prost_derive;
 #[macro_use]
 extern crate serde;
 
-#[cfg(all(feature = "tokio-rustls-runtime", feature = "tokio-runtime"))]
-compile_error!("You have selected both features \"tokio-rustls-runtime\" and \"tokio-runtime\" which are exclusive, please choose one of them");
-#[cfg(all(feature = "async-std-rustls-runtime", feature = "async-std-runtime"))]
-compile_error!("You have selected both features \"async-std-rustls-runtime\" and \"async-std-runtime\" which are exclusive, please choose one of them");
+#[cfg(all(feature = "tokio-rustls-runtime-aws-lc-rs", feature = "tokio-runtime"))]
+compile_error!("You have selected both features \"tokio-rustls-runtime-aws-lc-rs\" and \"tokio-runtime\" which are exclusive, please choose one of them");
+#[cfg(all(feature = "tokio-rustls-runtime-ring", feature = "tokio-runtime"))]
+compile_error!("You have selected both features \"tokio-rustls-runtime-ring\" and \"tokio-runtime\" which are exclusive, please choose one of them");
+#[cfg(all(
+    feature = "tokio-rustls-runtime-aws-lc-rs",
+    feature = "tokio-rustls-runtime-ring"
+))]
+compile_error!("You have selected both features \"tokio-rustls-runtime-aws-lc-rs\" and \"tokio-rustls-runtime-ring\" which are exclusive, please choose one of them");
+#[cfg(all(
+    feature = "async-std-rustls-runtime-aws-lc-rs",
+    feature = "async-std-runtime"
+))]
+compile_error!("You have selected both features \"async-std-rustls-runtime-aws-lc-rs\" and \"async-std-runtime\" which are exclusive, please choose one of them");
+#[cfg(all(
+    feature = "async-std-rustls-runtime-ring",
+    feature = "async-std-runtime"
+))]
+compile_error!("You have selected both features \"async-std-rustls-runtime-ring\" and \"async-std-runtime\" which are exclusive, please choose one of them");
+#[cfg(all(
+    feature = "async-std-rustls-runtime-aws-lc-rs",
+    feature = "async-std-rustls-runtime-ring"
+))]
+compile_error!("You have selected both features \"async-std-rustls-runtime-aws-lc-rs\" and \"async-std-rustls-runtime-ring\" which are exclusive, please choose one of them");
 
 pub use client::{DeserializeMessage, Pulsar, PulsarBuilder, SerializeMessage};
 pub use connection::Authentication;
@@ -172,10 +192,18 @@ pub use connection_manager::{
 };
 pub use consumer::{Consumer, ConsumerBuilder, ConsumerOptions};
 pub use error::Error;
-#[cfg(any(feature = "async-std-runtime", feature = "async-std-rustls-runtime"))]
+#[cfg(any(
+    feature = "async-std-runtime",
+    feature = "async-std-rustls-runtime-aws-lc-rs",
+    feature = "async-std-rustls-runtime-ring"
+))]
 pub use executor::AsyncStdExecutor;
 pub use executor::Executor;
-#[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
+#[cfg(any(
+    feature = "tokio-runtime",
+    feature = "tokio-rustls-runtime-aws-lc-rs",
+    feature = "tokio-rustls-runtime-ring"
+))]
 pub use executor::TokioExecutor;
 pub use message::{
     proto::{self, command_subscribe::SubType, CommandSendReceipt},
@@ -198,7 +226,12 @@ mod retry_op;
 mod service_discovery;
 
 #[cfg(all(
-    any(feature = "tokio-rustls-runtime", feature = "async-std-rustls-runtime"),
+    any(
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring",
+        feature = "async-std-rustls-runtime-aws-lc-rs",
+        feature = "async-std-rustls-runtime-ring"
+    ),
     not(any(feature = "tokio-runtime", feature = "async-std-runtime"))
 ))]
 pub(crate) type Certificate = rustls::pki_types::CertificateDer<'static>;
@@ -216,11 +249,19 @@ mod tests {
     use futures::{future::try_join_all, StreamExt};
     use log::{LevelFilter, Metadata, Record};
     use serde_json::Value;
-    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
     use tokio::time::timeout;
 
     use super::*;
-    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
     use crate::executor::TokioExecutor;
     use crate::{
         client::SerializeMessage,
@@ -284,7 +325,11 @@ mod tests {
     pub static TEST_LOGGER: SimpleLogger = SimpleLogger { tag: "" };
 
     #[tokio::test]
-    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
     async fn round_trip() {
         let _result = log::set_logger(&TEST_LOGGER);
         log::set_max_level(LevelFilter::Debug);
@@ -349,7 +394,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
     async fn unsized_data() {
         let _result = log::set_logger(&TEST_LOGGER);
         log::set_max_level(LevelFilter::Debug);
@@ -435,7 +484,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
     async fn redelivery() {
         let _result = log::set_logger(&TEST_LOGGER);
         log::set_max_level(LevelFilter::Debug);
@@ -483,7 +536,11 @@ mod tests {
     const EMPTY_VALUES: Vec<String> = vec![];
 
     #[tokio::test]
-    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
     async fn batching() {
         use assert_matches::assert_matches;
 
@@ -613,7 +670,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
     async fn flush() {
         let _result = log::set_logger(&TEST_LOGGER);
         log::set_max_level(LevelFilter::Debug);
