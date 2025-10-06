@@ -17,7 +17,6 @@ impl SerializeMessage for TestData {
     fn serialize_message(input: Self) -> Result<producer::Message, PulsarError> {
         let payload = serde_json::to_vec(&input).map_err(|e| PulsarError::Custom(e.to_string()))?;
         Ok(producer::Message {
-            partition_key: Some(input.data.clone()),
             payload,
             ..Default::default()
         })
@@ -33,7 +32,7 @@ async fn main() -> Result<(), pulsar::Error> {
         .unwrap_or_else(|| "pulsar://127.0.0.1:6650".to_string());
     let topic = env::var("PULSAR_TOPIC")
         .ok()
-        .unwrap_or_else(|| "persistent://public/default/test".to_string());
+        .unwrap_or_else(|| "non-persistent://public/default/test".to_string());
 
     let mut builder = Pulsar::builder(addr, TokioExecutor);
 
@@ -73,10 +72,9 @@ async fn main() -> Result<(), pulsar::Error> {
 
     let mut counter = 0usize;
     loop {
-        let index = counter % 3;
         producer
             .send_non_blocking(TestData {
-                data: "data".to_string() + index.to_string().as_str(),
+                data: "data".to_string(),
             })
             .await?
             .await
