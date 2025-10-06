@@ -18,18 +18,28 @@ keywords = ["pulsar", "api", "client"]
 [dependencies]
 async-channel = "^2.3.1"
 async-trait = "^0.1.88"
-async-std = { version = "^1.13.1", features = ["attributes", "unstable"], optional = true }
+async-std = { version = "^1.13.1", features = [
+    "attributes",
+    "unstable",
+], optional = true }
 async-native-tls = { version = "^0.5.0", optional = true }
 asynchronous-codec = { version = "^0.7.0", optional = true }
 bytes = "^1.9.0"
-chrono = { version = "^0.4.41", default-features = false, features = ["clock", "std"] }
+chrono = { version = "^0.4.41", default-features = false, features = [
+    "clock",
+    "std",
+] }
 crc = "^3.3.0"
 data-url = { version = "^0.3.1", optional = true }
 flate2 = { version = "^1.1.1", optional = true }
 futures = "^0.3.31"
-futures-rustls = { version = "^0.26.0", default-features = false, features = ["tls12", "logging"], optional = true } # replacement of crate async-rustls (also a fork of tokio-rustls)
+futures-rustls = { version = "^0.26.0", default-features = false, features = [
+    "tls12",
+    "logging",
+], optional = true } # replacement of crate async-rustls (also a fork of tokio-rustls)
 log = "^0.4.27"
 lz4 = { version = "^1.28.0", optional = true }
+murmur3 = "0.5"
 native-tls = { version = "^0.2.12", optional = true }
 nom = { version = "^7.1.3", default-features = false, features = ["alloc"] }
 openidconnect = { version = "^4.0.0", optional = true }
@@ -39,13 +49,23 @@ prost = "^0.13.4"
 prost-derive = "^0.13.4"
 rand = "^0.8.5"
 regex = "^1.11.1"
-rustls = { version = "^0.23.27", default-features = false, features = ["log", "std"] , optional = true }
+rustls = { version = "^0.23.27", default-features = false, features = [
+    "log",
+    "std",
+], optional = true }
 snap = { version = "^1.1.1", optional = true }
 serde = { version = "^1.0.219", features = ["derive"], optional = true }
 serde_json = { version = "^1.0.140", optional = true }
-tokio = { version = "^1.45.0", features = ["rt", "net", "time"], optional = true }
+tokio = { version = "^1.45.0", features = [
+    "rt",
+    "net",
+    "time",
+], optional = true }
 tokio-util = { version = "^0.7.15", features = ["codec"], optional = true }
-tokio-rustls = { version = "0.26.2", default-features = false, features = ["logging", "tls12"], optional = true }
+tokio-rustls = { version = "0.26.2", default-features = false, features = [
+    "logging",
+    "tls12",
+], optional = true }
 tokio-native-tls = { version = "^0.3.1", optional = true }
 tracing = { version = "^0.1.41", optional = true }
 url = "^2.5.4"
@@ -66,10 +86,27 @@ prost-build = "^0.13.4"
 protobuf-src = { version = "^2.1.0", optional = true }
 
 [features]
-async-std-runtime = ["async-std", "asynchronous-codec", "native-tls", "async-native-tls"]
+async-std-runtime = [
+    "async-std",
+    "asynchronous-codec",
+    "native-tls",
+    "async-native-tls",
+]
 async-std-rustls-runtime = ["async-std-rustls-runtime-aws-lc-rs"]
-async-std-rustls-runtime-aws-lc-rs = ["async-std", "asynchronous-codec", "webpki-roots", "rustls/aws-lc-rs", "futures-rustls/aws-lc-rs"]
-async-std-rustls-runtime-ring = ["async-std", "asynchronous-codec", "webpki-roots", "rustls/ring", "futures-rustls/ring"]
+async-std-rustls-runtime-aws-lc-rs = [
+    "async-std",
+    "asynchronous-codec",
+    "webpki-roots",
+    "rustls/aws-lc-rs",
+    "futures-rustls/aws-lc-rs",
+]
+async-std-rustls-runtime-ring = [
+    "async-std",
+    "asynchronous-codec",
+    "webpki-roots",
+    "rustls/ring",
+    "futures-rustls/ring",
+]
 auth-oauth2 = ["openidconnect", "oauth2", "serde", "serde_json", "data-url"]
 compression = ["lz4", "flate2", "zstd", "snap"]
 default = ["compression", "tokio-runtime", "async-std-runtime", "auth-oauth2"]
@@ -77,5 +114,17 @@ protobuf-src = ["dep:protobuf-src"]
 telemetry = ["tracing"]
 tokio-runtime = ["tokio", "tokio-util", "native-tls", "tokio-native-tls"]
 tokio-rustls-runtime = ["tokio-rustls-runtime-aws-lc-rs"]
-tokio-rustls-runtime-aws-lc-rs = ["tokio", "tokio-util", "webpki-roots", "rustls/aws-lc-rs", "tokio-rustls/aws-lc-rs"]
-tokio-rustls-runtime-ring = ["tokio", "tokio-util", "webpki-roots", "rustls/ring", "tokio-rustls/ring"]
+tokio-rustls-runtime-aws-lc-rs = [
+    "tokio",
+    "tokio-util",
+    "webpki-roots",
+    "rustls/aws-lc-rs",
+    "tokio-rustls/aws-lc-rs",
+]
+tokio-rustls-runtime-ring = [
+    "tokio",
+    "tokio-util",
+    "webpki-roots",
+    "rustls/ring",
+    "tokio-rustls/ring",
+]

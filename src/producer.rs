@@ -29,6 +29,7 @@ use crate::{
     },
     proto::CommandSuccess,
     retry_op::retry_create_producer,
+    routing_policy::RoutingPolicy,
     BrokerAddress, Error, Pulsar,
 };
 
@@ -525,23 +526,20 @@ struct PartitionedProducer<Exe: Executor> {
     options: ProducerOptions,
 }
 
-#[derive(Clone, Default)]
-pub enum RoutingPolicy {
-    #[default]
-    RoundRobin,
-    Single(usize),
-    Custom(Arc<dyn CustomRoutingPolicy>),
-}
-
-pub trait CustomRoutingPolicy: Send + Sync {
-    fn route(&self, message: &Message, num_producers: usize) -> usize;
-}
-
 impl<Exe: Executor> PartitionedProducer<Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn choose_partition(&mut self, message: &Message) -> &mut TopicProducer<Exe> {
         match &self.options.routing_policy {
             Some(RoutingPolicy::RoundRobin) => {
+                // If the message has a partition key, use it
+                if let Some(partition_key) = &message.partition_key {
+                    let index = RoutingPolicy::compute_partition_index_for_key(
+                        partition_key,
+                        self.producers.len(),
+                    );
+                    return self.producers.get_mut(index).unwrap();
+                }
+                // If not, use round robin
                 self.producers.rotate_left(1);
                 self.producers.front_mut().unwrap()
             }
