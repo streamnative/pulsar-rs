@@ -161,6 +161,7 @@ pub struct ProducerOptions {
     /// [`crate::client::PulsarBuilder::with_outbound_channel_size`] is full, when awaiting
     /// [`Producer::send_non_blocking`]. (default: false)
     pub block_queue_if_full: bool,
+    pub routing_policy: Option<RoutingPolicy>,
 }
 
 impl ProducerOptions {
@@ -418,9 +419,14 @@ impl<Exe: Executor> Producer<Exe> {
         &mut self,
         message: T,
     ) -> Result<SendFuture, Error> {
+        let serialized_message = T::serialize_message(message)?;
         match &mut self.inner {
-            ProducerInner::Single(p) => p.send(message).await,
-            ProducerInner::Partitioned(p) => p.next().send(message).await,
+            ProducerInner::Single(p) => p.send(serialized_message).await,
+            ProducerInner::Partitioned(p) => {
+                p.choose_partition(&serialized_message)
+                    .send(serialized_message)
+                    .await
+            }
         }
     }
 
@@ -464,13 +470,15 @@ impl<Exe: Executor> Producer<Exe> {
         T: SerializeMessage,
         I: IntoIterator<Item = T>,
     {
-        let producer = match &mut self.inner {
-            ProducerInner::Single(p) => p,
-            ProducerInner::Partitioned(p) => p.next(),
-        };
         let mut sends = Vec::new();
         for message in messages {
-            sends.push(producer.send(message).await);
+            let serialized_message = T::serialize_message(message)?;
+            let producer = match &mut self.inner {
+                ProducerInner::Single(p) => p,
+                ProducerInner::Partitioned(p) => p.choose_partition(&serialized_message),
+            };
+
+            sends.push(producer.send(serialized_message).await);
         }
         if sends.iter().all(|s| s.is_ok()) {
             Ok(sends.into_iter().map(|s| s.unwrap()).collect())
@@ -489,14 +497,6 @@ impl<Exe: Executor> Producer<Exe> {
                     .await
                     .map(drop)
             }
-        }
-    }
-
-    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub(crate) async fn send_raw(&mut self, message: ProducerMessage) -> Result<SendFuture, Error> {
-        match &mut self.inner {
-            ProducerInner::Single(p) => p.send_raw(message).await,
-            ProducerInner::Partitioned(p) => p.next().send_raw(message).await,
         }
     }
 
@@ -525,11 +525,36 @@ struct PartitionedProducer<Exe: Executor> {
     options: ProducerOptions,
 }
 
+#[derive(Clone, Default)]
+pub enum RoutingPolicy {
+    #[default]
+    RoundRobin,
+    Single(usize),
+    Custom(Arc<dyn CustomRoutingPolicy>),
+}
+
+pub trait CustomRoutingPolicy: Send + Sync {
+    fn route(&self, message: &Message, num_producers: usize) -> usize;
+}
+
 impl<Exe: Executor> PartitionedProducer<Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub fn next(&mut self) -> &mut TopicProducer<Exe> {
-        self.producers.rotate_left(1);
-        self.producers.front_mut().unwrap()
+    pub fn choose_partition(&mut self, message: &Message) -> &mut TopicProducer<Exe> {
+        match &self.options.routing_policy {
+            Some(RoutingPolicy::RoundRobin) => {
+                self.producers.rotate_left(1);
+                self.producers.front_mut().unwrap()
+            }
+            Some(RoutingPolicy::Single(index)) => self.producers.get_mut(*index).unwrap(),
+            Some(RoutingPolicy::Custom(policy)) => self
+                .producers
+                .get_mut(policy.route(message, self.producers.len()))
+                .unwrap(),
+            None => {
+                self.producers.rotate_left(1);
+                self.producers.front_mut().unwrap()
+            }
+        }
     }
 }
 
@@ -659,11 +684,8 @@ impl<Exe: Executor> TopicProducer<Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    async fn send<T: SerializeMessage + Sized>(&mut self, message: T) -> Result<SendFuture, Error> {
-        match T::serialize_message(message) {
-            Ok(message) => self.send_raw(message.into()).await,
-            Err(e) => Err(e),
-        }
+    async fn send(&mut self, message: Message) -> Result<SendFuture, Error> {
+        self.send_raw(message.into()).await
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
@@ -1390,10 +1412,8 @@ impl<T: SerializeMessage + Sized, Exe: Executor> MessageBuilder<'_, T, Exe> {
         message.partition_key = partition_key;
         message.ordering_key = ordering_key;
         message.event_time = event_time;
-
-        let mut producer_message: ProducerMessage = message.into();
-        producer_message.deliver_at_time = deliver_at_time;
-        producer.send_raw(producer_message).await
+        message.deliver_at_time = deliver_at_time;
+        producer.send_non_blocking(message).await
     }
 }
 
