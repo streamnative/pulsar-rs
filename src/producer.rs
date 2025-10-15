@@ -1431,7 +1431,7 @@ mod tests {
     use log::LevelFilter;
 
     use super::*;
-    use crate::{tests::TEST_LOGGER, TokioExecutor};
+    use crate::{routing_policy::CustomRoutingPolicy, tests::TEST_LOGGER, TokioExecutor};
 
     #[test]
     fn send_future_errors_when_sender_dropped() {
@@ -1562,5 +1562,177 @@ mod tests {
             sender.send(producer.close().await).unwrap();
         }));
         assert!(receiver.await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_round_robin_routing_policy() {
+        let _result = log::set_logger(&TEST_LOGGER);
+        log::set_max_level(LevelFilter::Debug);
+        let pulsar: Pulsar<_> = Pulsar::builder("pulsar://127.0.0.1:6650", TokioExecutor)
+            .with_outbound_channel_size(3)
+            .build()
+            .await
+            .unwrap();
+        let topic = "topic-test_round_robin_routing_policy";
+        let options = ProducerOptions {
+            routing_policy: Some(RoutingPolicy::RoundRobin),
+            ..Default::default()
+        };
+        let addr = pulsar.lookup_topic(topic).await.unwrap();
+        let partition_count = 3;
+
+        let mut producers = Vec::new();
+        for i in 0..partition_count {
+            let producer = TopicProducer::new(
+                pulsar.clone(),
+                addr.clone(),
+                format!("{}-{}", topic, i),
+                None,
+                options.clone(),
+            )
+            .await
+            .unwrap();
+            producers.push(producer);
+        }
+        let mut partitioned_producer = PartitionedProducer {
+            producers,
+            last_used_producer_index: 0,
+            topic: topic.to_string(),
+            options,
+        };
+
+        let message = Message {
+            payload: "test".to_string().into(),
+            ..Default::default()
+        };
+
+        for i in 1..100 {
+            let next_producer = partitioned_producer.choose_partition(&message);
+            assert!(next_producer.id == i % partition_count);
+        }
+
+        let key = "test";
+        let message = Message {
+            payload: "test".to_string().into(),
+            partition_key: Some(key.to_string()),
+            ..Default::default()
+        };
+
+        let chosen_index = RoutingPolicy::compute_partition_index_for_key(
+            key,
+            partition_count.try_into().unwrap(),
+        );
+        for _ in 1..100 {
+            let next_producer = partitioned_producer.choose_partition(&message);
+            assert!(next_producer.id as usize == chosen_index);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_single_routing_policy() {
+        let _result = log::set_logger(&TEST_LOGGER);
+        log::set_max_level(LevelFilter::Debug);
+        let pulsar: Pulsar<_> = Pulsar::builder("pulsar://127.0.0.1:6650", TokioExecutor)
+            .with_outbound_channel_size(3)
+            .build()
+            .await
+            .unwrap();
+        let topic = "topic-test_single_routing_policy";
+        let options = ProducerOptions {
+            routing_policy: Some(RoutingPolicy::Single(2)),
+            ..Default::default()
+        };
+        let addr = pulsar.lookup_topic(topic).await.unwrap();
+        let partition_count = 3;
+
+        let mut producers = Vec::new();
+        for i in 0..partition_count {
+            let producer = TopicProducer::new(
+                pulsar.clone(),
+                addr.clone(),
+                format!("{}-{}", topic, i),
+                None,
+                options.clone(),
+            )
+            .await
+            .unwrap();
+            producers.push(producer);
+        }
+        let mut partitioned_producer = PartitionedProducer {
+            producers,
+            last_used_producer_index: 0,
+            topic: topic.to_string(),
+            options,
+        };
+
+        let key = "test";
+        let message = Message {
+            payload: "test".to_string().into(),
+            partition_key: Some(key.to_string()),
+            ..Default::default()
+        };
+
+        for _ in 1..100 {
+            let next_producer = partitioned_producer.choose_partition(&message);
+            assert!(next_producer.id == 2);
+        }
+    }
+
+    struct TestCustomRoutingPolicy {}
+
+    impl CustomRoutingPolicy for TestCustomRoutingPolicy {
+        fn route(&self, _message: &Message, _num_producers: usize) -> usize {
+            1
+        }
+    }
+
+    #[tokio::test]
+    async fn test_custom_routing_policy() {
+        let _result = log::set_logger(&TEST_LOGGER);
+        log::set_max_level(LevelFilter::Debug);
+        let pulsar: Pulsar<_> = Pulsar::builder("pulsar://127.0.0.1:6650", TokioExecutor)
+            .with_outbound_channel_size(3)
+            .build()
+            .await
+            .unwrap();
+        let topic = "topic-test_custom_routing_policy";
+        let options = ProducerOptions {
+            routing_policy: Some(RoutingPolicy::Custom(Arc::new(TestCustomRoutingPolicy {}))),
+            ..Default::default()
+        };
+        let addr = pulsar.lookup_topic(topic).await.unwrap();
+        let partition_count = 3;
+
+        let mut producers = Vec::new();
+        for i in 0..partition_count {
+            let producer = TopicProducer::new(
+                pulsar.clone(),
+                addr.clone(),
+                format!("{}-{}", topic, i),
+                None,
+                options.clone(),
+            )
+            .await
+            .unwrap();
+            producers.push(producer);
+        }
+        let mut partitioned_producer = PartitionedProducer {
+            producers,
+            last_used_producer_index: 0,
+            topic: topic.to_string(),
+            options,
+        };
+
+        let key = "test";
+        let message = Message {
+            payload: "test".to_string().into(),
+            partition_key: Some(key.to_string()),
+            ..Default::default()
+        };
+
+        for _ in 1..100 {
+            let next_producer = partitioned_producer.choose_partition(&message);
+            assert!(next_producer.id == 1);
+        }
     }
 }
