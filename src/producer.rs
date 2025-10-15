@@ -521,12 +521,25 @@ enum ProducerInner<Exe: Executor> {
 
 struct PartitionedProducer<Exe: Executor> {
     // Guaranteed to be non-empty
-    producers: VecDeque<TopicProducer<Exe>>,
+    producers: Vec<TopicProducer<Exe>>,
+    last_used_producer_index: usize,
     topic: String,
     options: ProducerOptions,
 }
 
 impl<Exe: Executor> PartitionedProducer<Exe> {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    fn get_next_round_robin_producer(&mut self) -> &mut TopicProducer<Exe> {
+        let amount_of_producers = self.producers.len();
+        self.last_used_producer_index += 1;
+        if self.last_used_producer_index >= amount_of_producers {
+            self.last_used_producer_index = 0;
+        }
+        self.producers
+            .get_mut(self.last_used_producer_index)
+            .unwrap()
+    }
+
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn choose_partition(&mut self, message: &Message) -> &mut TopicProducer<Exe> {
         match &self.options.routing_policy {
@@ -540,18 +553,16 @@ impl<Exe: Executor> PartitionedProducer<Exe> {
                     return self.producers.get_mut(index).unwrap();
                 }
                 // If not, use round robin
-                self.producers.rotate_left(1);
-                self.producers.front_mut().unwrap()
+                self.get_next_round_robin_producer()
             }
             Some(RoutingPolicy::Single(index)) => self.producers.get_mut(*index).unwrap(),
-            Some(RoutingPolicy::Custom(policy)) => self
-                .producers
-                .get_mut(policy.route(message, self.producers.len()))
-                .unwrap(),
-            None => {
-                self.producers.rotate_left(1);
-                self.producers.front_mut().unwrap()
+            Some(RoutingPolicy::Custom(policy)) => {
+                let amount_of_producers = self.producers.len();
+                self.producers
+                    .get_mut(policy.route(message, amount_of_producers))
+                    .unwrap()
             }
+            None => self.get_next_round_robin_producer(),
         }
     }
 }
@@ -995,7 +1006,7 @@ impl<Exe: Executor> ProducerBuilder<Exe> {
         let topic = topic.ok_or_else(|| Error::Custom("topic not set".to_string()))?;
         let options = producer_options.unwrap_or_default();
 
-        let producers: Vec<TopicProducer<Exe>> = try_join_all(
+        let mut producers: Vec<TopicProducer<Exe>> = try_join_all(
             pulsar
                 .lookup_partitioned_topic(&topic)
                 .await?
@@ -1013,6 +1024,9 @@ impl<Exe: Executor> ProducerBuilder<Exe> {
         )
         .await?;
 
+        // sort by partition id
+        producers.sort_by_key(|prod| prod.id);
+
         let producer = match producers.len() {
             0 => {
                 return Err(Error::Custom(format!(
@@ -1020,16 +1034,12 @@ impl<Exe: Executor> ProducerBuilder<Exe> {
                 )));
             }
             1 => ProducerInner::Single(producers.into_iter().next().unwrap()),
-            _ => {
-                let mut producers = VecDeque::from(producers);
-                // write to topic-1 first
-                producers.rotate_right(1);
-                ProducerInner::Partitioned(PartitionedProducer {
-                    producers,
-                    topic,
-                    options,
-                })
-            }
+            _ => ProducerInner::Partitioned(PartitionedProducer {
+                producers,
+                last_used_producer_index: 0,
+                topic,
+                options,
+            }),
         };
 
         Ok(Producer { inner: producer })
