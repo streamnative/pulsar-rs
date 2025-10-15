@@ -1569,16 +1569,15 @@ mod tests {
         let _result = log::set_logger(&TEST_LOGGER);
         log::set_max_level(LevelFilter::Debug);
         let pulsar: Pulsar<_> = Pulsar::builder("pulsar://127.0.0.1:6650", TokioExecutor)
-            .with_outbound_channel_size(3)
             .build()
             .await
             .unwrap();
-        let topic = "topic-test_round_robin_routing_policy";
+        let topic = format!("topic_{}", rand::random::<u16>());
         let options = ProducerOptions {
             routing_policy: Some(RoutingPolicy::RoundRobin),
             ..Default::default()
         };
-        let addr = pulsar.lookup_topic(topic).await.unwrap();
+        let addr = pulsar.lookup_topic(topic.clone()).await.unwrap();
         let partition_count = 3;
 
         let mut producers = Vec::new();
@@ -1586,8 +1585,8 @@ mod tests {
             let producer = TopicProducer::new(
                 pulsar.clone(),
                 addr.clone(),
-                format!("{}-{}", topic, i),
-                None,
+                format!("{}-{}", topic.clone(), i),
+                Some(i.to_string()),
                 options.clone(),
             )
             .await
@@ -1608,7 +1607,7 @@ mod tests {
 
         for i in 1..100 {
             let next_producer = partitioned_producer.choose_partition(&message);
-            assert!(next_producer.id == i % partition_count);
+            assert!(next_producer.name == (i % partition_count).to_string());
         }
 
         let key = "test";
@@ -1633,16 +1632,15 @@ mod tests {
         let _result = log::set_logger(&TEST_LOGGER);
         log::set_max_level(LevelFilter::Debug);
         let pulsar: Pulsar<_> = Pulsar::builder("pulsar://127.0.0.1:6650", TokioExecutor)
-            .with_outbound_channel_size(3)
             .build()
             .await
             .unwrap();
-        let topic = "topic-test_single_routing_policy";
+        let topic = format!("topic_{}", rand::random::<u16>());
         let options = ProducerOptions {
             routing_policy: Some(RoutingPolicy::Single(2)),
             ..Default::default()
         };
-        let addr = pulsar.lookup_topic(topic).await.unwrap();
+        let addr = pulsar.lookup_topic(topic.clone()).await.unwrap();
         let partition_count = 3;
 
         let mut producers = Vec::new();
@@ -1650,8 +1648,8 @@ mod tests {
             let producer = TopicProducer::new(
                 pulsar.clone(),
                 addr.clone(),
-                format!("{}-{}", topic, i),
-                None,
+                format!("{}-{}", topic.clone(), i),
+                Some(i.to_string()),
                 options.clone(),
             )
             .await
@@ -1674,7 +1672,7 @@ mod tests {
 
         for _ in 1..100 {
             let next_producer = partitioned_producer.choose_partition(&message);
-            assert!(next_producer.id == 2);
+            assert!(next_producer.name == 2.to_string());
         }
     }
 
@@ -1691,16 +1689,15 @@ mod tests {
         let _result = log::set_logger(&TEST_LOGGER);
         log::set_max_level(LevelFilter::Debug);
         let pulsar: Pulsar<_> = Pulsar::builder("pulsar://127.0.0.1:6650", TokioExecutor)
-            .with_outbound_channel_size(3)
             .build()
             .await
             .unwrap();
-        let topic = "topic-test_custom_routing_policy";
+        let topic = format!("topic_{}", rand::random::<u16>());
         let options = ProducerOptions {
             routing_policy: Some(RoutingPolicy::Custom(Arc::new(TestCustomRoutingPolicy {}))),
             ..Default::default()
         };
-        let addr = pulsar.lookup_topic(topic).await.unwrap();
+        let addr = pulsar.lookup_topic(topic.clone()).await.unwrap();
         let partition_count = 3;
 
         let mut producers = Vec::new();
@@ -1708,8 +1705,8 @@ mod tests {
             let producer = TopicProducer::new(
                 pulsar.clone(),
                 addr.clone(),
-                format!("{}-{}", topic, i),
-                None,
+                format!("{}-{}", topic.clone(), i),
+                Some(i.to_string()),
                 options.clone(),
             )
             .await
@@ -1732,7 +1729,7 @@ mod tests {
 
         for _ in 1..100 {
             let next_producer = partitioned_producer.choose_partition(&message);
-            assert!(next_producer.id == 1);
+            assert!(next_producer.name == 1.to_string());
         }
     }
 }
