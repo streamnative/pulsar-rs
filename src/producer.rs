@@ -1623,7 +1623,7 @@ mod tests {
         );
         for _ in 1..100 {
             let next_producer = partitioned_producer.choose_partition(&message);
-            assert!(next_producer.id as usize == chosen_index);
+            assert!(next_producer.name == chosen_index.to_string());
         }
     }
 
