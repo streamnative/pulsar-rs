@@ -181,3 +181,131 @@ impl<T: DeserializeMessage, Exe: Executor> Reader<T, Exe> {
         self.consumer.messages_received()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::consumer::{DeadLetterPolicy, InitialPosition};
+    use crate::proto::MessageIdData;
+    use crate::reader::Reader;
+    use crate::{
+        producer, ConsumerOptions, DeserializeMessage, Error, Payload, Pulsar, SerializeMessage,
+        SubType, TokioExecutor,
+    };
+    use futures::TryStreamExt;
+
+    #[derive(Serialize, Deserialize)]
+    struct TestData {
+        data: String,
+    }
+
+    impl SerializeMessage for &TestData {
+        fn serialize_message(input: Self) -> Result<producer::Message, Error> {
+            let payload = serde_json::to_vec(&input).map_err(|e| Error::Custom(e.to_string()))?;
+            Ok(producer::Message {
+                payload,
+                ..Default::default()
+            })
+        }
+    }
+
+    impl DeserializeMessage for TestData {
+        type Output = Result<TestData, serde_json::Error>;
+
+        fn deserialize_message(payload: &Payload) -> Self::Output {
+            serde_json::from_slice(&payload.data)
+        }
+    }
+
+    #[tokio::test]
+    async fn reader() {
+        let addr = "pulsar://127.0.0.1:6650";
+        let topic = format!("test_reader_{}", rand::random::<u16>());
+        let dead_letter_policy = DeadLetterPolicy {
+            max_redeliver_count: 1,
+            dead_letter_topic: format!("{}_dead_letter", &topic),
+        };
+        let client: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await.unwrap();
+        let mut reader: Reader<TestData, _> = client
+            .reader()
+            .with_topic(&topic)
+            .with_consumer_name("test_reader")
+            .with_subscription("test_reader_subscription")
+            .with_dead_letter_policy(dead_letter_policy)
+            .with_options(ConsumerOptions::default())
+            .into_reader()
+            .await
+            .unwrap();
+        assert!(reader.check_connection().await.is_ok());
+        assert_eq!(reader.topic(), topic);
+
+        let url = reader.connections().await.unwrap();
+        assert_eq!(url.as_str(), addr);
+
+        let option = reader.options();
+        assert_eq!(option.initial_position, InitialPosition::Latest);
+
+        let policy = reader.dead_letter_policy().unwrap();
+        assert_eq!(policy.max_redeliver_count, 1);
+        assert_eq!(policy.dead_letter_topic, format!("{}_dead_letter", &topic));
+        assert_eq!(reader.subscription(), "test_reader_subscription");
+        assert_eq!(reader.sub_type(), SubType::Exclusive);
+        assert_eq!(reader.batch_size(), None);
+        assert_eq!(reader.reader_name().unwrap(), "test_reader");
+        let reader_id = reader.reader_id();
+        assert_eq!(reader_id, 0);
+
+        let message = TestData {
+            data: "test_reader_data".to_string(),
+        };
+        let message_count = 10;
+        let mut lastest_message_id: [u64; 2] = [0, 0];
+        for index in 0..message_count {
+            let receipt = client.send(&topic, &message).await.unwrap().await.unwrap();
+            let message_id = receipt.message_id.unwrap();
+            println!(
+                "producer sends done, message_id: {}:{}",
+                message_id.ledger_id, message_id.entry_id
+            );
+            if index == message_count - 1 {
+                lastest_message_id[0] = message_id.ledger_id;
+                lastest_message_id[1] = message_id.entry_id;
+            }
+        }
+
+        let mut received = 0;
+        let mut seek_message_id: Option<MessageIdData> = None;
+        while let Some(msg) = reader.try_next().await.unwrap() {
+            let data = msg.deserialize().unwrap();
+            assert_eq!(data.data, "test_reader_data".to_string());
+            received += 1;
+            if received >= message_count {
+                break;
+            }
+            if received == message_count / 2 {
+                seek_message_id = Some(msg.message_id().clone());
+            }
+        }
+        assert_eq!(received, message_count);
+        let time = reader.last_message_received().unwrap();
+        assert!(time <= chrono::Utc::now());
+
+        let last_message_id_data = reader.get_last_message_id().await.unwrap();
+        println!("last message id: {:?}", last_message_id_data);
+        assert_eq!(last_message_id_data.ledger_id, lastest_message_id[0]);
+        assert_eq!(last_message_id_data.entry_id, lastest_message_id[1]);
+
+        let received = reader.messages_received();
+        assert_eq!(received, message_count as u64);
+
+        // seek to half message
+        reader.seek(seek_message_id, None).await.unwrap();
+        let mut received = 0;
+        while let Some(_) = reader.try_next().await.unwrap() {
+            received += 1;
+            if received >= message_count / 2 {
+                break;
+            }
+        }
+        assert_eq!(received, message_count / 2);
+    }
+}
