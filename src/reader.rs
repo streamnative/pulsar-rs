@@ -184,14 +184,18 @@ impl<T: DeserializeMessage, Exe: Executor> Reader<T, Exe> {
 
 #[cfg(test)]
 mod tests {
-    use crate::consumer::{DeadLetterPolicy, InitialPosition};
+    use crate::consumer::{DeadLetterPolicy, InitialPosition, Message};
     use crate::proto::MessageIdData;
     use crate::reader::Reader;
     use crate::{
-        producer, ConsumerOptions, DeserializeMessage, Error, Payload, Pulsar, SerializeMessage,
-        SubType, TokioExecutor,
+        producer, ConsumerOptions, DeserializeMessage, Error, Executor, Payload, Pulsar,
+        SerializeMessage, SubType, TokioExecutor,
     };
+    use futures::StreamExt;
     use futures::TryStreamExt;
+    use std::time::Duration;
+    use tokio::time::timeout;
+
 
     #[derive(Serialize, Deserialize)]
     struct TestData {
@@ -272,20 +276,16 @@ mod tests {
             }
         }
 
-        let mut received = 0;
         let mut seek_message_id: Option<MessageIdData> = None;
-        while let Some(msg) = reader.try_next().await.unwrap() {
-            let data = msg.deserialize().unwrap();
-            assert_eq!(data.data, "test_reader_data".to_string());
-            received += 1;
-            if received >= message_count {
-                break;
-            }
-            if received == message_count / 2 {
-                seek_message_id = Some(msg.message_id().clone());
+        let messages = reader_messages(&mut reader, message_count, 500).await;
+        assert_eq!(messages.len(), message_count);
+        for (i, data) in messages.into_iter().enumerate() {
+            let value = data.deserialize().unwrap();
+            assert_eq!(value.data, "test_reader_data".to_string());
+            if i == message_count / 2 {
+                seek_message_id = Some(data.message_id.id.clone());
             }
         }
-        assert_eq!(received, message_count);
         let time = reader.last_message_received().unwrap();
         assert!(time <= chrono::Utc::now());
 
@@ -299,13 +299,32 @@ mod tests {
 
         // seek to half message
         reader.seek(seek_message_id, None).await.unwrap();
-        let mut received = 0;
-        while reader.try_next().await.unwrap().is_some() {
-            received += 1;
-            if received >= message_count / 2 {
-                break;
+        let seek_message = reader_messages(&mut reader, message_count / 2, 500).await;
+        assert_eq!(seek_message.len(), message_count / 2);
+    }
+
+    async fn reader_messages(
+        reader: &mut Reader<TestData, impl Executor>,
+        max_num_messages: usize,
+        receive_timeout_ms: u64,
+    ) -> Vec<Message<TestData>> {
+        let mut messages = Vec::new();
+        loop {
+            match timeout(Duration::from_millis(receive_timeout_ms), reader.next()).await {
+                Ok(Some(msg)) => {
+                    let msg = msg.unwrap();
+                    messages.push(msg);
+                    if messages.len() >= max_num_messages {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    info!("timed out waiting for messages: {}", e);
+                    break;
+                }
             }
         }
-        assert_eq!(received, message_count / 2);
+        messages
     }
 }
