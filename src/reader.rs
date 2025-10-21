@@ -319,7 +319,7 @@ mod tests {
                 }
                 Ok(None) => break,
                 Err(e) => {
-                    info!("timed out waiting for messages: {}", e);
+                    info!("timed out waiting for reading messages: {}", e);
                     break;
                 }
             }
