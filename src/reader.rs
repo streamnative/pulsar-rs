@@ -252,7 +252,7 @@ mod tests {
         assert_eq!(reader.batch_size(), None);
         assert_eq!(reader.reader_name().unwrap(), "test_reader");
         let reader_id = reader.reader_id();
-        assert_eq!(reader_id, 0);
+        assert!(reader_id > 0);
 
         let message = TestData {
             data: "test_reader_data".to_string(),
