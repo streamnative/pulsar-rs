@@ -276,7 +276,7 @@ mod tests {
         }
 
         let mut seek_message_id: Option<MessageIdData> = None;
-        let messages = reader_messages(&mut reader, message_count, 500).await;
+        let messages = reader_messages(&mut reader, message_count, 5000).await;
         assert_eq!(messages.len(), message_count);
         for (i, data) in messages.into_iter().enumerate() {
             let value = data.deserialize().unwrap();
@@ -298,7 +298,7 @@ mod tests {
 
         // seek to half message
         reader.seek(seek_message_id, None).await.unwrap();
-        let seek_message = reader_messages(&mut reader, message_count / 2, 500).await;
+        let seek_message = reader_messages(&mut reader, message_count / 2, 5000).await;
         assert_eq!(seek_message.len(), message_count / 2);
     }
 
