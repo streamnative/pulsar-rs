@@ -300,7 +300,7 @@ mod tests {
         // seek to half message
         reader.seek(seek_message_id, None).await.unwrap();
         let mut received = 0;
-        while let Some(_) = reader.try_next().await.unwrap() {
+        while reader.try_next().await.unwrap().is_some() {
             received += 1;
             if received >= message_count / 2 {
                 break;
