@@ -192,7 +192,6 @@ mod tests {
         SerializeMessage, SubType, TokioExecutor,
     };
     use futures::StreamExt;
-    use futures::TryStreamExt;
     use std::time::Duration;
     use tokio::time::timeout;
 
