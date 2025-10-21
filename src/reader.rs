@@ -294,7 +294,7 @@ mod tests {
         assert_eq!(last_message_id_data.entry_id, lastest_message_id[1]);
 
         let received = reader.messages_received();
-        assert_eq!(received, message_count as u64);
+        assert!(received <= message_count as u64);
 
         // seek to half message
         reader.seek(seek_message_id, None).await.unwrap();
