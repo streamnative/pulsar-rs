@@ -192,9 +192,9 @@ mod tests {
         SerializeMessage, SubType, TokioExecutor,
     };
     use futures::StreamExt;
+    use serde::{Deserialize, Serialize};
     use std::time::Duration;
     use tokio::time::timeout;
-
 
     #[derive(Serialize, Deserialize)]
     struct TestData {
