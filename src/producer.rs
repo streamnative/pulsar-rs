@@ -556,10 +556,10 @@ impl<Exe: Executor> PartitionedProducer<Exe> {
                 // If not, use round robin
                 self.get_next_round_robin_producer()
             }
-            Some(RoutingPolicy::Single) => {
-                let index = rand::thread_rng().gen_range(0..self.producers.len());
-                self.producers.get_mut(index).unwrap()
-            }
+            Some(RoutingPolicy::Single) => self
+                .producers
+                .get_mut(self.last_used_producer_index)
+                .unwrap(),
             Some(RoutingPolicy::Custom(policy)) => {
                 let amount_of_producers = self.producers.len();
                 self.producers
@@ -1038,9 +1038,9 @@ impl<Exe: Executor> ProducerBuilder<Exe> {
                 )));
             }
             1 => ProducerInner::Single(producers.into_iter().next().unwrap()),
-            _ => ProducerInner::Partitioned(PartitionedProducer {
+            len => ProducerInner::Partitioned(PartitionedProducer {
                 producers,
-                last_used_producer_index: 0,
+                last_used_producer_index: rand::thread_rng().gen_range(0..len),
                 topic,
                 options,
             }),
@@ -1433,6 +1433,7 @@ impl<T: SerializeMessage + Sized, Exe: Executor> MessageBuilder<'_, T, Exe> {
 mod tests {
     use futures::executor::block_on;
     use log::LevelFilter;
+    use serde_json::Value;
 
     use super::*;
     use crate::{routing_policy::CustomRoutingPolicy, tests::TEST_LOGGER, TokioExecutor};
@@ -1581,53 +1582,60 @@ mod tests {
             routing_policy: Some(RoutingPolicy::RoundRobin),
             ..Default::default()
         };
-        let addr = pulsar.lookup_topic(topic.clone()).await.unwrap();
         let partition_count = 3;
+        create_partitioned_topic("public", "default", &topic, partition_count).await;
 
-        let mut producers = Vec::new();
-        for i in 0..partition_count {
-            let producer = TopicProducer::new(
-                pulsar.clone(),
-                addr.clone(),
-                format!("{}-{}", topic.clone(), i),
-                Some(i.to_string()),
-                options.clone(),
-            )
+        let mut producer = pulsar
+            .producer()
+            .with_topic(topic)
+            .with_options(options)
+            .build()
             .await
             .unwrap();
-            producers.push(producer);
-        }
-        let mut partitioned_producer = PartitionedProducer {
-            producers,
-            last_used_producer_index: 0,
-            topic: topic.to_string(),
-            options,
-        };
 
-        let message = Message {
-            payload: "test".to_string().into(),
-            ..Default::default()
-        };
+        // test round robin without key
+        let message = "test".to_string();
+        let mut producer_id = 0;
+        for _ in 1..100 {
+            let send_receipt = producer
+                .send_non_blocking(&message)
+                .await
+                .unwrap()
+                .await
+                .unwrap();
 
-        for i in 1..100 {
-            let next_producer = partitioned_producer.choose_partition(&message);
-            assert!(next_producer.name == (i % partition_count).to_string());
+            assert!(send_receipt.producer_id != producer_id);
+            producer_id = send_receipt.producer_id;
         }
 
+        // test round robin with key
         let key = "test";
         let message = Message {
             payload: "test".to_string().into(),
             partition_key: Some(key.to_string()),
             ..Default::default()
         };
-
-        let chosen_index = RoutingPolicy::compute_partition_index_for_key(
-            key,
-            partition_count.try_into().unwrap(),
-        );
+        let CommandSendReceipt { producer_id, .. } = producer
+            .send_non_blocking(message)
+            .await
+            .unwrap()
+            .await
+            .unwrap();
         for _ in 1..100 {
-            let next_producer = partitioned_producer.choose_partition(&message);
-            assert!(next_producer.name == chosen_index.to_string());
+            let message = Message {
+                payload: "test".to_string().into(),
+                partition_key: Some(key.to_string()),
+                ..Default::default()
+            };
+
+            let send_receipt = producer
+                .send_non_blocking(message)
+                .await
+                .unwrap()
+                .await
+                .unwrap();
+
+            assert!(send_receipt.producer_id == producer_id);
         }
     }
 
@@ -1644,28 +1652,16 @@ mod tests {
             routing_policy: Some(RoutingPolicy::Single),
             ..Default::default()
         };
-        let addr = pulsar.lookup_topic(topic.clone()).await.unwrap();
         let partition_count = 3;
+        create_partitioned_topic("public", "default", &topic, partition_count).await;
 
-        let mut producers = Vec::new();
-        for i in 0..partition_count {
-            let producer = TopicProducer::new(
-                pulsar.clone(),
-                addr.clone(),
-                format!("{}-{}", topic.clone(), i),
-                Some(i.to_string()),
-                options.clone(),
-            )
+        let mut producer = pulsar
+            .producer()
+            .with_topic(topic)
+            .with_options(options)
+            .build()
             .await
             .unwrap();
-            producers.push(producer);
-        }
-        let mut partitioned_producer = PartitionedProducer {
-            producers,
-            last_used_producer_index: 0,
-            topic: topic.to_string(),
-            options,
-        };
 
         let key = "test";
         let message = Message {
@@ -1674,9 +1670,27 @@ mod tests {
             ..Default::default()
         };
 
+        let CommandSendReceipt { producer_id, .. } = producer
+            .send_non_blocking(message)
+            .await
+            .unwrap()
+            .await
+            .unwrap();
         for _ in 1..100 {
-            let next_producer = partitioned_producer.choose_partition(&message);
-            assert!(next_producer.name == 2.to_string());
+            let message = Message {
+                payload: "test".to_string().into(),
+                partition_key: Some(key.to_string()),
+                ..Default::default()
+            };
+
+            let send_receipt = producer
+                .send_non_blocking(message)
+                .await
+                .unwrap()
+                .await
+                .unwrap();
+
+            assert!(send_receipt.producer_id == producer_id);
         }
     }
 
@@ -1701,28 +1715,16 @@ mod tests {
             routing_policy: Some(RoutingPolicy::Custom(Arc::new(TestCustomRoutingPolicy {}))),
             ..Default::default()
         };
-        let addr = pulsar.lookup_topic(topic.clone()).await.unwrap();
         let partition_count = 3;
+        create_partitioned_topic("public", "default", &topic, partition_count).await;
 
-        let mut producers = Vec::new();
-        for i in 0..partition_count {
-            let producer = TopicProducer::new(
-                pulsar.clone(),
-                addr.clone(),
-                format!("{}-{}", topic.clone(), i),
-                Some(i.to_string()),
-                options.clone(),
-            )
+        let mut producer = pulsar
+            .producer()
+            .with_topic(topic)
+            .with_options(options)
+            .build()
             .await
             .unwrap();
-            producers.push(producer);
-        }
-        let mut partitioned_producer = PartitionedProducer {
-            producers,
-            last_used_producer_index: 0,
-            topic: topic.to_string(),
-            options,
-        };
 
         let key = "test";
         let message = Message {
@@ -1731,9 +1733,61 @@ mod tests {
             ..Default::default()
         };
 
+        let CommandSendReceipt { producer_id, .. } = producer
+            .send_non_blocking(message)
+            .await
+            .unwrap()
+            .await
+            .unwrap();
         for _ in 1..100 {
-            let next_producer = partitioned_producer.choose_partition(&message);
-            assert!(next_producer.name == 1.to_string());
+            let message = Message {
+                payload: "test".to_string().into(),
+                partition_key: Some(key.to_string()),
+                ..Default::default()
+            };
+
+            let send_receipt = producer
+                .send_non_blocking(message)
+                .await
+                .unwrap()
+                .await
+                .unwrap();
+
+            assert!(send_receipt.producer_id == producer_id);
         }
+    }
+
+    async fn create_partitioned_topic(
+        tenant: &str,
+        namespace: &str,
+        topic_name: &str,
+        num_partitions: u32,
+    ) {
+        let create_partitioned_topic_url = format!(
+            "http://127.0.0.1:8080/admin/v2/persistent/{tenant}/{namespace}/{topic_name}/partitions"
+        );
+        let client = reqwest::Client::new();
+        let response = client
+            .put(create_partitioned_topic_url)
+            .json(&num_partitions.to_string())
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+
+        let get_partitioned_topic_metadata = format!(
+            "http://127.0.0.1:8080/admin/v2/persistent/{tenant}/{namespace}/{topic_name}/internal-info"
+        );
+        let client = reqwest::Client::new();
+        let response = client
+            .get(get_partitioned_topic_metadata)
+            .send()
+            .await
+            .unwrap();
+        println!("{:?}", response);
+        assert!(response.status().is_success());
+
+        let json_value: Value = response.json().await.unwrap();
+        println!("{:?}", json_value["partitions"]);
     }
 }
