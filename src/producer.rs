@@ -1774,20 +1774,5 @@ mod tests {
             .await
             .unwrap();
         assert!(response.status().is_success());
-
-        let get_partitioned_topic_metadata = format!(
-            "http://127.0.0.1:8080/admin/v2/persistent/{tenant}/{namespace}/{topic_name}/internal-info"
-        );
-        let client = reqwest::Client::new();
-        let response = client
-            .get(get_partitioned_topic_metadata)
-            .send()
-            .await
-            .unwrap();
-        println!("{:?}", response);
-        assert!(response.status().is_success());
-
-        let json_value: Value = response.json().await.unwrap();
-        println!("{:?}", json_value["partitions"]);
     }
 }
