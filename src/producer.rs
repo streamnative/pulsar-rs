@@ -16,6 +16,7 @@ use futures::{
     task::{Context, Poll},
     Future, SinkExt, StreamExt,
 };
+use rand::Rng;
 
 use crate::{
     client::SerializeMessage,
@@ -555,7 +556,10 @@ impl<Exe: Executor> PartitionedProducer<Exe> {
                 // If not, use round robin
                 self.get_next_round_robin_producer()
             }
-            Some(RoutingPolicy::Single(index)) => self.producers.get_mut(*index).unwrap(),
+            Some(RoutingPolicy::Single) => {
+                let index = rand::thread_rng().gen_range(0..self.producers.len());
+                self.producers.get_mut(index).unwrap()
+            }
             Some(RoutingPolicy::Custom(policy)) => {
                 let amount_of_producers = self.producers.len();
                 self.producers
@@ -1637,7 +1641,7 @@ mod tests {
             .unwrap();
         let topic = format!("topic_{}", rand::random::<u16>());
         let options = ProducerOptions {
-            routing_policy: Some(RoutingPolicy::Single(2)),
+            routing_policy: Some(RoutingPolicy::Single),
             ..Default::default()
         };
         let addr = pulsar.lookup_topic(topic.clone()).await.unwrap();

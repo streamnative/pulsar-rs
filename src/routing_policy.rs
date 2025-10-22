@@ -8,7 +8,7 @@ use crate::producer::Message;
 pub enum RoutingPolicy {
     #[default]
     RoundRobin,
-    Single(usize),
+    Single,
     Custom(Arc<dyn CustomRoutingPolicy>),
 }
 
