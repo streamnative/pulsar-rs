@@ -223,6 +223,7 @@ pub mod message;
 pub mod producer;
 pub mod reader;
 mod retry_op;
+pub mod routing_policy;
 mod service_discovery;
 
 #[cfg(all(
