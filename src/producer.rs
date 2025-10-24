@@ -1433,7 +1433,6 @@ impl<T: SerializeMessage + Sized, Exe: Executor> MessageBuilder<'_, T, Exe> {
 mod tests {
     use futures::executor::block_on;
     use log::LevelFilter;
-    use serde_json::Value;
 
     use super::*;
     use crate::{routing_policy::CustomRoutingPolicy, tests::TEST_LOGGER, TokioExecutor};
