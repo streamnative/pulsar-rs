@@ -254,13 +254,13 @@ impl tokio_util::codec::Encoder<Message> for Codec {
             let crc_offset = buf.len();
             buf.put_u32(0); // NOTE: Checksum (CRC32c). Overrwritten later to avoid copying.
 
-            let metdata_offset = buf.len();
+            let metadata_offset = buf.len();
             buf.put_u32(metadata_size as u32);
             payload.metadata.encode(&mut buf)?;
             buf.put(&payload.data[..]);
 
-            let crc = CRC_CASTAGNOLI.checksum(&buf[metdata_offset..]);
-            let mut crc_buf: &mut [u8] = &mut buf[crc_offset..metdata_offset];
+            let crc = CRC_CASTAGNOLI.checksum(&buf[metadata_offset..]);
+            let mut crc_buf: &mut [u8] = &mut buf[crc_offset..metadata_offset];
             crc_buf.put_u32(crc);
         }
         if dst.remaining_mut() < buf.len() {
@@ -308,13 +308,27 @@ impl tokio_util::codec::Decoder for Codec {
                             ))
                         })?;
 
-                        // TODO: Check crc32 of payload data
-
                         let metadata = Metadata::decode(payload_frame.metadata)?;
-                        Some(Payload {
-                            metadata,
-                            data: buf.to_vec(),
-                        })
+
+                        //computing crc from metadata using the CRC_CASTAGNOLI checksum
+                        let mut reconstructed_crc_data = Vec::new();
+                        reconstructed_crc_data.put_u32(payload_frame.metadata_size);
+                        reconstructed_crc_data.extend_from_slice(payload_frame.metadata);
+                        reconstructed_crc_data.extend_from_slice(buf);
+
+                        let computed_crc_32 = CRC_CASTAGNOLI.checksum(&reconstructed_crc_data);
+
+                        let checksum32 = payload_frame.checksum;
+                        if checksum32 == computed_crc_32 {
+                            Some(Payload {
+                                metadata,
+                                data: buf.to_vec(),
+                            })
+                        } else {
+                            return Err(ConnectionError::Decoding(format!(
+                                "Checksum mismatch, invalid payload"
+                            )));
+                        }
                     } else {
                         None
                     };
@@ -367,13 +381,13 @@ impl asynchronous_codec::Encoder for Codec {
             let crc_offset = buf.len();
             buf.put_u32(0); // NOTE: Checksum (CRC32c). Overrwritten later to avoid copying.
 
-            let metdata_offset = buf.len();
+            let metadata_offset = buf.len();
             buf.put_u32(metadata_size as u32);
             payload.metadata.encode(&mut buf)?;
             buf.put(&payload.data[..]);
 
-            let crc = CRC_CASTAGNOLI.checksum(&buf[metdata_offset..]);
-            let mut crc_buf: &mut [u8] = &mut buf[crc_offset..metdata_offset];
+            let crc = CRC_CASTAGNOLI.checksum(&buf[metadata_offset..]);
+            let mut crc_buf: &mut [u8] = &mut buf[crc_offset..metadata_offset];
             crc_buf.put_u32(crc);
         }
         if dst.remaining_mut() < buf.len() {
@@ -421,13 +435,27 @@ impl asynchronous_codec::Decoder for Codec {
                             ))
                         })?;
 
-                        // TODO: Check crc32 of payload data
-
                         let metadata = Metadata::decode(payload_frame.metadata)?;
-                        Some(Payload {
-                            metadata,
-                            data: buf.to_vec(),
-                        })
+
+                        //computing crc from metadata using the CRC_CASTAGNOLI checksum
+                        let mut reconstructed_crc_data = Vec::new();
+                        reconstructed_crc_data.put_u32(payload_frame.metadata_size);
+                        reconstructed_crc_data.extend_from_slice(payload_frame.metadata);
+                        reconstructed_crc_data.extend_from_slice(buf);
+
+                        let computed_crc_32 = CRC_CASTAGNOLI.checksum(&reconstructed_crc_data);
+
+                        let checksum32 = payload_frame.checksum;
+                        if checksum32 == computed_crc_32 {
+                            Some(Payload {
+                                metadata,
+                                data: buf.to_vec(),
+                            })
+                        } else {
+                            return Err(ConnectionError::Decoding(format!(
+                                "Checksum mismatch, invalid payload"
+                            )));
+                        }
                     } else {
                         None
                     };
