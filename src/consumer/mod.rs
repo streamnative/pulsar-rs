@@ -346,6 +346,15 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         }
     }
 
+    /// returns the consumer's receiver queue size
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn receiver_queue_size(&self) -> Option<u32> {
+        match &self.inner {
+            InnerConsumer::Single(c) => c.config.receiver_queue_size,
+            InnerConsumer::Multi(c) => c.config.receiver_queue_size,
+        }
+    }
+
     /// returns the consumer's name
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn consumer_name(&self) -> Option<&str> {
