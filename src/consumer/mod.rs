@@ -747,6 +747,9 @@ mod tests {
                 "waiting for a message should have timed out, since we already acknowledged the \
                  only message in the queue"
             );
+            // clean up
+            consumer.unsubscribe().await.unwrap();
+            consumer.close().await.unwrap();
         }
     }
 
@@ -1121,10 +1124,6 @@ mod tests {
         // then check if all messages were received
         assert_eq!(50, consumed_1);
         assert_eq!(100, consumed_2);
-
-        // clean up
-        consumer_1.unsubscribe().await.unwrap();
-        consumer_1.close().await.unwrap();
     }
 
     #[tokio::test]
