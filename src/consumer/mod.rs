@@ -717,6 +717,7 @@ mod tests {
             let mut consumer: Consumer<TestData, _> = client
                 .consumer()
                 .with_topic(&topic)
+                .with_consumer_name("dropped_ack")
                 .with_subscription("dropped_ack")
                 .with_subscription_type(SubType::Shared)
                 .with_options(ConsumerOptions {
@@ -728,6 +729,12 @@ mod tests {
                 .unwrap();
 
             println!("created second consumer");
+            assert!(consumer.check_connection().await.is_ok());
+            let stats = consumer.get_stats().await.unwrap();
+            assert_eq!(stats.len(), 1);
+            for stat in stats {
+                assert_eq!(stat.consumer_name().to_string(), "dropped_ack");
+            }
 
             // the message has already been acked, so we should not receive anything
             let res: Result<_, tokio::time::error::Elapsed> =
@@ -1049,14 +1056,6 @@ mod tests {
             .build()
             .await
             .unwrap();
-
-        assert!(consumer_1.check_connection().await.is_ok());
-        let stats = consumer_1.get_stats().await.unwrap();
-        assert_eq!(stats.len(), 1);
-        for stat in stats {
-            assert_eq!(stat.consumer_name().to_string(), "seek_single_test");
-        }
-
         log::info!("built the consumer");
 
         let mut consumed_1 = 0_u32;
