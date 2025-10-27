@@ -552,15 +552,18 @@ mod tests {
                 ..Default::default()
             });
 
-        let consumer_1: Consumer<TestData, _> = builder
+        let mut consumer_1: Consumer<TestData, _> = builder
             .clone()
             .with_subscription("consumer_1")
+            .with_consumer_name("consumer_1")
             .with_topics([&topic1, &topic2])
             .build()
             .await
             .unwrap();
 
-        let consumer_2: Consumer<TestData, _> = builder
+        assert!(&consumer_1.check_connection().await.is_ok());
+
+        let mut consumer_2: Consumer<TestData, _> = builder
             .with_subscription("consumer_2")
             .with_topic_regex(Regex::new(&format!("multi_consumer_[ab]_{topic_n}")).unwrap())
             .build()
@@ -568,7 +571,7 @@ mod tests {
             .unwrap();
 
         let expected: HashSet<_> = vec![data1, data2, data3, data4].into_iter().collect();
-        for consumer in [consumer_1, consumer_2].iter_mut() {
+        for consumer in [&mut consumer_1, &mut consumer_2].iter_mut() {
             let connected_topics = consumer.topics();
             debug!(
                 "connected topics for {}: {:?}",
@@ -584,7 +587,16 @@ mod tests {
                 .await
                 .unwrap()
             {
-                received.insert(message.unwrap().deserialize().unwrap());
+                let msg = message.unwrap();
+                received.insert(msg.deserialize().unwrap());
+                if received.len() == 2 {
+                    consumer
+                        .ack_with_id(msg.topic.as_str(), msg.message_id.id)
+                        .await
+                        .unwrap();
+                } else {
+                    consumer.ack(&msg).await.unwrap();
+                }
                 if received.len() == 4 {
                     break;
                 }
@@ -592,6 +604,48 @@ mod tests {
             assert_eq!(expected, received);
             assert_eq!(consumer.messages_received(), 4);
             assert!(consumer.last_message_received().is_some());
+        }
+
+        let stats = consumer_1.get_stats().await.unwrap();
+        assert_eq!(stats.len(), 2);
+        for stat in stats {
+            assert_eq!(stat.consumer_name().to_string(), "consumer_1");
+        }
+
+        let data5 = TestData {
+            topic: "c".to_owned(),
+            msg: 5,
+        };
+        let data6 = TestData {
+            topic: "c".to_owned(),
+            msg: 6,
+        };
+        try_join_all(vec![
+            client.send(&topic1, &data5),
+            client.send(&topic1, &data6),
+        ])
+        .await
+        .unwrap();
+        let mut latest_msg = None;
+        for i in 0..2 {
+            let msg = recv_within(&mut consumer_1, DEFAULT_RECV_TIMEOUT).await;
+            println!("consumer_1 receive {}: {:?}", i, msg);
+            if i == 1 {
+                latest_msg = Some(msg.unwrap());
+            }
+        }
+
+        consumer_1
+            .cumulative_ack(&latest_msg.unwrap())
+            .await
+            .unwrap();
+        let msg = recv_within(&mut consumer_1, DEFAULT_RECV_TIMEOUT).await;
+        assert!(msg.is_err(), "timed out waiting for next() after 5s");
+
+        // cleanup
+        for consumer in [&mut consumer_1, &mut consumer_2].iter_mut() {
+            consumer.unsubscribe().await.unwrap();
+            consumer.close().await.unwrap();
         }
     }
 
@@ -993,6 +1047,13 @@ mod tests {
             .await
             .unwrap();
 
+        assert!(consumer_1.check_connection().await.is_ok());
+        let stats = consumer_1.get_stats().await.unwrap();
+        assert_eq!(stats.len(), 1);
+        for stat in stats {
+            assert_eq!(stat.consumer_name().to_string(), "seek_single_test");
+        }
+
         log::info!("built the consumer");
 
         let mut consumed_1 = 0_u32;
@@ -1060,6 +1121,10 @@ mod tests {
         // then check if all messages were received
         assert_eq!(50, consumed_1);
         assert_eq!(100, consumed_2);
+
+        // clean up
+        consumer_1.unsubscribe().await.unwrap();
+        consumer_1.close().await.unwrap();
     }
 
     #[tokio::test]
