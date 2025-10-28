@@ -569,6 +569,9 @@ mod tests {
             .await
             .unwrap();
 
+        let receive_queue_size = consumer_1.receiver_queue_size();
+        assert_eq!(receive_queue_size, None);
+
         let consumer_2: Consumer<TestData, _> = builder
             .with_subscription("consumer_2")
             .with_topic_regex(Regex::new(&format!("multi_consumer_[ab]_{topic_n}")).unwrap())
@@ -640,6 +643,7 @@ mod tests {
                 .consumer()
                 .with_topic(&topic)
                 .with_subscription("dropped_ack")
+                .with_receiver_queue_size(2000)
                 .with_subscription_type(SubType::Shared)
                 // get earliest messages
                 .with_options(ConsumerOptions {
@@ -651,6 +655,8 @@ mod tests {
                 .unwrap();
 
             println!("created consumer");
+            let receive_queue_size = consumer.receiver_queue_size();
+            assert_eq!(receive_queue_size, Some(2000));
 
             // consumer.next().await
             let msg: Message<TestData> = timeout(Duration::from_secs(1), consumer.next())
