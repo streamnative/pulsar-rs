@@ -634,13 +634,31 @@ mod tests {
             println!("consumer_1 receive {}: {:?}", i, msg);
             latest_msg = Some(msg.unwrap());
         }
-
-        consumer_1
+        let r = consumer_1
             .cumulative_ack(&latest_msg.unwrap())
+            .await;
+        assert!(r.is_ok());
+        consumer_1.close().await.unwrap();
+
+        let data6 = TestData {
+            topic: "d".to_owned(),
+            msg: 7,
+        };
+        client.send(&topic1, &data6).await.unwrap();
+
+        // recreate consumer_1
+        consumer_1 = builder
+            .clone()
+            .with_subscription("consumer_1")
+            .with_consumer_name("consumer_1")
+            .with_topics([&topic1])
+            .with_subscription_type(SubType::Shared)
+            .build::<TestData>()
             .await
             .unwrap();
-        let msg = recv_within(&mut consumer_1, DEFAULT_RECV_TIMEOUT).await;
-        assert!(msg.is_err(), "timed out waiting for next() after 5s");
+        let msg = recv_within(&mut consumer_1, DEFAULT_RECV_TIMEOUT).await.unwrap();
+        assert_eq!(data6, msg.deserialize().unwrap());
+
 
         // cleanup
         for consumer in [&mut consumer_1, &mut consumer_2].iter_mut() {
@@ -648,12 +666,13 @@ mod tests {
             consumer.close().await.unwrap();
         }
 
+        // verify unsubscribe worked
         let consumer_1_exclusive = builder
             .clone()
             .with_subscription("consumer_1")
             .with_consumer_name("consumer_1")
-            .with_topic(&topic1)
-            .with_subscription_type(SubType::Shared)
+            .with_topics([&topic1, &topic2])
+            .with_subscription_type(SubType::Exclusive)
             .build::<TestData>()
             .await;
         assert!(consumer_1_exclusive.is_ok());
