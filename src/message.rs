@@ -325,9 +325,10 @@ impl tokio_util::codec::Decoder for Codec {
                                 data: buf.to_vec(),
                             })
                         } else {
-                            return Err(ConnectionError::Decoding(format!(
+                            return Err(ConnectionError::Decoding(
                                 "Checksum mismatch, invalid payload"
-                            )));
+                            .to_string()));
+                            
                         }
                     } else {
                         None
@@ -452,9 +453,9 @@ impl asynchronous_codec::Decoder for Codec {
                                 data: buf.to_vec(),
                             })
                         } else {
-                            return Err(ConnectionError::Decoding(format!(
+                            return Err(ConnectionError::Decoding(
                                 "Checksum mismatch, invalid payload"
-                            )));
+                            .to_string()));
                         }
                     } else {
                         None
