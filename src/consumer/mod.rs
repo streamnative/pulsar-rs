@@ -557,6 +557,7 @@ mod tests {
             .with_subscription("consumer_1")
             .with_consumer_name("consumer_1")
             .with_topics([&topic1, &topic2])
+            .with_subscription_type(SubType::Exclusive)
             .build()
             .await
             .unwrap();
@@ -564,6 +565,7 @@ mod tests {
         assert!(&consumer_1.check_connection().await.is_ok());
 
         let mut consumer_2: Consumer<TestData, _> = builder
+            .clone()
             .with_subscription("consumer_2")
             .with_topic_regex(Regex::new(&format!("multi_consumer_[ab]_{topic_n}")).unwrap())
             .build()
@@ -630,9 +632,7 @@ mod tests {
         for i in 0..2 {
             let msg = recv_within(&mut consumer_1, DEFAULT_RECV_TIMEOUT).await;
             println!("consumer_1 receive {}: {:?}", i, msg);
-            if i == 1 {
-                latest_msg = Some(msg.unwrap());
-            }
+            latest_msg = Some(msg.unwrap());
         }
 
         consumer_1
@@ -647,6 +647,16 @@ mod tests {
             consumer.unsubscribe().await.unwrap();
             consumer.close().await.unwrap();
         }
+
+        let consumer_1_exclusive = builder
+            .clone()
+            .with_subscription("consumer_1")
+            .with_consumer_name("consumer_1")
+            .with_topic(&topic1)
+            .with_subscription_type(SubType::Shared)
+            .build::<TestData>()
+            .await;
+        assert!(consumer_1_exclusive.is_ok());
     }
 
     #[tokio::test]
