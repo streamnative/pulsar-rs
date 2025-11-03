@@ -634,9 +634,7 @@ mod tests {
             println!("consumer_1 receive {}: {:?}", i, msg);
             latest_msg = Some(msg.unwrap());
         }
-        let r = consumer_1
-            .cumulative_ack(&latest_msg.unwrap())
-            .await;
+        let r = consumer_1.cumulative_ack(&latest_msg.unwrap()).await;
         assert!(r.is_ok());
         consumer_1.close().await.unwrap();
 
@@ -656,9 +654,10 @@ mod tests {
             .build::<TestData>()
             .await
             .unwrap();
-        let msg = recv_within(&mut consumer_1, DEFAULT_RECV_TIMEOUT).await.unwrap();
+        let msg = recv_within(&mut consumer_1, DEFAULT_RECV_TIMEOUT)
+            .await
+            .unwrap();
         assert_eq!(data6, msg.deserialize().unwrap());
-
 
         // cleanup
         for consumer in [&mut consumer_1, &mut consumer_2].iter_mut() {
