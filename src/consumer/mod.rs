@@ -346,15 +346,6 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         }
     }
 
-    /// returns the consumer's receiver queue size
-    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub fn receiver_queue_size(&self) -> Option<u32> {
-        match &self.inner {
-            InnerConsumer::Single(c) => c.config.receiver_queue_size,
-            InnerConsumer::Multi(c) => c.config.receiver_queue_size,
-        }
-    }
-
     /// returns the consumer's name
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn consumer_name(&self) -> Option<&str> {
@@ -569,7 +560,7 @@ mod tests {
             .await
             .unwrap();
 
-        let receive_queue_size = consumer_1.receiver_queue_size();
+        let receive_queue_size = consumer_1.options().receiver_queue_size;
         assert_eq!(receive_queue_size, None);
 
         let consumer_2: Consumer<TestData, _> = builder
@@ -643,19 +634,19 @@ mod tests {
                 .consumer()
                 .with_topic(&topic)
                 .with_subscription("dropped_ack")
-                .with_receiver_queue_size(2000)
                 .with_subscription_type(SubType::Shared)
                 // get earliest messages
-                .with_options(ConsumerOptions {
-                    initial_position: InitialPosition::Earliest,
-                    ..Default::default()
-                })
+                .with_options(
+                    ConsumerOptions::default()
+                        .with_receiver_queue_size(2000)
+                        .with_initial_position(InitialPosition::Earliest),
+                )
                 .build()
                 .await
                 .unwrap();
 
             println!("created consumer");
-            let receive_queue_size = consumer.receiver_queue_size();
+            let receive_queue_size = consumer.options().receiver_queue_size;
             assert_eq!(receive_queue_size, Some(2000));
 
             // consumer.next().await

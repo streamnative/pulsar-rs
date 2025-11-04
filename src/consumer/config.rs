@@ -22,8 +22,6 @@ pub struct ConsumerConfig {
     pub(crate) consumer_name: Option<String>,
     /// numerical id of the consumer
     pub(crate) consumer_id: Option<u64>,
-    /// size of the receiver queue
-    pub(crate) receiver_queue_size: Option<u32>,
     /// time after which unacked messages will be sent again
     pub(crate) unacked_message_redelivery_delay: Option<Duration>,
     /// consumer options

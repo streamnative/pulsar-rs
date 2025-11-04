@@ -30,7 +30,6 @@ pub struct ConsumerBuilder<Exe: Executor> {
     consumer_id: Option<u64>,
     consumer_name: Option<String>,
     batch_size: Option<u32>,
-    receiver_queue_size: Option<u32>,
     unacked_message_resend_delay: Option<Duration>,
     dead_letter_policy: Option<DeadLetterPolicy>,
     consumer_options: Option<ConsumerOptions>,
@@ -51,7 +50,6 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
             consumer_id: None,
             consumer_name: None,
             batch_size: None,
-            receiver_queue_size: None,
             // TODO what should this default to? None seems incorrect..
             unacked_message_resend_delay: None,
             dead_letter_policy: None,
@@ -153,11 +151,6 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
         self
     }
 
-    pub fn with_receiver_queue_size(mut self, size: u32) -> Self {
-        self.receiver_queue_size = Some(size);
-        self
-    }
-
     /// sets consumer options
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_options(mut self, options: ConsumerOptions) -> Self {
@@ -194,7 +187,6 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
             consumer_id,
             mut consumer_name,
             batch_size,
-            receiver_queue_size,
             unacked_message_resend_delay,
             consumer_options,
             dead_letter_policy,
@@ -267,7 +259,6 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
             batch_size,
             consumer_name,
             consumer_id,
-            receiver_queue_size,
             unacked_message_redelivery_delay: unacked_message_resend_delay,
             options: consumer_options.unwrap_or_default(),
             dead_letter_policy,

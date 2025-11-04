@@ -59,7 +59,6 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
             batch_size,
             consumer_name,
             consumer_id,
-            receiver_queue_size,
             unacked_message_redelivery_delay,
             options,
             dead_letter_policy,
@@ -104,7 +103,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
                 return Err(Error::Executor);
             }
         }
-        let receiver_queue_size = receiver_queue_size.unwrap_or(1000);
+        let receiver_queue_size = options.receiver_queue_size.unwrap_or(1000);
         let (tx, rx) = mpsc::channel(receiver_queue_size as usize);
         let mut c = ConsumerEngine::new(
             client.clone(),
