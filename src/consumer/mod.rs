@@ -552,15 +552,20 @@ mod tests {
                 ..Default::default()
             });
 
-        let consumer_1: Consumer<TestData, _> = builder
+        let mut consumer_1: Consumer<TestData, _> = builder
             .clone()
             .with_subscription("consumer_1")
+            .with_consumer_name("consumer_1")
             .with_topics([&topic1, &topic2])
+            .with_subscription_type(SubType::Exclusive)
             .build()
             .await
             .unwrap();
 
-        let consumer_2: Consumer<TestData, _> = builder
+        assert!(&consumer_1.check_connection().await.is_ok());
+
+        let mut consumer_2: Consumer<TestData, _> = builder
+            .clone()
             .with_subscription("consumer_2")
             .with_topic_regex(Regex::new(&format!("multi_consumer_[ab]_{topic_n}")).unwrap())
             .build()
@@ -568,7 +573,7 @@ mod tests {
             .unwrap();
 
         let expected: HashSet<_> = vec![data1, data2, data3, data4].into_iter().collect();
-        for consumer in [consumer_1, consumer_2].iter_mut() {
+        for consumer in [&mut consumer_1, &mut consumer_2].iter_mut() {
             let connected_topics = consumer.topics();
             debug!(
                 "connected topics for {}: {:?}",
@@ -584,7 +589,16 @@ mod tests {
                 .await
                 .unwrap()
             {
-                received.insert(message.unwrap().deserialize().unwrap());
+                let msg = message.unwrap();
+                received.insert(msg.deserialize().unwrap());
+                if received.len() == 2 {
+                    consumer
+                        .ack_with_id(msg.topic.as_str(), msg.message_id.id)
+                        .await
+                        .unwrap();
+                } else {
+                    consumer.ack(&msg).await.unwrap();
+                }
                 if received.len() == 4 {
                     break;
                 }
@@ -593,6 +607,74 @@ mod tests {
             assert_eq!(consumer.messages_received(), 4);
             assert!(consumer.last_message_received().is_some());
         }
+
+        let stats = consumer_1.get_stats().await.unwrap();
+        assert_eq!(stats.len(), 2);
+        for stat in stats {
+            assert_eq!(stat.consumer_name().to_string(), "consumer_1");
+        }
+
+        let data5 = TestData {
+            topic: "c".to_owned(),
+            msg: 5,
+        };
+        let data6 = TestData {
+            topic: "c".to_owned(),
+            msg: 6,
+        };
+        try_join_all(vec![
+            client.send(&topic1, &data5),
+            client.send(&topic1, &data6),
+        ])
+        .await
+        .unwrap();
+        let mut latest_msg = None;
+        for i in 0..2 {
+            let msg = recv_within(&mut consumer_1, DEFAULT_RECV_TIMEOUT).await;
+            println!("consumer_1 receive {}: {:?}", i, msg);
+            latest_msg = Some(msg.unwrap());
+        }
+        let r = consumer_1.cumulative_ack(&latest_msg.unwrap()).await;
+        assert!(r.is_ok());
+        consumer_1.close().await.unwrap();
+
+        let data6 = TestData {
+            topic: "d".to_owned(),
+            msg: 7,
+        };
+        client.send(&topic1, &data6).await.unwrap();
+
+        // recreate consumer_1
+        consumer_1 = builder
+            .clone()
+            .with_subscription("consumer_1")
+            .with_consumer_name("consumer_1")
+            .with_topics([&topic1])
+            .with_subscription_type(SubType::Shared)
+            .build::<TestData>()
+            .await
+            .unwrap();
+        let msg = recv_within(&mut consumer_1, DEFAULT_RECV_TIMEOUT)
+            .await
+            .unwrap();
+        assert_eq!(data6, msg.deserialize().unwrap());
+
+        // cleanup
+        for consumer in [&mut consumer_1, &mut consumer_2].iter_mut() {
+            consumer.unsubscribe().await.unwrap();
+            consumer.close().await.unwrap();
+        }
+
+        // verify unsubscribe worked
+        let consumer_1_exclusive = builder
+            .clone()
+            .with_subscription("consumer_1")
+            .with_consumer_name("consumer_1")
+            .with_topics([&topic1, &topic2])
+            .with_subscription_type(SubType::Exclusive)
+            .build::<TestData>()
+            .await;
+        assert!(consumer_1_exclusive.is_ok());
     }
 
     #[tokio::test]
@@ -663,6 +745,7 @@ mod tests {
             let mut consumer: Consumer<TestData, _> = client
                 .consumer()
                 .with_topic(&topic)
+                .with_consumer_name("dropped_ack")
                 .with_subscription("dropped_ack")
                 .with_subscription_type(SubType::Shared)
                 .with_options(ConsumerOptions {
@@ -674,6 +757,12 @@ mod tests {
                 .unwrap();
 
             println!("created second consumer");
+            assert!(consumer.check_connection().await.is_ok());
+            let stats = consumer.get_stats().await.unwrap();
+            assert_eq!(stats.len(), 1);
+            for stat in stats {
+                assert_eq!(stat.consumer_name().to_string(), "dropped_ack");
+            }
 
             // the message has already been acked, so we should not receive anything
             let res: Result<_, tokio::time::error::Elapsed> =
@@ -693,6 +782,9 @@ mod tests {
                 "waiting for a message should have timed out, since we already acknowledged the \
                  only message in the queue"
             );
+            // clean up
+            consumer.unsubscribe().await.unwrap();
+            consumer.close().await.unwrap();
         }
     }
 
@@ -992,7 +1084,6 @@ mod tests {
             .build()
             .await
             .unwrap();
-
         log::info!("built the consumer");
 
         let mut consumed_1 = 0_u32;
