@@ -81,7 +81,7 @@ impl ConsumerOptions {
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_receiver_queue_size(mut self, size: u32) -> Self {
-        self.receiver_queue_size = Some(if size == 0 {1000} else {size});
+        self.receiver_queue_size = Some(if size == 0 { 1000 } else { size });
         self
     }
 }
