@@ -20,6 +20,8 @@ pub struct ConsumerOptions {
     pub metadata: BTreeMap<String, String>,
     pub read_compacted: Option<bool>,
     pub schema: Option<Schema>,
+    /// size of the receiver queue
+    pub receiver_queue_size: Option<u32>,
     /// Signal whether the subscription will initialize on latest
     /// or earliest message (default on latest)
     ///
@@ -74,6 +76,13 @@ impl ConsumerOptions {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_initial_position(mut self, initial_position: InitialPosition) -> Self {
         self.initial_position = initial_position;
+        self
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn with_receiver_queue_size(mut self, size: u32) -> Self {
+        // todo: support zero_queue_size consumer
+        self.receiver_queue_size = Some(if size == 0 { 1000 } else { size });
         self
     }
 }
