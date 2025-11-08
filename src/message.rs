@@ -326,9 +326,8 @@ impl tokio_util::codec::Decoder for Codec {
                             })
                         } else {
                             return Err(ConnectionError::Decoding(
-                                "Checksum mismatch, invalid payload"
-                            .to_string()));
-                            
+                                "Checksum mismatch, invalid payload".to_string(),
+                            ));
                         }
                     } else {
                         None
@@ -454,8 +453,8 @@ impl asynchronous_codec::Decoder for Codec {
                             })
                         } else {
                             return Err(ConnectionError::Decoding(
-                                "Checksum mismatch, invalid payload"
-                            .to_string()));
+                                "Checksum mismatch, invalid payload".to_string(),
+                            ));
                         }
                     } else {
                         None
