@@ -103,7 +103,8 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
                 return Err(Error::Executor);
             }
         }
-        let (tx, rx) = mpsc::channel(1000);
+        let receiver_queue_size = options.receiver_queue_size.unwrap_or(1000);
+        let (tx, rx) = mpsc::channel(receiver_queue_size as usize);
         let mut c = ConsumerEngine::new(
             client.clone(),
             connection.clone(),

@@ -563,6 +563,8 @@ mod tests {
             .unwrap();
 
         assert!(&consumer_1.check_connection().await.is_ok());
+        let receive_queue_size = consumer_1.options().receiver_queue_size;
+        assert_eq!(receive_queue_size, None);
 
         let mut consumer_2: Consumer<TestData, _> = builder
             .clone()
@@ -683,6 +685,40 @@ mod tests {
         feature = "tokio-rustls-runtime-aws-lc-rs",
         feature = "tokio-rustls-runtime-ring"
     ))]
+    async fn consumer_zero_receiver_queue_size() {
+        let _result = log::set_logger(&TEST_LOGGER);
+        log::set_max_level(LevelFilter::Debug);
+        let addr = "pulsar://127.0.0.1:6650";
+        let topic = format!(
+            "consumer_zero_receiver_queue_size_{}",
+            rand::random::<u16>()
+        );
+
+        let client: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await.unwrap();
+        let consumer: Consumer<TestData, _> = client
+            .consumer()
+            .with_topic(&topic)
+            .with_subscription("dropped_ack")
+            .with_subscription_type(SubType::Shared)
+            // get earliest messages
+            .with_options(
+                ConsumerOptions::default()
+                    .with_receiver_queue_size(0)
+                    .with_initial_position(InitialPosition::Earliest),
+            )
+            .build()
+            .await
+            .unwrap();
+        let size = consumer.options().receiver_queue_size.unwrap();
+        assert_eq!(size, 1000);
+    }
+
+    #[tokio::test]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
     async fn consumer_dropped_with_lingering_acks() {
         use rand::{distributions::Alphanumeric, Rng};
         let _result = log::set_logger(&TEST_LOGGER);
@@ -715,15 +751,18 @@ mod tests {
                 .with_subscription("dropped_ack")
                 .with_subscription_type(SubType::Shared)
                 // get earliest messages
-                .with_options(ConsumerOptions {
-                    initial_position: InitialPosition::Earliest,
-                    ..Default::default()
-                })
+                .with_options(
+                    ConsumerOptions::default()
+                        .with_receiver_queue_size(2000)
+                        .with_initial_position(InitialPosition::Earliest),
+                )
                 .build()
                 .await
                 .unwrap();
 
             println!("created consumer");
+            let receive_queue_size = consumer.options().receiver_queue_size;
+            assert_eq!(receive_queue_size, Some(2000));
 
             // consumer.next().await
             let msg: Message<TestData> = timeout(Duration::from_secs(1), consumer.next())
