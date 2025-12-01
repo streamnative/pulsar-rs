@@ -1231,19 +1231,19 @@ mod tests {
         let client: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await.unwrap();
 
         let json_schema = serde_json::json!({
-            "$id": "https://example.com/test.schema.json",
-            "$schema": "https://json-schema.org/draft/2020-12/schema",
-            "title": "TestRecord",
-            "type": "object",
-            "properties": {
-              "name": {
-                "type": "string",
-              },
-              "age": {
-                "type": "integer",
-                "minimum": 0
-              }
+          "type": "record",
+          "name": "TestRecord",
+          "namespace": "com.example",
+          "fields": [
+            {
+              "name": "name",
+              "type": "string"
+            },
+            {
+              "name": "age",
+              "type": "int"
             }
+          ]
         });
 
         let schema_data = serde_json::to_vec(&json_schema).unwrap();

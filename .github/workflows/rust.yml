@@ -39,7 +39,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pulsar-version: [2.10.6, 2.11.4, 3.0.8, 3.2.4, 3.3.3, 4.0.1]
+        pulsar-version: [2.10.6, 2.11.4, 3.0.8, 3.2.4, 3.3.3, 4.0.1, 4.1.2]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
