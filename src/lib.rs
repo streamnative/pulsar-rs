@@ -225,6 +225,7 @@ pub mod reader;
 mod retry_op;
 pub mod routing_policy;
 mod service_discovery;
+mod test_utils;
 
 #[cfg(all(
     any(
@@ -248,7 +249,7 @@ mod tests {
 
     use assert_matches::assert_matches;
     use futures::{future::try_join_all, StreamExt};
-    use log::{LevelFilter, Metadata, Record};
+    use log::{Metadata, Record};
     use serde_json::Value;
     #[cfg(any(
         feature = "tokio-runtime",
@@ -263,7 +264,6 @@ mod tests {
         feature = "tokio-rustls-runtime-aws-lc-rs",
         feature = "tokio-rustls-runtime-ring"
     ))]
-    use crate::executor::TokioExecutor;
     use crate::{
         client::SerializeMessage,
         consumer::{InitialPosition, Message},
@@ -332,11 +332,7 @@ mod tests {
         feature = "tokio-rustls-runtime-ring"
     ))]
     async fn round_trip() {
-        let _result = log::set_logger(&TEST_LOGGER);
-        log::set_max_level(LevelFilter::Debug);
-
-        let addr = "pulsar://127.0.0.1:6650";
-        let pulsar: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await.unwrap();
+        let pulsar = test_utils::new_pulsar().await;
 
         // random topic to better allow multiple test runs while debugging
         let topic = format!("test_{}", rand::random::<u16>());
@@ -401,12 +397,8 @@ mod tests {
         feature = "tokio-rustls-runtime-ring"
     ))]
     async fn unsized_data() {
-        let _result = log::set_logger(&TEST_LOGGER);
-        log::set_max_level(LevelFilter::Debug);
-
-        let addr = "pulsar://127.0.0.1:6650";
+        let pulsar = test_utils::new_pulsar().await;
         let test_id: u16 = rand::random();
-        let pulsar: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await.unwrap();
 
         // test &str
         {
@@ -491,13 +483,8 @@ mod tests {
         feature = "tokio-rustls-runtime-ring"
     ))]
     async fn redelivery() {
-        let _result = log::set_logger(&TEST_LOGGER);
-        log::set_max_level(LevelFilter::Debug);
-
-        let addr = "pulsar://127.0.0.1:6650";
+        let pulsar = test_utils::new_pulsar().await;
         let topic = format!("test_redelivery_{}", rand::random::<u16>());
-
-        let pulsar: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await.unwrap();
         pulsar
             .send(&topic, String::from("data"))
             .await
@@ -545,13 +532,8 @@ mod tests {
     async fn batching() {
         use assert_matches::assert_matches;
 
-        let _result = log::set_logger(&TEST_LOGGER);
-        log::set_max_level(LevelFilter::Debug);
-
-        let addr = "pulsar://127.0.0.1:6650";
+        let pulsar = test_utils::new_pulsar().await;
         let topic = format!("test_batching_{}", rand::random::<u16>());
-
-        let pulsar: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await.unwrap();
         let mut consumer: Consumer<String, _> =
             pulsar.consumer().with_topic(&topic).build().await.unwrap();
 
@@ -677,13 +659,8 @@ mod tests {
         feature = "tokio-rustls-runtime-ring"
     ))]
     async fn flush() {
-        let _result = log::set_logger(&TEST_LOGGER);
-        log::set_max_level(LevelFilter::Debug);
-
-        let addr = "pulsar://127.0.0.1:6650";
+        let pulsar = test_utils::new_pulsar().await;
         let topic = format!("test_flush_{}", rand::random::<u16>());
-
-        let pulsar: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await.unwrap();
         let mut consumer: Consumer<String, _> =
             pulsar.consumer().with_topic(&topic).build().await.unwrap();
         let mut producer =
@@ -823,6 +800,35 @@ mod tests {
             publishers.is_empty()
         } else {
             panic!("No publishers in the stats");
+        }
+    }
+
+    #[tokio::test]
+    async fn flush_on_partitioned_topic() {
+        let pulsar = test_utils::new_pulsar().await;
+        let topic = format!("test_flush_on_part_topic_{}", rand::random::<u16>());
+
+        const NUM_PARTITIONS: u32 = 2;
+        test_utils::create_partitioned_topic("public", "default", &topic, NUM_PARTITIONS).await;
+        let mut producer =
+            create_batched_producer(pulsar.clone(), &topic, Some(2), None, None).await;
+        let send_future = producer.send_non_blocking("msg").await.unwrap();
+        producer.send_batch().await.unwrap();
+
+        let msg_id = send_future.await.unwrap().message_id.unwrap();
+        for i in 0..NUM_PARTITIONS {
+            let mut reader = pulsar
+                .reader()
+                .with_topic(format!("{}-partition-{}", topic, i))
+                .build::<String>()
+                .await
+                .unwrap();
+            let last_msg_ids = reader.get_last_message_id().await.unwrap();
+            let last_msg_id = last_msg_ids.first().unwrap();
+            if last_msg_id.ledger_id != u64::MAX && last_msg_id.entry_id != u64::MAX {
+                assert_eq!(last_msg_id.ledger_id, msg_id.ledger_id);
+                assert_eq!(last_msg_id.entry_id, msg_id.entry_id);
+            }
         }
     }
 }
