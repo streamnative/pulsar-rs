@@ -1435,7 +1435,9 @@ mod tests {
     use log::LevelFilter;
 
     use super::*;
-    use crate::{routing_policy::CustomRoutingPolicy, tests::TEST_LOGGER, TokioExecutor};
+    use crate::{
+        routing_policy::CustomRoutingPolicy, test_utils, tests::TEST_LOGGER, TokioExecutor,
+    };
 
     #[test]
     fn send_future_errors_when_sender_dropped() {
@@ -1582,7 +1584,7 @@ mod tests {
             ..Default::default()
         };
         let partition_count = 3;
-        create_partitioned_topic("public", "default", &topic, partition_count).await;
+        test_utils::create_partitioned_topic("public", "default", &topic, partition_count).await;
 
         let mut producer = pulsar
             .producer()
@@ -1652,7 +1654,7 @@ mod tests {
             ..Default::default()
         };
         let partition_count = 3;
-        create_partitioned_topic("public", "default", &topic, partition_count).await;
+        test_utils::create_partitioned_topic("public", "default", &topic, partition_count).await;
 
         let mut producer = pulsar
             .producer()
@@ -1715,7 +1717,7 @@ mod tests {
             ..Default::default()
         };
         let partition_count = 3;
-        create_partitioned_topic("public", "default", &topic, partition_count).await;
+        test_utils::create_partitioned_topic("public", "default", &topic, partition_count).await;
 
         let mut producer = pulsar
             .producer()
@@ -1754,24 +1756,5 @@ mod tests {
 
             assert!(send_receipt.producer_id == producer_id);
         }
-    }
-
-    async fn create_partitioned_topic(
-        tenant: &str,
-        namespace: &str,
-        topic_name: &str,
-        num_partitions: u32,
-    ) {
-        let create_partitioned_topic_url = format!(
-            "http://127.0.0.1:8080/admin/v2/persistent/{tenant}/{namespace}/{topic_name}/partitions"
-        );
-        let client = reqwest::Client::new();
-        let response = client
-            .put(create_partitioned_topic_url)
-            .json(&num_partitions.to_string())
-            .send()
-            .await
-            .unwrap();
-        assert!(response.status().is_success());
     }
 }

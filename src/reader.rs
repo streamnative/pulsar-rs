@@ -184,17 +184,20 @@ impl<T: DeserializeMessage, Exe: Executor> Reader<T, Exe> {
 
 #[cfg(test)]
 mod tests {
-    use crate::consumer::{DeadLetterPolicy, InitialPosition, Message};
-    use crate::proto::MessageIdData;
-    use crate::reader::Reader;
-    use crate::{
-        producer, ConsumerOptions, DeserializeMessage, Error, Executor, Payload, Pulsar,
-        SerializeMessage, SubType, TokioExecutor,
-    };
+    use std::time::Duration;
+
     use futures::StreamExt;
     use serde::{Deserialize, Serialize};
-    use std::time::Duration;
     use tokio::time::timeout;
+
+    use crate::{
+        consumer::{DeadLetterPolicy, InitialPosition, Message},
+        producer,
+        proto::MessageIdData,
+        reader::Reader,
+        ConsumerOptions, DeserializeMessage, Error, Executor, Payload, Pulsar, SerializeMessage,
+        SubType, TokioExecutor,
+    };
 
     #[derive(Serialize, Deserialize)]
     struct TestData {
