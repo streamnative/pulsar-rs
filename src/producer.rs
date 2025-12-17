@@ -1227,6 +1227,12 @@ async fn message_send_loop<Exe>(
                         );
                     }
                 }
+                if counter == 0 {
+                    if let Some(flush_tx) = flush_tx {
+                        let _ = flush_tx.send(());
+                    }
+                    continue;
+                }
 
                 let message = ProducerMessage {
                     payload,
