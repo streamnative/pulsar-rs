@@ -383,7 +383,11 @@ impl<T: 'static + DeserializeMessage, Exe: Executor> Stream for MultiTopicConsum
                             "Unexpected error consuming from pulsar topic {}: {}",
                             &topic, e
                         );
-                        topics_to_remove.push(topic.clone());
+                        // Only remove topic from MultiTopicConsumer on error if they
+                        // can be re-added later by regex
+                        if self.topic_regex.is_some() {
+                            topics_to_remove.push(topic.clone());
+                        }
                     }
                 }
             } else {
