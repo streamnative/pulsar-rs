@@ -1,6 +1,6 @@
 //! Message publication
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{btree_map::Entry, BTreeMap, HashMap, VecDeque},
     io::Write,
     pin::Pin,
     sync::{
@@ -245,20 +245,22 @@ impl<Exe: Executor> MultiTopicProducer<Exe> {
     ) -> Result<SendFuture, Error> {
         let message = T::serialize_message(message)?;
         let topic = topic.into();
-        if !self.producers.contains_key(&topic) {
-            let mut builder = self
-                .client
-                .producer()
-                .with_topic(&topic)
-                .with_options(self.options.clone());
-            if let Some(name) = &self.name {
-                builder = builder.with_name(name.clone());
+        let producer = match self.producers.entry(topic) {
+            Entry::Vacant(entry) => {
+                let mut builder = self
+                    .client
+                    .producer()
+                    .with_topic(entry.key())
+                    .with_options(self.options.clone());
+                if let Some(name) = &self.name {
+                    builder = builder.with_name(name);
+                }
+                let producer = builder.build().await?;
+                entry.insert(producer)
             }
-            let producer = builder.build().await?;
-            self.producers.insert(topic.clone(), producer);
-        }
+            Entry::Occupied(entry) => entry.into_mut(),
+        };
 
-        let producer = self.producers.get_mut(&topic).unwrap();
         producer.send_non_blocking(message).await
     }
 

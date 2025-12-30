@@ -1225,11 +1225,15 @@ impl<Exe: Executor> Connection<Exe> {
                 Some(error.message),
             )),
             Some(Ok(msg)) => {
-                let cmd = msg.command.clone();
-                trace!("received connection response: {:?}", msg);
-                msg.command.connected.ok_or_else(|| {
-                    ConnectionError::Unexpected(format!("Unexpected message from pulsar: {cmd:?}"))
-                })
+                trace!("received connection response: {:?}", &msg);
+                let Some(c) = msg.command.connected else {
+                    return Err(ConnectionError::Unexpected(format!(
+                        "Unexpected message from pulsar: {:?}",
+                        &msg.command
+                    )));
+                };
+
+                Ok(c)
             }
             Some(Err(e)) => Err(e),
             None => Err(ConnectionError::Disconnected),
