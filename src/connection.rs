@@ -973,7 +973,7 @@ impl<Exe: Executor> Connection<Exe> {
                         builder.add_root_certificate(certificate.clone());
                     }
                     builder.danger_accept_invalid_hostnames(
-                        allow_insecure_connection && !tls_hostname_verification_enabled,
+                        allow_insecure_connection || !tls_hostname_verification_enabled,
                     );
                     builder.danger_accept_invalid_certs(allow_insecure_connection);
                     let cx = builder.build()?;
@@ -1084,7 +1084,7 @@ impl<Exe: Executor> Connection<Exe> {
                         connector = connector.add_root_certificate(certificate.clone());
                     }
                     connector = connector.danger_accept_invalid_hostnames(
-                        allow_insecure_connection && !tls_hostname_verification_enabled,
+                        allow_insecure_connection || !tls_hostname_verification_enabled,
                     );
                     connector = connector.danger_accept_invalid_certs(allow_insecure_connection);
                     let stream = connector
