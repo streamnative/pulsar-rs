@@ -194,7 +194,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
                     }),
             )
             .await?;
-            trace!("created {} consumers", consumers.len());
+            info!("created {} consumers", consumers.len());
             Ok(consumers)
         }));
     }
@@ -352,11 +352,9 @@ impl<T: 'static + DeserializeMessage, Exe: Executor> Stream for MultiTopicConsum
             }
         }
 
-        if self.topic_regex.is_some() {
-            if let Poll::Ready(Some(_)) = self.refresh.as_mut().poll_next(cx) {
-                self.update_topics();
-                return self.poll_next(cx);
-            }
+        if let Poll::Ready(Some(_)) = self.refresh.as_mut().poll_next(cx) {
+            self.update_topics();
+            return self.poll_next(cx);
         }
 
         let mut topics_to_remove = Vec::new();
@@ -383,11 +381,7 @@ impl<T: 'static + DeserializeMessage, Exe: Executor> Stream for MultiTopicConsum
                             "Unexpected error consuming from pulsar topic {}: {}",
                             &topic, e
                         );
-                        // Only remove topic from MultiTopicConsumer on error if they
-                        // can be re-added later by regex
-                        if self.topic_regex.is_some() {
-                            topics_to_remove.push(topic.clone());
-                        }
+                        topics_to_remove.push(topic.clone());
                     }
                 }
             } else {
