@@ -118,7 +118,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
         self
     }
 
-    /// Interval for refreshing the topics when using a topic regex. Unused otherwise.
+    /// Interval for refreshing the topics when using a topic regex or when errors occur with a MultiTopicConsumer
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_topic_refresh(mut self, refresh_interval: Duration) -> Self {
         self.topic_refresh = Some(refresh_interval);
