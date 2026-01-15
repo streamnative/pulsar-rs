@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use futures::{channel::oneshot, lock::Mutex};
 use rand::Rng;
@@ -150,7 +154,10 @@ impl Default for TlsOptions {
 }
 
 enum ConnectionStatus<Exe: Executor> {
-    Connected(Arc<Connection<Exe>>),
+    Connected {
+        conn: Arc<Connection<Exe>>,
+        created_at: Instant,
+    },
     Connecting(Vec<oneshot::Sender<Result<Arc<Connection<Exe>>, ConnectionError>>>),
 }
 
@@ -277,19 +284,29 @@ impl<Exe: Executor> ConnectionManager<Exe> {
         &self,
         broker: &BrokerAddress,
     ) -> Result<Arc<Connection<Exe>>, ConnectionError> {
+        trace!("Looking for connection to {}...", broker.url);
         let rx = {
             let mut conns = self.connections.lock().await;
             match conns.get_mut(broker) {
-                None => None,
-                Some(ConnectionStatus::Connected(conn)) => {
+                None => {
+                    trace!("[] no connection for {}", broker.url);
+                    None
+                }
+                Some(ConnectionStatus::Connected { conn, .. }) => {
                     if conn.is_valid() {
+                        trace!("[connected] returning valid connection for {}", broker.url);
                         return Ok(conn.clone());
                     } else {
+                        warn!("[connected] invalid connection for {}", broker.url);
                         None
                     }
                 }
                 Some(ConnectionStatus::Connecting(ref mut v)) => {
                     let (tx, rx) = oneshot::channel();
+                    debug!(
+                        "[connecting...] existing pending connection to {}",
+                        broker.url
+                    );
                     v.push(tx);
                     Some(rx)
                 }
@@ -297,9 +314,15 @@ impl<Exe: Executor> ConnectionManager<Exe> {
         };
 
         match rx {
-            None => self.connect(broker.clone()).await,
+            None => {
+                info!("No existing connection, creating new for {}", broker.url);
+                self.connect(broker.clone()).await
+            }
             Some(rx) => match rx.await {
-                Ok(res) => res,
+                Ok(res) => {
+                    debug!("Connection found for {}", broker.url);
+                    res
+                }
                 Err(_) => Err(ConnectionError::Canceled),
             },
         }
@@ -310,8 +333,6 @@ impl<Exe: Executor> ConnectionManager<Exe> {
         &self,
         broker: &BrokerAddress,
     ) -> Result<Arc<Connection<Exe>>, ConnectionError> {
-        debug!("ConnectionManager::connect({:?})", broker);
-
         let rx = {
             match self
                 .connections
@@ -329,7 +350,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                         Some(rx)
                     }
                 }
-                ConnectionStatus::Connected(_) => None,
+                ConnectionStatus::Connected { .. } => None,
             }
         };
         if let Some(rx) = rx {
@@ -462,6 +483,20 @@ impl<Exe: Executor> ConnectionManager<Exe> {
         let res = self.executor.spawn(Box::pin(async move {
             use crate::futures::StreamExt;
             while let Some(()) = interval.next().await {
+                let Some(strong_conn) = weak_conn.upgrade() else {
+                    debug!(
+                        "connection {} was dropped, stopping keepalive task",
+                        connection_id
+                    );
+                    break;
+                };
+                if !strong_conn.is_valid() {
+                    debug!(
+                        "connection {} is not valid anymore, stopping keepalive task",
+                        connection_id
+                    );
+                    break;
+                }
                 if let Some(url) = proxy_to_broker_url.as_ref() {
                     trace!(
                         "will ping connection {} to {} via proxy {}",
@@ -472,38 +507,26 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                 } else {
                     trace!("will ping connection {} to {}", connection_id, broker_url);
                 }
-                if let Some(strong_conn) = weak_conn.upgrade() {
-                    if !strong_conn.is_valid() {
-                        trace!(
-                            "connection {} is not valid anymore, skip heart beat task",
-                            connection_id
-                        );
-                        break;
-                    }
-                    if let Err(e) = strong_conn.sender().send_ping().await {
-                        error!(
-                            "could not ping connection {} to the server at {}: {}",
-                            connection_id, broker_url, e
-                        );
-                    }
-                } else {
-                    // if the strong pointers were dropped, we can stop the heartbeat for this
-                    // connection
-                    trace!("strong connection was dropped, stopping keepalive task");
-                    break;
+                if let Err(e) = strong_conn.sender().send_ping().await {
+                    error!(
+                        "could not ping connection {} to the server at {}: {}",
+                        connection_id, broker_url, e
+                    );
                 }
             }
         }));
         if res.is_err() {
-            error!("the executor could not spawn the heartbeat future");
+            error!("the executor could not spawn the keepalive future");
             return Err(ConnectionError::Shutdown);
         }
 
-        let old = self
-            .connections
-            .lock()
-            .await
-            .insert(broker, ConnectionStatus::Connected(c.clone()));
+        let old = self.connections.lock().await.insert(
+            broker,
+            ConnectionStatus::Connected {
+                conn: c.clone(),
+                created_at: Instant::now(),
+            },
+        );
         match old {
             Some(ConnectionStatus::Connecting(mut v)) => {
                 //info!("was in connecting state({} waiting)", v.len());
@@ -511,11 +534,11 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                     let _ = tx.send(Ok(c.clone()));
                 }
             }
-            Some(ConnectionStatus::Connected(_)) => {
+            Some(ConnectionStatus::Connected { .. }) => {
                 info!("removing old connection");
             }
             None => {
-                //info!("setting up new connection");
+                debug!("setting up new connection");
             }
         };
 
@@ -529,24 +552,43 @@ impl<Exe: Executor> ConnectionManager<Exe> {
         self.connections
             .lock()
             .await
-            .retain(|_, ref mut connection| match connection {
-                ConnectionStatus::Connecting(_) => true,
-                ConnectionStatus::Connected(conn) => {
-                    // if the manager holds the only reference to that
-                    // connection, we can remove it from the manager
-                    // no need for special synchronization here: we're already
-                    // in a mutex, and a case appears where the Arc is cloned
-                    // somewhere at the same time, that just means the manager
-                    // will create a new connection the next time it is asked
+            .retain(|broker, ref mut connection| match connection {
+                ConnectionStatus::Connecting(_) => {
+                    trace!("Retaining connection in `Connecting` state");
+                    true
+                }
+                ConnectionStatus::Connected { conn, created_at } => {
+                    // Grace period of 5 seconds for newly created connections
+                    // to allow time for consumers/producers to grab a reference
+                    let grace_period = Duration::from_secs(5);
+                    let age = created_at.elapsed();
+                    let in_grace_period = age < grace_period;
                     let strong_count = Arc::strong_count(conn);
-                    trace!(
-                        "checking connection {}, is valid? {}, strong_count {}",
-                        conn.id(),
-                        conn.is_valid(),
-                        strong_count
-                    );
+                    let is_valid = conn.is_valid();
 
-                    conn.is_valid() && strong_count > 1
+                    // Keep connection if valid AND (someone is using it OR it's new)
+                    let should_retain = is_valid && (strong_count > 1 || in_grace_period);
+
+                    trace!(
+                        "checking broker {} connection {}, is_valid: {}, strong_count: {}, age: {:?}, in_grace_period: {}",
+                        broker.url,
+                        conn.id(),
+                        is_valid,
+                        strong_count,
+                        age,
+                        in_grace_period
+                    );
+                    if !should_retain {
+                        info!(
+                            "Removing {} connection {} to {} (strong_count: {}, age: {:?})",
+                            if is_valid { "unused" } else { "invalid" },
+                            conn.id(),
+                            broker.url,
+                            strong_count,
+                            age
+                        );
+                    }
+                    should_retain
                 }
             });
     }
