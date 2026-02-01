@@ -194,7 +194,14 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
                     }),
             )
             .await?;
-            info!("created {} consumers", consumers.len());
+            if !consumers.is_empty() {
+                let topics: Vec<String> = consumers.iter().map(|c| c.topic()).collect();
+                info!(
+                    "recreated {} consumers for topics: {:?}",
+                    consumers.len(),
+                    topics
+                );
+            }
             Ok(consumers)
         }));
     }
