@@ -215,7 +215,7 @@ impl fmt::Display for ConnectionError {
                 feature = "async-std-rustls-runtime-ring",
             ))]
             ConnectionError::DnsName(e) => write!(f, "Error resolving hostname: {e}"),
-            ConnectionError::Authentication(e) => write!(f, "Error authentication: {e}"),
+            ConnectionError::Authentication(e) => write!(f, "Authentication error: {e}"),
             ConnectionError::UnexpectedResponse(e) => {
                 write!(f, "Unexpected response from pulsar: {e}")
             }
@@ -464,7 +464,7 @@ impl fmt::Display for AuthenticationError {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            AuthenticationError::Custom(m) => write!(f, "authentication error [{m}]"),
+            AuthenticationError::Custom(m) => write!(f, "{m}"),
         }
     }
 }
