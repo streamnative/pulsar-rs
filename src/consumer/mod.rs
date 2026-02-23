@@ -28,7 +28,7 @@ use futures::{
 pub use initial_position::InitialPosition;
 pub use message::Message;
 use multi::MultiTopicConsumer;
-pub use options::ConsumerOptions;
+pub use options::{BrokerConfigOptions, ConsumerOptions};
 pub use topic::TopicConsumer;
 use url::Url;
 

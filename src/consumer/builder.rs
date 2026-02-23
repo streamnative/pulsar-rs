@@ -9,8 +9,12 @@ use regex::Regex;
 
 use crate::{
     consumer::{
-        config::ConsumerConfig, data::DeadLetterPolicy, multi::MultiTopicConsumer,
-        options::ConsumerOptions, topic::TopicConsumer, InnerConsumer,
+        config::ConsumerConfig,
+        data::DeadLetterPolicy,
+        multi::MultiTopicConsumer,
+        options::{BrokerConfigOptions, ConsumerOptions},
+        topic::TopicConsumer,
+        InnerConsumer,
     },
     message::proto::command_subscribe::SubType,
     reader::{Reader, State},
@@ -35,6 +39,10 @@ pub struct ConsumerBuilder<Exe: Executor> {
     consumer_options: Option<ConsumerOptions>,
     namespace: Option<String>,
     topic_refresh: Option<Duration>,
+    /// Broker-side topic policy options applied via the admin API after
+    /// subscription. See [`BrokerConfigOptions`].
+    #[cfg_attr(not(feature = "admin-api"), allow(dead_code))]
+    broker_config: Option<BrokerConfigOptions>,
 }
 
 impl<Exe: Executor> ConsumerBuilder<Exe> {
@@ -56,6 +64,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
             consumer_options: None,
             namespace: None,
             topic_refresh: None,
+            broker_config: None,
         }
     }
 
@@ -174,6 +183,25 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
         self
     }
 
+    /// Sets broker-side topic policies that are applied automatically via the
+    /// Pulsar Admin REST API immediately after subscription succeeds.
+    ///
+    /// This requires:
+    ///
+    /// 1. The `admin-api` feature to be enabled.
+    /// 2. [`PulsarBuilder::with_admin_url`][crate::PulsarBuilder::with_admin_url]
+    ///    to have been called when building the [`Pulsar`][crate::Pulsar] client.
+    /// 3. `topicLevelPoliciesEnabled=true` in the broker configuration.
+    ///
+    /// For regex-based consumers the admin call is skipped because the topic
+    /// list is not known until runtime.
+    #[cfg(feature = "admin-api")]
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn with_broker_config(mut self, config: BrokerConfigOptions) -> Self {
+        self.broker_config = Some(config);
+        self
+    }
+
     // Checks the builder for inconsistencies
     // returns a config and a list of topics with associated brokers
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
@@ -192,6 +220,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
             dead_letter_policy,
             namespace: _,
             topic_refresh: _,
+            broker_config: _,
         } = self;
 
         if consumer_name.is_none() {
@@ -276,6 +305,29 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
             TopicConsumer::new(self.pulsar.clone(), topic, addr, config.clone())
         }))
         .await?;
+
+        // Apply broker-side topic policies via admin API if configured.
+        // We use `self.topics` (the original, pre-partition-expansion list) so
+        // that the policy is set on the base topic rather than on individual
+        // partition sub-topics. Regex consumers are skipped because topics are
+        // not known until runtime.
+        #[cfg(feature = "admin-api")]
+        if let (Some(ref broker_config), Some(ref admin_url), Some(ref topics)) =
+            (&self.broker_config, &self.pulsar.admin_url, &self.topics)
+        {
+            let admin = crate::admin::AdminClient::new(
+                admin_url.clone(),
+                &self.pulsar.manager.tls_options,
+                self.pulsar.manager.auth.clone(),
+            )?;
+            for topic in topics {
+                if let Some(max_unacked) = broker_config.max_unacked_messages_per_consumer {
+                    admin
+                        .set_max_unacked_messages_per_consumer(topic, max_unacked)
+                        .await?;
+                }
+            }
+        }
 
         let consumer = if consumers.len() == 1 {
             let consumer = consumers.into_iter().next().unwrap();

@@ -18,6 +18,8 @@ pub enum Error {
     Authentication(AuthenticationError),
     Custom(String),
     Executor,
+    #[cfg(feature = "admin-api")]
+    Admin(AdminError),
 }
 
 impl From<ConnectionError> for Error {
@@ -59,6 +61,8 @@ impl fmt::Display for Error {
             Error::Authentication(e) => write!(f, "authentication error: {e}"),
             Error::Custom(e) => write!(f, "error: {e}"),
             Error::Executor => write!(f, "could not spawn task"),
+            #[cfg(feature = "admin-api")]
+            Error::Admin(e) => write!(f, "admin error: {e}"),
         }
     }
 }
@@ -74,6 +78,8 @@ impl std::error::Error for Error {
             Error::Authentication(e) => e.source(),
             Error::Custom(_) => None,
             Error::Executor => None,
+            #[cfg(feature = "admin-api")]
+            Error::Admin(e) => Some(e),
         }
     }
 }
@@ -470,6 +476,47 @@ impl fmt::Display for AuthenticationError {
 }
 
 impl std::error::Error for AuthenticationError {}
+
+#[cfg(feature = "admin-api")]
+#[derive(Debug)]
+pub enum AdminError {
+    /// The HTTP request to the Pulsar admin API failed
+    Request(reqwest::Error),
+    /// The Pulsar admin API returned a non-2xx HTTP status
+    Http { status: u16, body: String },
+    /// The topic string could not be parsed
+    InvalidTopic(String),
+}
+
+#[cfg(feature = "admin-api")]
+impl fmt::Display for AdminError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            AdminError::Request(e) => write!(f, "HTTP request failed: {e}"),
+            AdminError::Http { status, body } => {
+                write!(f, "admin API returned HTTP {status}: {body}")
+            }
+            AdminError::InvalidTopic(t) => write!(f, "invalid topic URL: {t}"),
+        }
+    }
+}
+
+#[cfg(feature = "admin-api")]
+impl std::error::Error for AdminError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            AdminError::Request(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(feature = "admin-api")]
+impl From<AdminError> for Error {
+    fn from(err: AdminError) -> Self {
+        Error::Admin(err)
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct SharedError {

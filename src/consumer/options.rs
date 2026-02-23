@@ -35,6 +35,24 @@ pub struct ConsumerOptions {
     pub initial_position: InitialPosition,
 }
 
+/// Broker-side topic policy options applied via the Pulsar Admin REST API
+/// after consumer subscription.
+///
+/// Pass to [`ConsumerBuilder::with_broker_config`][crate::ConsumerBuilder::with_broker_config].
+/// Requires the `admin-api` feature and
+/// [`PulsarBuilder::with_admin_url`][crate::PulsarBuilder::with_admin_url] to
+/// be set on the [`Pulsar`][crate::Pulsar] client.
+///
+/// Additional broker settings can be added to this struct in the future
+/// without changing the consumer builder API.
+#[derive(Clone, Default, Debug)]
+pub struct BrokerConfigOptions {
+    /// Maximum number of unacknowledged messages per consumer.
+    ///
+    /// Maps to `maxUnackedMessagesOnConsumer` in the Pulsar Admin REST API.
+    pub max_unacked_messages_per_consumer: Option<u32>,
+}
+
 impl ConsumerOptions {
     /// within options, sets the priority level
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]

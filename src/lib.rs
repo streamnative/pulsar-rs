@@ -185,12 +185,14 @@ compile_error!("You have selected both features \"async-std-rustls-runtime-ring\
 ))]
 compile_error!("You have selected both features \"async-std-rustls-runtime-aws-lc-rs\" and \"async-std-rustls-runtime-ring\" which are exclusive, please choose one of them");
 
+#[cfg(feature = "admin-api")]
+pub use admin::AdminClient;
 pub use client::{DeserializeMessage, Pulsar, PulsarBuilder, SerializeMessage};
 pub use connection::Authentication;
 pub use connection_manager::{
     BrokerAddress, ConnectionRetryOptions, OperationRetryOptions, TlsOptions,
 };
-pub use consumer::{Consumer, ConsumerBuilder, ConsumerOptions};
+pub use consumer::{BrokerConfigOptions, Consumer, ConsumerBuilder, ConsumerOptions};
 pub use error::Error;
 #[cfg(any(
     feature = "async-std-runtime",
@@ -211,6 +213,8 @@ pub use message::{
 };
 pub use producer::{MultiTopicProducer, Producer, ProducerOptions};
 
+#[cfg(feature = "admin-api")]
+pub mod admin;
 pub mod authentication;
 mod client;
 pub mod compression;
@@ -801,6 +805,48 @@ mod tests {
         } else {
             panic!("No publishers in the stats");
         }
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "admin-api")]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
+    async fn consumer_builder_sets_max_unacked_via_admin() {
+        let pulsar = Pulsar::builder("pulsar://127.0.0.1:6650", TokioExecutor)
+            .with_admin_url("http://127.0.0.1:8080")
+            .build()
+            .await
+            .unwrap();
+
+        let topic_name = format!("test_builder_unacked_{}", rand::random::<u16>());
+        let topic = format!("persistent://public/default/{topic_name}");
+
+        // The consumer builder applies the policy automatically after subscribing.
+        let _consumer: Consumer<TestData, _> = pulsar
+            .consumer()
+            .with_topic(&topic)
+            .with_consumer_name("builder_admin_consumer")
+            .with_subscription_type(SubType::Exclusive)
+            .with_subscription("builder_admin_sub")
+            .with_broker_config(BrokerConfigOptions {
+                max_unacked_messages_per_consumer: Some(200),
+            })
+            .build()
+            .await
+            .unwrap();
+
+        // Verify the broker stored it.
+        let verify_url = format!(
+            "http://127.0.0.1:8080/admin/v2/persistent/public/default\
+             /{topic_name}/maxUnackedMessagesOnConsumer"
+        );
+        let resp = reqwest::get(&verify_url).await.unwrap();
+        assert!(resp.status().is_success());
+        let value: u32 = resp.json().await.unwrap();
+        assert_eq!(value, 200);
     }
 
     #[tokio::test]

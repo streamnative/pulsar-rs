@@ -39,6 +39,7 @@ pem = "^3.0.4"
 prost = "^0.13.4"
 prost-derive = "^0.13.4"
 rand = "^0.8.5"
+reqwest = { version = "0.13", optional = true, default-features = false }
 regex = "^1.11.1"
 rustls = { version = "^0.23.27", default-features = false, features = ["log", "std"] , optional = true }
 snap = { version = "^1.1.1", optional = true }
@@ -60,7 +61,7 @@ serde = { version = "^1.0.216", features = ["derive"] }
 serde_json = "^1.0.133"
 tokio = { version = "^1.42.0", features = ["macros", "rt-multi-thread"] }
 assert_matches = "1.5.0"
-reqwest = { version = "0.12.23", features = ["json"] }
+reqwest = { version = "0.13", features = ["json"] }
 
 [build-dependencies]
 prost-build = "^0.13.4"
@@ -75,6 +76,7 @@ auth-oauth2 = ["openidconnect", "oauth2", "serde", "serde_json", "data-url"]
 compression = ["lz4", "flate2", "zstd", "snap"]
 default = ["compression", "tokio-runtime", "async-std-runtime", "auth-oauth2"]
 protobuf-src = ["dep:protobuf-src"]
+admin-api = ["dep:reqwest", "reqwest/native-tls"]
 telemetry = ["tracing"]
 tokio-runtime = ["tokio", "tokio-util", "native-tls", "tokio-native-tls"]
 tokio-rustls-runtime = ["tokio-rustls-runtime-aws-lc-rs"]

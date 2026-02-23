@@ -25,7 +25,7 @@ jobs:
         run: cargo build --features protobuf-src
 
       - name: Clippy (feature set A)
-        run: cargo clippy --tests --features telemetry,protobuf-src -- -D warnings
+        run: cargo clippy --tests --features telemetry,protobuf-src,admin-api -- -D warnings
 
       - name: Clippy (feature set B)
         run: cargo clippy --tests --no-default-features --features compression,tokio-rustls-runtime,async-std-rustls-runtime,auth-oauth2,telemetry,protobuf-src -- -D warnings
@@ -55,6 +55,7 @@ jobs:
             -e PULSAR_PREFIX_advertisedListeners=pulsar://127.0.0.1:6650 \
             -e PULSAR_PREFIX_brokerServicePort=6650 \
             -e PULSAR_PREFIX_webServicePort=8080 \
+            -e PULSAR_PREFIX_topicLevelPoliciesEnabled=true \
             apachepulsar/pulsar:${{ matrix.pulsar-version }} \
             bin/pulsar standalone
 
@@ -89,7 +90,7 @@ jobs:
           RUST_BACKTRACE: 1
           RUST_LOG: pulsar=debug
           RUST_TEST_THREADS: 1
-        run: cargo test --features protobuf-src -- --nocapture
+        run: cargo test --features protobuf-src,admin-api -- --nocapture
 
       - name: Dump Pulsar logs on failure
         if: failure()
