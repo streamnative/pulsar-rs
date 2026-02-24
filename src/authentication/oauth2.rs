@@ -13,7 +13,7 @@ use oauth2::{
     basic::{BasicClient, BasicTokenResponse},
     reqwest,
     AuthType::RequestBody,
-    AuthUrl, ClientId, ClientSecret, Scope, TokenResponse, TokenUrl,
+    AuthUrl, ClientId, ClientSecret, RequestTokenError, Scope, TokenResponse, TokenUrl,
 };
 use openidconnect::{core::CoreProviderMetadata, IssuerUrl};
 use serde::Deserialize;
@@ -206,6 +206,9 @@ impl Authentication for OAuth2Authentication {
                     if none_or_expired {
                         // invalidate the expired token
                         self.token = None;
+                        if let Some(auth_err) = e.downcast_ref::<AuthenticationError>() {
+                            return Err(auth_err.clone());
+                        }
                         return Err(AuthenticationError::Custom(format!(
                             "failed to fetch OAuth2 access token for issuer [{}] (audience={:?}, scope={:?}): {e}",
                             self.params.issuer_url,
@@ -288,10 +291,15 @@ impl OAuth2Authentication {
 
         let client = reqwest::Client::new();
         let token = request.request_async(&client).await.map_err(|e| {
-            format!(
+            let error_message = format!(
                 "token endpoint request failed for issuer [{}] (audience={:?}, scope={:?}): {e:?}",
                 self.params.issuer_url, self.params.audience, self.params.scope
-            )
+            );
+            if let RequestTokenError::Request(_) = e {
+                AuthenticationError::Retriable(error_message)
+            } else {
+                AuthenticationError::Custom(error_message)
+            }
         })?;
         debug!("Got a new oauth2 token for [{}]", self.params);
         Ok(token)
@@ -300,7 +308,15 @@ impl OAuth2Authentication {
 
 #[cfg(test)]
 mod tests {
-    use crate::authentication::oauth2::OAuth2Params;
+    use oauth2::TokenUrl;
+
+    use crate::{
+        authentication::{
+            oauth2::{OAuth2Authentication, OAuth2Params, OAuth2PrivateParams},
+            Authentication,
+        },
+        error::{AuthenticationError, ConnectionError},
+    };
 
     #[test]
     fn parse_data_url() {
@@ -315,5 +331,40 @@ mod tests {
         assert_eq!(private_params.client_secret, "client-secret");
         assert_eq!(private_params.client_email, None);
         assert_eq!(private_params.issuer_url, None);
+    }
+
+    #[tokio::test]
+    async fn auth_data_returns_retriable_on_request_error() {
+        let params = OAuth2Params {
+            issuer_url: "http://issuer.example".to_string(),
+            credentials_url: "data:application/json;base64,eyJjbGllbnRfaWQiOiJpZCIsImNsaWVudF9zZWNyZXQiOiJzZWNyZXQifQ==".to_string(),
+            audience: None,
+            scope: None,
+        };
+
+        let private_params = OAuth2PrivateParams {
+            client_id: "id".to_string(),
+            client_secret: "secret".to_string(),
+            client_email: None,
+            issuer_url: None,
+        };
+
+        let token_url = TokenUrl::new("http://127.0.0.1:1/token".to_string()).unwrap();
+
+        let mut auth = OAuth2Authentication {
+            params,
+            private_params: Some(private_params),
+            token_url: Some(token_url),
+            token: None,
+        };
+
+        let err = auth.auth_data().await.unwrap_err();
+        match err {
+            AuthenticationError::Retriable(ref _e) => {
+                let err: ConnectionError = err.into();
+                assert!(err.establish_retryable());
+            }
+            other => panic!("expected retriable error, got {other:?}"),
+        }
     }
 }
