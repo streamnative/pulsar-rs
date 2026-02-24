@@ -333,7 +333,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auth_data_returns_retriable_on_request_error() {
+    async fn auth_data_returns_retriable_error() {
         let params = OAuth2Params {
             issuer_url: "http://issuer.example".to_string(),
             credentials_url: "data:application/json;base64,eyJjbGllbnRfaWQiOiJpZCIsImNsaWVudF9zZWNyZXQiOiJzZWNyZXQifQ==".to_string(),
