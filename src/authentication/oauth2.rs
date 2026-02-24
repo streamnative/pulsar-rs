@@ -102,6 +102,16 @@ impl OAuth2Authentication {
             token: None,
         })
     }
+
+    fn credentials_hint(&self) -> String {
+        match Url::parse(self.params.credentials_url.as_str()) {
+            Ok(url) => match url.scheme() {
+                "file" => format!("file:{}", url.path()),
+                scheme => format!("{scheme}:<redacted>"),
+            },
+            Err(_) => String::from("<invalid credentials_url>"),
+        }
+    }
 }
 
 impl OAuth2Params {
@@ -156,10 +166,18 @@ impl Authentication for OAuth2Authentication {
     async fn initialize(&mut self) -> Result<(), AuthenticationError> {
         match self.params.read_private_params() {
             Ok(private_params) => self.private_params = Some(private_params),
-            Err(e) => return Err(AuthenticationError::Custom(e.to_string())),
+            Err(e) => {
+                return Err(AuthenticationError::Custom(format!(
+                    "failed to read OAuth2 credentials from {}: {e}",
+                    self.credentials_hint()
+                )));
+            }
         }
         if let Err(e) = self.token_url().await {
-            return Err(AuthenticationError::Custom(e.to_string()));
+            return Err(AuthenticationError::Custom(format!(
+                "failed to discover OAuth2 token endpoint for issuer [{}]: {e}",
+                self.params.issuer_url
+            )));
         }
         Ok(())
     }
@@ -188,11 +206,18 @@ impl Authentication for OAuth2Authentication {
                     if none_or_expired {
                         // invalidate the expired token
                         self.token = None;
-                        return Err(AuthenticationError::Custom(e.to_string()));
+                        return Err(AuthenticationError::Custom(format!(
+                            "failed to fetch OAuth2 access token for issuer [{}] (audience={:?}, scope={:?}): {e}",
+                            self.params.issuer_url,
+                            self.params.audience,
+                            self.params.scope
+                        )));
                     } else {
                         warn!(
-                            "failed to get a new token for [{}], use the existing one for now",
-                            self.params
+                            "failed to refresh OAuth2 token for issuer [{}] (audience={:?}, scope={:?}): {e}. Using existing non-expired token",
+                            self.params.issuer_url,
+                            self.params.audience,
+                            self.params.scope
                         );
                     }
                 }
@@ -262,7 +287,12 @@ impl OAuth2Authentication {
         }
 
         let client = reqwest::Client::new();
-        let token = request.request_async(&client).await?;
+        let token = request.request_async(&client).await.map_err(|e| {
+            format!(
+                "token endpoint request failed for issuer [{}] (audience={:?}, scope={:?}): {e:?}",
+                self.params.issuer_url, self.params.audience, self.params.scope
+            )
+        })?;
         debug!("Got a new oauth2 token for [{}]", self.params);
         Ok(token)
     }
