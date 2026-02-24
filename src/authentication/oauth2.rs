@@ -295,10 +295,10 @@ impl OAuth2Authentication {
                 "token endpoint request failed for issuer [{}] (audience={:?}, scope={:?}): {e:?}",
                 self.params.issuer_url, self.params.audience, self.params.scope
             );
-            if let RequestTokenError::Request(_) = e {
-                AuthenticationError::Retriable(error_message)
-            } else {
+            if let RequestTokenError::ServerResponse(_) = e {
                 AuthenticationError::Custom(error_message)
+            } else {
+                AuthenticationError::Retriable(error_message)
             }
         })?;
         debug!("Got a new oauth2 token for [{}]", self.params);
