@@ -120,6 +120,7 @@ impl ConnectionError {
             ConnectionError::Io(e) => {
                 e.kind() == io::ErrorKind::ConnectionRefused || e.kind() == io::ErrorKind::TimedOut
             }
+            ConnectionError::Authentication(AuthenticationError::Retriable(_)) => true,
             _ => false,
         }
     }
@@ -458,6 +459,7 @@ impl std::error::Error for ServiceDiscoveryError {
 #[derive(Clone, Debug)]
 pub enum AuthenticationError {
     Custom(String),
+    Retriable(String),
 }
 
 impl fmt::Display for AuthenticationError {
@@ -465,6 +467,7 @@ impl fmt::Display for AuthenticationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             AuthenticationError::Custom(m) => write!(f, "{m}"),
+            AuthenticationError::Retriable(m) => write!(f, "{m} (retriable)"),
         }
     }
 }

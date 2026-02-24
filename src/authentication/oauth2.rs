@@ -13,7 +13,7 @@ use oauth2::{
     basic::{BasicClient, BasicTokenResponse},
     reqwest,
     AuthType::RequestBody,
-    AuthUrl, ClientId, ClientSecret, Scope, TokenResponse, TokenUrl,
+    AuthUrl, ClientId, ClientSecret, RequestTokenError, Scope, TokenResponse, TokenUrl,
 };
 use openidconnect::{core::CoreProviderMetadata, IssuerUrl};
 use serde::Deserialize;
@@ -21,7 +21,7 @@ use url::Url;
 
 use crate::{authentication::Authentication, error::AuthenticationError};
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 struct OAuth2PrivateParams {
     client_id: String,
     client_secret: String,
@@ -30,7 +30,7 @@ struct OAuth2PrivateParams {
     issuer_url: Option<String>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct OAuth2Params {
     pub issuer_url: String,
     pub credentials_url: String,
@@ -206,6 +206,9 @@ impl Authentication for OAuth2Authentication {
                     if none_or_expired {
                         // invalidate the expired token
                         self.token = None;
+                        if let Some(auth_err) = e.downcast_ref::<AuthenticationError>() {
+                            return Err(auth_err.clone());
+                        }
                         return Err(AuthenticationError::Custom(format!(
                             "failed to fetch OAuth2 access token for issuer [{}] (audience={:?}, scope={:?}): {e}",
                             self.params.issuer_url,
@@ -229,9 +232,9 @@ impl Authentication for OAuth2Authentication {
 
 impl OAuth2Authentication {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    async fn token_url(&mut self) -> Result<Option<TokenUrl>, Box<dyn std::error::Error>> {
+    async fn token_url(&mut self) -> Result<TokenUrl, Box<dyn std::error::Error>> {
         match &self.token_url {
-            Some(url) => Ok(Some(url.clone())),
+            Some(url) => Ok(url.clone()),
             None => {
                 let client = reqwest::Client::new();
                 let metadata = CoreProviderMetadata::discover_async(
@@ -241,13 +244,9 @@ impl OAuth2Authentication {
                 .await?;
                 if let Some(token_endpoint) = metadata.token_endpoint() {
                     self.token_url = Some(token_endpoint.clone());
+                    return Ok(token_endpoint.clone());
                 } else {
                     return Err(Box::from("token url not exists"));
-                }
-
-                match metadata.token_endpoint() {
-                    Some(endpoint) => Ok(Some(endpoint.clone())),
-                    None => Err(Box::from("token endpoint is unavailable")),
                 }
             }
         }
@@ -255,6 +254,13 @@ impl OAuth2Authentication {
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn fetch_token(&mut self) -> Result<BasicTokenResponse, Box<dyn std::error::Error>> {
+        let token_url = self.token_url().await.map_err(|e| {
+            AuthenticationError::Retriable(format!(
+                "failed to discover OAuth2 token endpoint for issuer [{}]: {e}",
+                self.params.issuer_url
+            ))
+        })?;
+
         let private_params = self
             .private_params
             .as_ref()
@@ -269,11 +275,7 @@ impl OAuth2Authentication {
         let client = BasicClient::new(ClientId::new(private_params.client_id.clone()))
             .set_client_secret(ClientSecret::new(private_params.client_secret.clone()))
             .set_auth_uri(AuthUrl::from_url(Url::parse(issuer_url)?))
-            .set_token_uri(
-                self.token_url()
-                    .await?
-                    .ok_or_else(|| "token endpoint is unavailable".to_string())?,
-            )
+            .set_token_uri(token_url)
             .set_auth_type(RequestBody);
 
         let mut request = client.exchange_client_credentials();
@@ -288,10 +290,15 @@ impl OAuth2Authentication {
 
         let client = reqwest::Client::new();
         let token = request.request_async(&client).await.map_err(|e| {
-            format!(
+            let error_message = format!(
                 "token endpoint request failed for issuer [{}] (audience={:?}, scope={:?}): {e:?}",
                 self.params.issuer_url, self.params.audience, self.params.scope
-            )
+            );
+            if let RequestTokenError::ServerResponse(_) = e {
+                AuthenticationError::Custom(error_message)
+            } else {
+                AuthenticationError::Retriable(error_message)
+            }
         })?;
         debug!("Got a new oauth2 token for [{}]", self.params);
         Ok(token)
@@ -300,7 +307,15 @@ impl OAuth2Authentication {
 
 #[cfg(test)]
 mod tests {
-    use crate::authentication::oauth2::OAuth2Params;
+    use oauth2::TokenUrl;
+
+    use crate::{
+        authentication::{
+            oauth2::{OAuth2Authentication, OAuth2Params, OAuth2PrivateParams},
+            Authentication,
+        },
+        error::{AuthenticationError, ConnectionError},
+    };
 
     #[test]
     fn parse_data_url() {
@@ -315,5 +330,48 @@ mod tests {
         assert_eq!(private_params.client_secret, "client-secret");
         assert_eq!(private_params.client_email, None);
         assert_eq!(private_params.issuer_url, None);
+    }
+
+    #[tokio::test]
+    async fn auth_data_returns_retriable_error() {
+        let params = OAuth2Params {
+            issuer_url: "http://issuer.example".to_string(),
+            credentials_url: "data:application/json;base64,eyJjbGllbnRfaWQiOiJpZCIsImNsaWVudF9zZWNyZXQiOiJzZWNyZXQifQ==".to_string(),
+            audience: None,
+            scope: None,
+        };
+
+        let private_params = OAuth2PrivateParams {
+            client_id: "id".to_string(),
+            client_secret: "secret".to_string(),
+            client_email: None,
+            issuer_url: None,
+        };
+
+        let assert_retriable_error = |err| match err {
+            AuthenticationError::Retriable(_) => {
+                let err: ConnectionError = err.into();
+                assert!(err.establish_retryable());
+            }
+            other => panic!("expected retriable error, got {other:?}"),
+        };
+
+        let mut auth = OAuth2Authentication {
+            params: params.clone(),
+            private_params: Some(private_params.clone()),
+            token_url: None, // token_url is not set to trigger discovery
+            token: None,
+        };
+        assert_retriable_error(auth.auth_data().await.unwrap_err());
+
+        let token_url = TokenUrl::new("http://127.0.0.1:1/token".to_string()).unwrap();
+
+        let mut auth = OAuth2Authentication {
+            params,
+            private_params: Some(private_params),
+            token_url: Some(token_url),
+            token: None,
+        };
+        assert_retriable_error(auth.auth_data().await.unwrap_err());
     }
 }
