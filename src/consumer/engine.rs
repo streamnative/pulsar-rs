@@ -22,6 +22,7 @@ use crate::{
         proto::{command_subscribe::SubType, MessageIdData},
         Message as RawMessage,
     },
+    producer::Message,
     proto,
     proto::{BaseCommand, CommandCloseConsumer, CommandMessage},
     retry_op::retry_subscribe_consumer,
@@ -542,8 +543,21 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                     if redelivery_count as usize >= dead_letter_policy.max_redeliver_count =>
                 {
                     // Send message to Dead Letter Topic and ack message in original topic
+                    let Payload { data, metadata } = payload;
+                    let message = Message {
+                        payload: data,
+                        properties: metadata
+                            .properties
+                            .into_iter()
+                            .map(|p| (p.key, p.value))
+                            .collect(),
+                        partition_key: metadata.partition_key,
+                        ordering_key: metadata.ordering_key,
+                        event_time: metadata.event_time,
+                        ..Default::default()
+                    };
                     self.client
-                        .send(&dead_letter_policy.dead_letter_topic, payload.data)
+                        .send(&dead_letter_policy.dead_letter_topic, message)
                         .await?
                         .await
                         .map_err(|e| {
