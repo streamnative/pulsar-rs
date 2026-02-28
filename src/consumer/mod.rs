@@ -426,7 +426,7 @@ impl<T: DeserializeMessage + 'static, Exe: Executor> Stream for Consumer<T, Exe>
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::HashSet,
+        collections::{HashMap, HashSet},
         iter,
         time::{SystemTime, UNIX_EPOCH},
     };
@@ -460,6 +460,14 @@ mod tests {
     pub struct TestData {
         topic: String,
         msg: u32,
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct TestMessageMetadata {
+        properties: HashMap<String, String>,
+        partition_key: Option<String>,
+        ordering_key: Option<Vec<u8>>,
+        event_time: Option<u64>,
     }
 
     impl SerializeMessage for &TestData {
@@ -842,10 +850,25 @@ mod tests {
         let topic = format!("dead_letter_queue_test_{test_id}");
         let test_msg: u32 = rand::random();
 
-        let message = TestData {
+        let message_data = TestData {
             topic: topic.clone(),
             msg: test_msg,
         };
+        let message_metadata = TestMessageMetadata {
+            properties: HashMap::from([
+                ("k_1".to_string(), "v_1".to_string()),
+                ("k_2".to_string(), "v_2".to_string()),
+            ]),
+            partition_key: Some("partition_key".to_string()),
+            ordering_key: Some(b"ordering_key".to_vec()),
+            event_time: Some(rand::random()),
+        };
+
+        let mut message = <&TestData>::serialize_message(&message_data).unwrap();
+        message.properties = message_metadata.properties.clone();
+        message.partition_key = message_metadata.partition_key.clone();
+        message.ordering_key = message_metadata.ordering_key.clone();
+        message.event_time = message_metadata.event_time;
 
         let dead_letter_topic = format!("{topic}_dlq");
 
@@ -882,7 +905,7 @@ mod tests {
 
         println!("created second consumer");
 
-        client.send(&topic, &message).await.unwrap().await.unwrap();
+        client.send(&topic, message).await.unwrap().await.unwrap();
         println!("producer sends done");
 
         let msg = recv_within(&mut consumer, DEFAULT_RECV_TIMEOUT)
@@ -891,7 +914,7 @@ mod tests {
 
         println!("got message: {:?}", msg.payload);
         assert_eq!(
-            message,
+            message_data,
             msg.deserialize().unwrap(),
             "we probably received a message from a previous run of the test"
         );
@@ -902,11 +925,50 @@ mod tests {
             .await
             .unwrap();
 
-        println!("got message: {:?}", msg.payload);
+        println!("got message: {:?}", dlq_msg.payload);
         assert_eq!(
-            message,
+            message_data,
             dlq_msg.deserialize().unwrap(),
             "we probably received a message from a previous run of the test"
+        );
+        let mut expected_properties = message_metadata.properties;
+        expected_properties
+            .entry("REAL_TOPIC".to_string())
+            .or_insert_with(|| topic.clone());
+        expected_properties
+            .entry("ORIGIN_MESSAGE_ID".to_string())
+            .or_insert_with(|| {
+                format!(
+                    "{}:{}:{}",
+                    msg.message_id().ledger_id,
+                    msg.message_id().entry_id,
+                    msg.message_id().partition.unwrap_or(-1)
+                )
+            });
+        assert_eq!(
+            expected_properties,
+            dlq_msg
+                .metadata()
+                .properties
+                .iter()
+                .map(|p| (p.key.clone(), p.value.clone()))
+                .collect::<HashMap<_, _>>(),
+            "message properties should be preserved when the message is sent to the DLQ"
+        );
+        assert_eq!(
+            message_metadata.partition_key,
+            dlq_msg.metadata().partition_key,
+            "message partition key should be preserved when the message is sent to the DLQ"
+        );
+        assert_eq!(
+            message_metadata.ordering_key,
+            dlq_msg.metadata().ordering_key,
+            "message ordering key should be preserved when the message is sent to the DLQ"
+        );
+        assert_eq!(
+            message_metadata.event_time,
+            dlq_msg.metadata().event_time,
+            "message event time should be preserved when the message is sent to the DLQ"
         );
         dlq_consumer.ack(&dlq_msg).await.unwrap();
     }
@@ -973,28 +1035,61 @@ mod tests {
             .await
             .unwrap();
 
-        let messages = vec![
-            TestData {
-                topic: topic.clone(),
-                msg: rand::random(),
-            },
-            TestData {
-                topic: topic.clone(),
-                msg: rand::random(),
-            },
+        let message_datas = vec![
+            (
+                TestData {
+                    topic: topic.clone(),
+                    msg: rand::random(),
+                },
+                TestMessageMetadata {
+                    properties: HashMap::from([
+                        ("k_1_1".to_string(), "v_1_1".to_string()),
+                        ("k_2_1".to_string(), "v_2_1".to_string()),
+                    ]),
+                    partition_key: Some("partition_key_1".to_string()),
+                    ordering_key: Some(b"ordering_key_1".to_vec()),
+                    event_time: Some(rand::random()),
+                },
+            ),
+            (
+                TestData {
+                    topic: topic.clone(),
+                    msg: rand::random(),
+                },
+                TestMessageMetadata {
+                    properties: HashMap::from([
+                        ("k_1_2".to_string(), "v_1_2".to_string()),
+                        ("k_2_2".to_string(), "v_2_2".to_string()),
+                    ]),
+                    partition_key: Some("partition_key_2".to_string()),
+                    ordering_key: Some(b"ordering_key_2".to_vec()),
+                    event_time: Some(rand::random()),
+                },
+            ),
         ];
-        let receipts = producer.send_all(&messages).await.unwrap();
+        let messages = message_datas
+            .iter()
+            .map(|(data, metadata)| {
+                let mut message = <&TestData>::serialize_message(data).unwrap();
+                message.properties = metadata.properties.clone();
+                message.partition_key = metadata.partition_key.clone();
+                message.ordering_key = metadata.ordering_key.clone();
+                message.event_time = metadata.event_time;
+                message
+            })
+            .collect::<Vec<_>>();
+        let receipts = producer.send_all(messages).await.unwrap();
         producer.send_batch().await.unwrap();
         try_join_all(receipts).await.unwrap();
         println!("producer sends done");
 
-        for message in messages {
+        for (message_data, message_metadata) in message_datas {
             let msg = recv_within(&mut consumer, DEFAULT_RECV_TIMEOUT)
                 .await
                 .unwrap();
             println!("got message: {:?}", msg.payload);
             assert_eq!(
-                message,
+                message_data,
                 msg.deserialize().unwrap(),
                 "we probably received a message from a previous run of the test"
             );
@@ -1006,9 +1101,49 @@ mod tests {
                 .unwrap();
             println!("got message: {:?}", dlq_msg.payload);
             assert_eq!(
-                message,
+                message_data,
                 dlq_msg.deserialize().unwrap(),
                 "we probably received a message from a previous run of the test"
+            );
+            let mut expected_properties = message_metadata.properties;
+            expected_properties
+                .entry("REAL_TOPIC".to_string())
+                .or_insert_with(|| topic.clone());
+            expected_properties
+                .entry("ORIGIN_MESSAGE_ID".to_string())
+                .or_insert_with(|| {
+                    format!(
+                        "{}:{}:{}:{}",
+                        msg.message_id().ledger_id,
+                        msg.message_id().entry_id,
+                        msg.message_id().partition.unwrap_or(-1),
+                        msg.message_id().batch_index.unwrap_or(-1)
+                    )
+                });
+            assert_eq!(
+                expected_properties,
+                dlq_msg
+                    .metadata()
+                    .properties
+                    .iter()
+                    .map(|p| (p.key.clone(), p.value.clone()))
+                    .collect::<HashMap<_, _>>(),
+                "message properties should be preserved when the message is sent to the DLQ"
+            );
+            assert_eq!(
+                message_metadata.partition_key,
+                dlq_msg.metadata().partition_key,
+                "message partition key should be preserved when the message is sent to the DLQ"
+            );
+            assert_eq!(
+                message_metadata.ordering_key,
+                dlq_msg.metadata().ordering_key,
+                "message ordering key should be preserved when the message is sent to the DLQ"
+            );
+            assert_eq!(
+                message_metadata.event_time,
+                dlq_msg.metadata().event_time,
+                "message event time should be preserved when the message is sent to the DLQ"
             );
             dlq_consumer.ack(&dlq_msg).await.unwrap();
         }
