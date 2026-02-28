@@ -29,6 +29,9 @@ use crate::{
     Error, Executor, Payload, Pulsar,
 };
 
+const SYSTEM_PROPERTY_REAL_TOPIC: &str = "REAL_TOPIC";
+const SYSTEM_PROPERTY_ORIGIN_MESSAGE_ID: &str = "ORIGIN_MESSAGE_ID";
+
 pub struct ConsumerEngine<Exe: Executor> {
     client: Pulsar<Exe>,
     connection: Arc<Connection<Exe>>,
@@ -544,13 +547,37 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 {
                     // Send message to Dead Letter Topic and ack message in original topic
                     let Payload { data, metadata } = payload;
+                    let mut properties = metadata
+                        .properties
+                        .into_iter()
+                        .map(|p| (p.key, p.value))
+                        .collect::<HashMap<_, _>>();
+                    properties
+                        .entry(SYSTEM_PROPERTY_REAL_TOPIC.to_string())
+                        .or_insert_with(|| self.topic.clone());
+                    properties
+                        .entry(SYSTEM_PROPERTY_ORIGIN_MESSAGE_ID.to_string())
+                        .or_insert_with(|| {
+                            if let Some(batch_index) = message_id.batch_index {
+                                format!(
+                                    "{}:{}:{}:{}",
+                                    message_id.ledger_id,
+                                    message_id.entry_id,
+                                    message_id.partition.unwrap_or(-1),
+                                    batch_index
+                                )
+                            } else {
+                                format!(
+                                    "{}:{}:{}",
+                                    message_id.ledger_id,
+                                    message_id.entry_id,
+                                    message_id.partition.unwrap_or(-1)
+                                )
+                            }
+                        });
                     let message = Message {
                         payload: data,
-                        properties: metadata
-                            .properties
-                            .into_iter()
-                            .map(|p| (p.key, p.value))
-                            .collect(),
+                        properties,
                         partition_key: metadata.partition_key,
                         ordering_key: metadata.ordering_key,
                         event_time: metadata.event_time,

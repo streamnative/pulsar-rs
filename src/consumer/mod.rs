@@ -931,8 +931,22 @@ mod tests {
             dlq_msg.deserialize().unwrap(),
             "we probably received a message from a previous run of the test"
         );
+        let mut expected_properties = message_metadata.properties;
+        expected_properties
+            .entry("REAL_TOPIC".to_string())
+            .or_insert_with(|| topic.clone());
+        expected_properties
+            .entry("ORIGIN_MESSAGE_ID".to_string())
+            .or_insert_with(|| {
+                format!(
+                    "{}:{}:{}",
+                    msg.message_id().ledger_id,
+                    msg.message_id().entry_id,
+                    msg.message_id().partition.unwrap_or(-1)
+                )
+            });
         assert_eq!(
-            message_metadata.properties,
+            expected_properties,
             dlq_msg
                 .metadata()
                 .properties
@@ -1091,8 +1105,23 @@ mod tests {
                 dlq_msg.deserialize().unwrap(),
                 "we probably received a message from a previous run of the test"
             );
+            let mut expected_properties = message_metadata.properties;
+            expected_properties
+                .entry("REAL_TOPIC".to_string())
+                .or_insert_with(|| topic.clone());
+            expected_properties
+                .entry("ORIGIN_MESSAGE_ID".to_string())
+                .or_insert_with(|| {
+                    format!(
+                        "{}:{}:{}:{}",
+                        msg.message_id().ledger_id,
+                        msg.message_id().entry_id,
+                        msg.message_id().partition.unwrap_or(-1),
+                        msg.message_id().batch_index.unwrap_or(-1)
+                    )
+                });
             assert_eq!(
-                message_metadata.properties,
+                expected_properties,
                 dlq_msg
                     .metadata()
                     .properties
