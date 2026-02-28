@@ -285,8 +285,12 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
                 .into_iter()
                 .map(|c| (c.topic(), Box::pin(c)))
                 .collect();
-            let topics: VecDeque<String> = consumers.keys().cloned().collect();
-            let existing_topics = topics.clone();
+            let topics: VecDeque<String> = self.topics
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            let existing_topics: VecDeque<String> = consumers.keys().cloned().collect();
             let topic_refresh = self
                 .topic_refresh
                 .unwrap_or_else(|| Duration::from_secs(30));
