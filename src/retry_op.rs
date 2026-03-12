@@ -154,7 +154,7 @@ pub async fn retry_create_producer<Exe: Executor>(
     producer_id: u64,
     producer_name: Option<String>,
     options: &ProducerOptions,
-) -> Result<String, Error> {
+) -> Result<(String, Option<Vec<u8>>), Error> {
     *connection = client.manager.get_connection(&addr).await?;
     let mut current_retries = 0u32;
     let start = Instant::now();
@@ -176,6 +176,7 @@ pub async fn retry_create_producer<Exe: Executor>(
             .await
         {
             Ok(partial_success) => {
+                let mut schema_version = partial_success.schema_version;
                 // If producer is not "ready", the client will avoid to timeout the request
                 // for creating the producer. Instead it will wait indefinitely until it gets
                 // a subsequent  `CommandProducerSuccess` with `producer_ready==true`.
@@ -188,6 +189,31 @@ pub async fn retry_create_producer<Exe: Executor>(
                             .wait_for_exclusive_access(partial_success.request_id)
                             .await;
                         trace!("TopicProducer::create({topic}) received: {result:?}");
+                        match result {
+                            Ok(success) => {
+                                if let Some(new_sv) = success.schema_version {
+                                    if schema_version.as_ref() != Some(&new_sv) {
+                                        debug!(
+                                            "TopicProducer::create({topic}) schema_version \
+                                             updated after exclusive access wait"
+                                        );
+                                        schema_version = Some(new_sv);
+                                    }
+                                } else if schema_version.is_some() {
+                                    warn!(
+                                        "TopicProducer::create({topic}) final \
+                                         CommandProducerSuccess has no schema_version, \
+                                         keeping initial value"
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                error!(
+                                    "TopicProducer::create({topic}) wait_for_exclusive_access \
+                                     failed: {e:?}, proceeding with initial schema_version"
+                                );
+                            }
+                        }
                     }
                 }
                 if current_retries > 0 {
@@ -197,7 +223,7 @@ pub async fn retry_create_producer<Exe: Executor>(
                         current_retries + 1,
                     );
                 }
-                return Ok(partial_success.producer_name);
+                return Ok((partial_success.producer_name, schema_version));
             }
             Err(err) => {
                 handle_retry_error(

@@ -584,6 +584,19 @@ struct TopicProducer<Exe: Executor> {
     sequence_id: SerialId,
     compression: Option<Compression>,
     options: ProducerOptions,
+    /// Schema version returned by the broker in `CommandProducerSuccess`.
+    ///
+    /// * **Non-batched path** — used as a default when the message does not
+    ///   already have a `schema_version` set (`send_raw`).  Updated in-place
+    ///   on reconnection via `send_message`.
+    /// * **Batched path** — a clone is passed by value to the spawned
+    ///   `message_send_loop`, which owns its own independent copy.  That copy
+    ///   is updated on reconnection within the loop; this field is **not**
+    ///   kept in sync and may go stale for batched producers.
+    ///
+    /// Per-message `schema_version` is not supported by the Pulsar protocol
+    /// for batched messages (`SingleMessageMetadata` has no such field).
+    schema_version: Option<Vec<u8>>,
 }
 
 impl<Exe: Executor> TopicProducer<Exe> {
@@ -605,7 +618,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
         let compression = options.compression.clone();
         let mut connection = client.manager.get_connection(&addr).await?;
 
-        let producer_name = retry_create_producer(
+        let (producer_name, schema_version) = retry_create_producer(
             &client,
             &mut connection,
             addr,
@@ -627,6 +640,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
                 compression,
                 options,
                 batch: None,
+                schema_version,
             });
         }
         let executor = client.executor.clone();
@@ -664,6 +678,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
             producer_name.clone(),
             sequence_id.clone(),
             options.clone(),
+            schema_version.clone(),
         )));
 
         Ok(TopicProducer {
@@ -679,6 +694,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
             sequence_id,
             compression,
             options,
+            schema_version,
         })
     }
 
@@ -719,10 +735,15 @@ impl<Exe: Executor> TopicProducer<Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub(crate) async fn send_raw(&mut self, message: ProducerMessage) -> Result<SendFuture, Error> {
+    pub(crate) async fn send_raw(&mut self, mut message: ProducerMessage) -> Result<SendFuture, Error> {
         let (tx, rx) = oneshot::channel();
         match &mut self.batch.as_mut().map(|batch| &mut batch.msg_sender) {
             Some(msg_sender) => {
+                // Per-message schema_version is not supported by the Pulsar
+                // protocol for batched messages. The schema_version is set
+                // on the batch envelope in message_send_loop instead. Any
+                // user-provided schema_version on individual messages is
+                // structurally dropped here.
                 let properties = message
                     .properties
                     .into_iter()
@@ -750,6 +771,12 @@ impl<Exe: Executor> TopicProducer<Exe> {
                 return Err(ProducerError::Closed.into());
             }
             _ => {
+                // If the user didn't set a schema_version on the message,
+                // use the one returned by the broker in
+                // CommandProducerSuccess.
+                if message.schema_version.is_none() {
+                    message.schema_version = self.schema_version.clone();
+                }
                 let compressed_message = compress_message(message, &self.compression)?;
                 let fut = send_message(
                     &self.client,
@@ -760,6 +787,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
                     &self.name,
                     &self.sequence_id,
                     &self.options,
+                    &mut self.schema_version,
                 )
                 .await?;
                 self.client
@@ -868,19 +896,19 @@ async fn send_message<Exe>(
     producer_name: &ProducerName,
     sequence_id: &SerialId,
     options: &ProducerOptions,
+    schema_version: &mut Option<Vec<u8>>,
 ) -> Result<impl Future<Output = Result<CommandSendReceipt, Error>>, Error>
 where
     Exe: Executor,
 {
     loop {
-        let message = message.clone();
         match connection
             .sender()
             .send(
                 producer_id,
                 producer_name.clone(),
                 sequence_id.get(),
-                message,
+                message.clone(),
                 options.block_queue_if_full,
             )
             .await
@@ -923,7 +951,7 @@ where
 
         let broker_address = client.lookup_topic(topic).await?;
 
-        let _producer_name = retry_create_producer(
+        let (_producer_name, new_schema_version) = retry_create_producer(
             client,
             connection,
             broker_address,
@@ -933,6 +961,41 @@ where
             options,
         )
         .await?;
+
+        // Log when the broker returns a different schema_version after
+        // reconnection (the schema may have evolved while disconnected).
+        match (&*schema_version, &new_schema_version) {
+            (Some(old), Some(new)) if old != new => {
+                warn!(
+                    "schema_version changed on reconnect for \
+                     producer {:?}({}) on topic {}: {:x?} -> {:x?}",
+                    producer_name, producer_id, topic, old, new
+                );
+            }
+            (Some(old), None) => {
+                warn!(
+                    "schema_version lost on reconnect for \
+                     producer {:?}({}) on topic {}: {:x?} -> None \
+                     (topic schema may have been deleted)",
+                    producer_name, producer_id, topic, old
+                );
+            }
+            (None, Some(new)) => {
+                warn!(
+                    "schema_version appeared on reconnect for \
+                     producer {:?}({}) on topic {}: None -> {:x?} \
+                     (schema may have been added to the topic)",
+                    producer_name, producer_id, topic, new
+                );
+            }
+            _ => {}
+        }
+
+        // Update the producer-level schema_version for future messages.
+        // The in-flight message keeps its original schema_version: it was
+        // set before entering send_message and matches the schema used to
+        // serialize its payload.
+        *schema_version = new_schema_version;
     }
 }
 
@@ -1190,6 +1253,7 @@ async fn message_send_loop<Exe>(
     producer_name: ProducerName,
     sequence_id: SerialId,
     options: ProducerOptions,
+    mut schema_version: Option<Vec<u8>>,
 ) where
     Exe: Executor,
 {
@@ -1239,6 +1303,7 @@ async fn message_send_loop<Exe>(
                 let message = ProducerMessage {
                     payload,
                     num_messages_in_batch: Some(counter as i32),
+                    schema_version: schema_version.clone(),
                     ..Default::default()
                 };
 
@@ -1255,6 +1320,7 @@ async fn message_send_loop<Exe>(
                         &producer_name,
                         &sequence_id,
                         &options,
+                        &mut schema_version,
                     )
                     .await?
                     .await

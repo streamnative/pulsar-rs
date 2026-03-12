@@ -1449,4 +1449,372 @@ mod tests {
 
         join_handle.await.unwrap();
     }
+
+    // ── schema_version test helpers ───────────────────────────────────
+
+    #[derive(Serialize, Deserialize)]
+    struct SchemaTestData {
+        age: i32,
+        name: String,
+    }
+
+    impl SerializeMessage for SchemaTestData {
+        fn serialize_message(input: Self) -> Result<producer::Message, PulsarError> {
+            let payload =
+                serde_json::to_vec(&input).map_err(|e| PulsarError::Custom(e.to_string()))?;
+            Ok(producer::Message {
+                payload,
+                ..Default::default()
+            })
+        }
+    }
+
+    impl DeserializeMessage for SchemaTestData {
+        type Output = Result<SchemaTestData, serde_json::Error>;
+
+        fn deserialize_message(payload: &Payload) -> Self::Output {
+            serde_json::from_slice(&payload.data)
+        }
+    }
+
+    fn test_json_schema(name: &str) -> Vec<u8> {
+        let json_schema = serde_json::json!({
+          "type": "record",
+          "name": name,
+          "namespace": "com.example",
+          "fields": [
+            { "name": "name", "type": "string" },
+            { "name": "age", "type": "int" }
+          ]
+        });
+        serde_json::to_vec(&json_schema).unwrap()
+    }
+
+    const PULSAR_ADDR: &str = "pulsar://127.0.0.1:6650";
+
+    fn init_logger() {
+        let _result = log::set_logger(&MULTI_LOGGER);
+        log::set_max_level(LevelFilter::Debug);
+    }
+
+    async fn new_client() -> Pulsar<TokioExecutor> {
+        Pulsar::builder(PULSAR_ADDR, TokioExecutor)
+            .build()
+            .await
+            .unwrap()
+    }
+
+    /// Build a producer with a JSON schema (and optional extra options like
+    /// `batch_size`).
+    async fn schema_producer(
+        client: &Pulsar<TokioExecutor>,
+        topic: &str,
+        name: &str,
+        schema_name: &str,
+        extra: impl FnOnce(&mut producer::ProducerOptions),
+    ) -> producer::Producer<TokioExecutor> {
+        let mut opts = producer::ProducerOptions {
+            schema: Some(proto::Schema {
+                r#type: proto::schema::Type::Json as i32,
+                schema_data: test_json_schema(schema_name),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        extra(&mut opts);
+        client
+            .producer()
+            .with_topic(topic)
+            .with_name(name)
+            .with_options(opts)
+            .build()
+            .await
+            .unwrap()
+    }
+
+    /// Build an Exclusive consumer that starts from Earliest.
+    async fn earliest_consumer<T: DeserializeMessage>(
+        client: &Pulsar<TokioExecutor>,
+        topic: &str,
+        name: &str,
+        sub: &str,
+    ) -> Consumer<T, TokioExecutor> {
+        client
+            .consumer()
+            .with_consumer_name(name)
+            .with_subscription(sub)
+            .with_subscription_type(SubType::Exclusive)
+            .with_topic(topic)
+            .with_options(ConsumerOptions {
+                initial_position: InitialPosition::Earliest,
+                ..Default::default()
+            })
+            .build()
+            .await
+            .unwrap()
+    }
+
+    // ── schema_version tests ────────────────────────────────────────
+
+    #[tokio::test]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
+    async fn schema_version_set_on_produced_messages() {
+        init_logger();
+        let topic = format!("schema_version_test_{}", rand::random::<u16>());
+        let client = new_client().await;
+
+        let mut producer = schema_producer(
+            &client,
+            &topic,
+            "schema_version_producer",
+            "SchemaVersionTest",
+            |_| {},
+        )
+        .await;
+
+        let mut consumer: Consumer<SchemaTestData, _> =
+            earliest_consumer(&client, &topic, "schema_version_consumer", "schema_version_sub")
+                .await;
+
+        #[allow(deprecated)]
+        producer
+            .send(SchemaTestData {
+                age: 30,
+                name: "test".to_string(),
+            })
+            .await
+            .unwrap()
+            .await
+            .unwrap();
+
+        let msg = recv_within(&mut consumer, DEFAULT_RECV_TIMEOUT)
+            .await
+            .unwrap();
+
+        // The producer attaches the schema_version from CommandProducerSuccess
+        // when the message does not already have one set.
+        assert!(
+            msg.payload
+                .metadata
+                .schema_version
+                .as_ref()
+                .is_some_and(|sv| !sv.is_empty()),
+            "schema_version should be a non-empty byte sequence, got {:?}",
+            msg.payload.metadata.schema_version
+        );
+
+        consumer.ack(&msg).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
+    async fn schema_version_set_on_batched_messages() {
+        init_logger();
+        let topic = format!("schema_version_batch_test_{}", rand::random::<u16>());
+        let client = new_client().await;
+
+        let mut producer = schema_producer(
+            &client,
+            &topic,
+            "schema_version_batch_producer",
+            "SchemaVersionBatchTest",
+            |opts| {
+                opts.batch_size = Some(2);
+            },
+        )
+        .await;
+
+        let mut consumer: Consumer<SchemaTestData, _> = earliest_consumer(
+            &client,
+            &topic,
+            "schema_version_batch_consumer",
+            "schema_version_batch_sub",
+        )
+        .await;
+
+        // Send 2 messages to trigger batch flush (batch_size=2).
+        // Use send_non_blocking to queue both before awaiting receipts,
+        // otherwise the deprecated send() method awaits the receipt inline,
+        // which deadlocks because the batch won't flush until both messages
+        // are queued.
+        let receipt1 = producer
+            .send_non_blocking(SchemaTestData {
+                age: 25,
+                name: "batch1".to_string(),
+            })
+            .await
+            .unwrap();
+        let receipt2 = producer
+            .send_non_blocking(SchemaTestData {
+                age: 35,
+                name: "batch2".to_string(),
+            })
+            .await
+            .unwrap();
+        futures::try_join!(receipt1, receipt2).unwrap();
+
+        let mut schema_versions = Vec::new();
+        for _ in 0..2 {
+            let msg = recv_within(&mut consumer, DEFAULT_RECV_TIMEOUT)
+                .await
+                .unwrap();
+
+            let sv = msg.payload.metadata.schema_version.clone();
+            assert!(
+                sv.is_some(),
+                "schema_version should be set on batched messages produced with a schema"
+            );
+            schema_versions.push(sv.unwrap());
+
+            consumer.ack(&msg).await.unwrap();
+        }
+        // Both messages in the same batch should carry the same schema_version.
+        assert_eq!(
+            schema_versions[0], schema_versions[1],
+            "both messages in the same batch should carry the same schema_version"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
+    async fn user_provided_schema_version_not_overwritten() {
+        // A custom SerializeMessage impl that explicitly sets schema_version
+        // on the outgoing message. The producer should preserve this value
+        // instead of overwriting it with the broker-assigned version.
+        #[derive(Serialize, Deserialize)]
+        struct DataWithCustomSchemaVersion {
+            value: String,
+        }
+
+        const CUSTOM_SCHEMA_VERSION: &[u8] = &[42, 42, 42, 42];
+
+        impl SerializeMessage for DataWithCustomSchemaVersion {
+            fn serialize_message(input: Self) -> Result<producer::Message, PulsarError> {
+                let payload =
+                    serde_json::to_vec(&input).map_err(|e| PulsarError::Custom(e.to_string()))?;
+                Ok(producer::Message {
+                    payload,
+                    schema_version: Some(CUSTOM_SCHEMA_VERSION.to_vec()),
+                    ..Default::default()
+                })
+            }
+        }
+
+        impl DeserializeMessage for DataWithCustomSchemaVersion {
+            type Output = Result<DataWithCustomSchemaVersion, serde_json::Error>;
+
+            fn deserialize_message(payload: &Payload) -> Self::Output {
+                serde_json::from_slice(&payload.data)
+            }
+        }
+
+        init_logger();
+        let topic = format!("schema_version_override_test_{}", rand::random::<u16>());
+        let client = new_client().await;
+
+        let mut producer = schema_producer(
+            &client,
+            &topic,
+            "schema_version_override_producer",
+            "SchemaVersionOverrideTest",
+            |_| {},
+        )
+        .await;
+
+        let mut consumer: Consumer<DataWithCustomSchemaVersion, _> = earliest_consumer(
+            &client,
+            &topic,
+            "schema_version_override_consumer",
+            "schema_version_override_sub",
+        )
+        .await;
+
+        #[allow(deprecated)]
+        producer
+            .send(DataWithCustomSchemaVersion {
+                value: "override_test".to_string(),
+            })
+            .await
+            .unwrap()
+            .await
+            .unwrap();
+
+        let msg = recv_within(&mut consumer, DEFAULT_RECV_TIMEOUT)
+            .await
+            .unwrap();
+
+        // The user-provided schema_version should be preserved, not replaced
+        // by the broker-assigned version.
+        assert_eq!(
+            msg.payload.metadata.schema_version.as_deref(),
+            Some(CUSTOM_SCHEMA_VERSION),
+            "user-provided schema_version should not be overwritten by the broker-assigned version"
+        );
+
+        consumer.ack(&msg).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
+    async fn schemaless_producer_has_no_schema_version() {
+        init_logger();
+        let topic = format!("schemaless_sv_test_{}", rand::random::<u16>());
+        let client = new_client().await;
+
+        // Producer created without a schema — the broker returns an empty
+        // schema_version (Some([])), not a meaningful version byte sequence.
+        let mut producer = client
+            .producer()
+            .with_topic(&topic)
+            .with_name("schemaless_sv_producer")
+            .build()
+            .await
+            .unwrap();
+
+        let mut consumer: Consumer<TestData, _> =
+            earliest_consumer(&client, &topic, "schemaless_sv_consumer", "schemaless_sv_sub")
+                .await;
+
+        #[allow(deprecated)]
+        producer
+            .send(&TestData {
+                topic: "schemaless".to_string(),
+                msg: 1,
+            })
+            .await
+            .unwrap()
+            .await
+            .unwrap();
+
+        let msg = recv_within(&mut consumer, DEFAULT_RECV_TIMEOUT)
+            .await
+            .unwrap();
+
+        // The broker returns schema_version = Some([]) for schemaless topics,
+        // which is distinct from the non-empty version assigned to schema-ed
+        // topics. Verify the version is either absent or empty.
+        let sv = msg.payload.metadata.schema_version.as_deref().unwrap_or(&[]);
+        assert!(
+            sv.is_empty(),
+            "schemaless producer should not carry a non-empty schema_version, got {sv:?}"
+        );
+
+        consumer.ack(&msg).await.unwrap();
+    }
 }
