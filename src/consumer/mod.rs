@@ -1490,15 +1490,14 @@ mod tests {
         serde_json::to_vec(&json_schema).unwrap()
     }
 
-    const PULSAR_ADDR: &str = "pulsar://127.0.0.1:6650";
-
     fn init_logger() {
         let _result = log::set_logger(&MULTI_LOGGER);
         log::set_max_level(LevelFilter::Debug);
     }
 
     async fn new_client() -> Pulsar<TokioExecutor> {
-        Pulsar::builder(PULSAR_ADDR, TokioExecutor)
+        let addr = "pulsar://127.0.0.1:6650";
+        Pulsar::builder(addr, TokioExecutor)
             .build()
             .await
             .unwrap()
