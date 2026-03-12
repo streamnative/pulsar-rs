@@ -132,6 +132,7 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Receiver<S> {
 impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> {
     type Output = Result<(), ()>;
 
+    #[allow(clippy::result_large_err)]
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match self.shutdown.as_mut().poll(cx) {
