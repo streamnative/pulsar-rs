@@ -735,7 +735,10 @@ impl<Exe: Executor> TopicProducer<Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub(crate) async fn send_raw(&mut self, mut message: ProducerMessage) -> Result<SendFuture, Error> {
+    pub(crate) async fn send_raw(
+        &mut self,
+        mut message: ProducerMessage,
+    ) -> Result<SendFuture, Error> {
         let (tx, rx) = oneshot::channel();
         match &mut self.batch.as_mut().map(|batch| &mut batch.msg_sender) {
             Some(msg_sender) => {

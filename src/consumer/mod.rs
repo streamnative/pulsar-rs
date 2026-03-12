@@ -1497,10 +1497,7 @@ mod tests {
 
     async fn new_client() -> Pulsar<TokioExecutor> {
         let addr = "pulsar://127.0.0.1:6650";
-        Pulsar::builder(addr, TokioExecutor)
-            .build()
-            .await
-            .unwrap()
+        Pulsar::builder(addr, TokioExecutor).build().await.unwrap()
     }
 
     /// Build a producer with a JSON schema (and optional extra options like
@@ -1575,9 +1572,13 @@ mod tests {
         )
         .await;
 
-        let mut consumer: Consumer<SchemaTestData, _> =
-            earliest_consumer(&client, &topic, "schema_version_consumer", "schema_version_sub")
-                .await;
+        let mut consumer: Consumer<SchemaTestData, _> = earliest_consumer(
+            &client,
+            &topic,
+            "schema_version_consumer",
+            "schema_version_sub",
+        )
+        .await;
 
         #[allow(deprecated)]
         producer
@@ -1786,9 +1787,13 @@ mod tests {
             .await
             .unwrap();
 
-        let mut consumer: Consumer<TestData, _> =
-            earliest_consumer(&client, &topic, "schemaless_sv_consumer", "schemaless_sv_sub")
-                .await;
+        let mut consumer: Consumer<TestData, _> = earliest_consumer(
+            &client,
+            &topic,
+            "schemaless_sv_consumer",
+            "schemaless_sv_sub",
+        )
+        .await;
 
         #[allow(deprecated)]
         producer
@@ -1808,7 +1813,12 @@ mod tests {
         // The broker returns schema_version = Some([]) for schemaless topics,
         // which is distinct from the non-empty version assigned to schema-ed
         // topics. Verify the version is either absent or empty.
-        let sv = msg.payload.metadata.schema_version.as_deref().unwrap_or(&[]);
+        let sv = msg
+            .payload
+            .metadata
+            .schema_version
+            .as_deref()
+            .unwrap_or(&[]);
         assert!(
             sv.is_empty(),
             "schemaless producer should not carry a non-empty schema_version, got {sv:?}"
