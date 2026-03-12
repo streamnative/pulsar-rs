@@ -965,35 +965,6 @@ where
         )
         .await?;
 
-        // Log when the broker returns a different schema_version after
-        // reconnection (the schema may have evolved while disconnected).
-        match (&*schema_version, &new_schema_version) {
-            (Some(old), Some(new)) if old != new => {
-                warn!(
-                    "schema_version changed on reconnect for \
-                     producer {:?}({}) on topic {}: {:x?} -> {:x?}",
-                    producer_name, producer_id, topic, old, new
-                );
-            }
-            (Some(old), None) => {
-                warn!(
-                    "schema_version lost on reconnect for \
-                     producer {:?}({}) on topic {}: {:x?} -> None \
-                     (topic schema may have been deleted)",
-                    producer_name, producer_id, topic, old
-                );
-            }
-            (None, Some(new)) => {
-                warn!(
-                    "schema_version appeared on reconnect for \
-                     producer {:?}({}) on topic {}: None -> {:x?} \
-                     (schema may have been added to the topic)",
-                    producer_name, producer_id, topic, new
-                );
-            }
-            _ => {}
-        }
-
         // Update the producer-level schema_version for future messages.
         // The in-flight message keeps its original schema_version: it was
         // set before entering send_message and matches the schema used to
