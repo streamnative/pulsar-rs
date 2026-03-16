@@ -60,7 +60,7 @@ async fn main() -> Result<(), pulsar::Error> {
                 .await
                 .unwrap();
             counter += 1;
-            if counter.is_multiple_of(1000) {
+            if counter % 1000 == 0 {
                 println!("sent {counter} messages");
             }
         }
@@ -86,7 +86,7 @@ async fn main() -> Result<(), pulsar::Error> {
             panic!("Unexpected payload: {}", &data.data);
         }
         counter += 1;
-        if counter.is_multiple_of(1000) {
+        if counter % 1000 == 0 {
             println!("received {counter} messages");
         }
     }

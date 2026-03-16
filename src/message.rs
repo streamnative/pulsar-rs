@@ -178,7 +178,6 @@ impl Message {
                     Some(CommandCloseConsumer {
                         consumer_id,
                         request_id,
-                        ..
                     }),
                 ..
             } => Some(RequestKey::CloseConsumer {

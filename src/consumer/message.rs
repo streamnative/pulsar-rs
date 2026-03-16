@@ -4,15 +4,15 @@ use crate::{
     DeserializeMessage, Payload,
 };
 
-/// A message received by a consumer.
+/// a message received by a consumer
 ///
-/// Generic over the type it can be deserialized to.
+/// it is generic over the type it can be deserialized to
 pub struct Message<T> {
-    /// Origin topic of the message.
+    /// origin topic of the message
     pub topic: String,
-    /// Contains the message's data and other metadata.
+    /// contains the message's data and other metadata
     pub payload: Payload,
-    /// Contains the message's id and batch size data.
+    /// contains the message's id and batch size data
     pub message_id: MessageData,
     /// Pre-decoded value from PulsarSchema. None when using DeserializeMessage path
     /// or when schema decode failed (check [`decode_error`](Self::decode_error)).
@@ -36,19 +36,19 @@ impl<T> std::fmt::Debug for Message<T> {
 }
 
 impl<T> Message<T> {
-    /// Pulsar metadata for the message.
+    /// Pulsar metadata for the message
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn metadata(&self) -> &MessageMetadata {
         &self.payload.metadata
     }
 
-    /// Get Pulsar message id for the message.
+    /// Get Pulsar message id for the message
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn message_id(&self) -> &MessageIdData {
         &self.message_id.id
     }
 
-    /// Get message key (partition key).
+    /// Get message key (partition key)
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn key(&self) -> Option<String> {
         self.payload.metadata.partition_key.clone()
@@ -72,8 +72,7 @@ impl<T> Message<T> {
 }
 
 impl<T: DeserializeMessage> Message<T> {
-    /// Directly deserialize a message using the DeserializeMessage trait.
-    /// This continues to work unchanged for backward compatibility.
+    /// directly deserialize a message
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn deserialize(&self) -> T::Output {
         T::deserialize_message(&self.payload)

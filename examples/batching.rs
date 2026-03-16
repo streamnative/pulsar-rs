@@ -70,7 +70,7 @@ async fn main() -> Result<(), pulsar::Error> {
             v.push(receipt_rx);
             println!("sent");
             counter += 1;
-            if counter.is_multiple_of(4) {
+            if counter % 4 == 0 {
                 //producer.send_batch().await.unwrap();
                 println!("sent {counter} messages");
                 break;
@@ -98,7 +98,7 @@ async fn main() -> Result<(), pulsar::Error> {
         }
         println!("got message: {data:?}");
         counter += 1;
-        if counter.is_multiple_of(4) {
+        if counter % 4 == 0 {
             println!("sent {counter} messages");
             break;
         }
