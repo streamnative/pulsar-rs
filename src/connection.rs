@@ -20,15 +20,8 @@ use futures::{
     task::{Context, Poll},
     Future, FutureExt, Sink, SinkExt, Stream, StreamExt,
 };
-#[cfg(any(feature = "tokio-runtime", feature = "async-std-runtime"))]
-use native_tls::Certificate;
 use proto::MessageIdData;
 use rand::{seq::SliceRandom, thread_rng};
-#[cfg(all(
-    any(feature = "tokio-rustls-runtime", feature = "async-std-rustls-runtime"),
-    not(any(feature = "tokio-runtime", feature = "async-std-runtime"))
-))]
-use rustls::Certificate;
 use url::Url;
 use uuid::Uuid;
 
@@ -41,6 +34,7 @@ use crate::{
         BaseCommand, Codec, Message,
     },
     producer::{self, ProducerOptions},
+    Certificate,
 };
 
 pub(crate) enum Register {
@@ -138,6 +132,7 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Receiver<S> {
 impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> {
     type Output = Result<(), ()>;
 
+    #[allow(clippy::result_large_err)]
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match self.shutdown.as_mut().poll(cx) {
@@ -325,12 +320,13 @@ impl<Exe: Executor> ConnectionSender<Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub(crate) fn send(
+    pub(crate) async fn send(
         &self,
         producer_id: u64,
         producer_name: String,
         sequence_id: u64,
         message: producer::ProducerMessage,
+        block_if_queue_full: bool,
     ) -> Result<
         impl Future<Output = Result<proto::CommandSendReceipt, ConnectionError>>,
         ConnectionError,
@@ -340,7 +336,13 @@ impl<Exe: Executor> ConnectionSender<Exe> {
             sequence_id,
         };
         let msg = messages::send(producer_id, producer_name, sequence_id, message);
-        self.send_message_non_blocking(msg, key, |resp| resp.command.send_receipt)
+        self.send_message_non_blocking(
+            msg,
+            key,
+            |resp| resp.command.send_receipt,
+            block_if_queue_full,
+        )
+        .await
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
@@ -351,9 +353,10 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         match (
             self.registrations
                 .unbounded_send(Register::Ping { resolver }),
-            self.tx.try_send(messages::ping())?,
+            self.tx.send(messages::ping()).await?,
         ) {
             (Ok(_), ()) => {
+                debug!("set timeout to {:?} for ping-pong", self.operation_timeout);
                 let delay_f = self.executor.delay(self.operation_timeout);
                 pin_mut!(response);
                 pin_mut!(delay_f);
@@ -361,11 +364,13 @@ impl<Exe: Executor> ConnectionSender<Exe> {
                 match select(response, delay_f).await {
                     Either::Left((res, _)) => res
                         .map_err(|oneshot::Canceled| {
+                            error!("connection-sender: send ping, we have been canceled");
                             self.error.set(ConnectionError::Disconnected);
                             ConnectionError::Disconnected
                         })
                         .map(move |_| trace!("received pong from {}", self.connection_id)),
                     Either::Right(_) => {
+                        error!("connection-sender: send ping, we did not received pong inside the timed out");
                         self.error.set(ConnectionError::Io(std::io::Error::new(
                             std::io::ErrorKind::TimedOut,
                             "timeout when sending ping to the Pulsar server",
@@ -526,35 +531,42 @@ impl<Exe: Executor> ConnectionSender<Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub fn send_flow(&self, consumer_id: u64, message_permits: u32) -> Result<(), ConnectionError> {
+    pub async fn send_flow(
+        &self,
+        consumer_id: u64,
+        message_permits: u32,
+    ) -> Result<(), ConnectionError> {
         self.tx
-            .try_send(messages::flow(consumer_id, message_permits))?;
+            .send(messages::flow(consumer_id, message_permits))
+            .await?;
         Ok(())
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub fn send_ack(
+    pub async fn send_ack(
         &self,
         consumer_id: u64,
         message_ids: Vec<proto::MessageIdData>,
         cumulative: bool,
     ) -> Result<(), ConnectionError> {
         self.tx
-            .try_send(messages::ack(consumer_id, message_ids, cumulative))?;
+            .send(messages::ack(consumer_id, message_ids, cumulative))
+            .await?;
         Ok(())
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub fn send_redeliver_unacknowleged_messages(
+    pub async fn send_redeliver_unacknowleged_messages(
         &self,
         consumer_id: u64,
         message_ids: Vec<proto::MessageIdData>,
     ) -> Result<(), ConnectionError> {
         self.tx
-            .try_send(messages::redeliver_unacknowleged_messages(
+            .send(messages::redeliver_unacknowleged_messages(
                 consumer_id,
                 message_ids,
-            ))?;
+            ))
+            .await?;
         Ok(())
     }
 
@@ -629,15 +641,22 @@ impl<Exe: Executor> ConnectionSender<Exe> {
     where
         F: FnOnce(Message) -> Option<R> + 'static,
     {
-        self.send_message_non_blocking(msg, key, extract)?.await
+        // This method is called for RPCs other than CommandSend. If the queue is full due to too
+        // many CommandSend RPCs not processed in time, we should wait rather than fail fast
+        // because it's a client side issue that can be recovered later. Hence, set
+        // block_if_queue_full to true here.
+        self.send_message_non_blocking(msg, key, extract, true)
+            .await?
+            .await
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    fn send_message_non_blocking<R: Debug, F>(
+    async fn send_message_non_blocking<R: Debug, F>(
         &self,
         msg: Message,
         key: RequestKey,
         extract: F,
+        block_if_queue_full: bool,
     ) -> Result<impl Future<Output = Result<R, ConnectionError>>, ConnectionError>
     where
         F: FnOnce(Message) -> Option<R> + 'static,
@@ -651,6 +670,10 @@ impl<Exe: Executor> ConnectionSender<Exe> {
             response
                 .await
                 .map_err(|oneshot::Canceled| {
+                    error!(
+                        "response has been canceled (key = {:?}), we are disconnected",
+                        k
+                    );
                     error.set(ConnectionError::Disconnected);
                     ConnectionError::Disconnected
                 })
@@ -660,58 +683,76 @@ impl<Exe: Executor> ConnectionSender<Exe> {
                 })?
         };
 
-        match (
-            self.registrations
-                .unbounded_send(Register::Request { key, resolver }),
-            self.tx.try_send(msg),
-        ) {
-            (Ok(_), Ok(_)) => {
-                let connection_id = self.connection_id;
-                let error = self.error.clone();
-                let delay_f = self.executor.delay(self.operation_timeout);
-                let fut = async move {
-                    pin_mut!(response);
-                    pin_mut!(delay_f);
-                    match select(response, delay_f).await {
-                        Either::Left((res, _)) => {
-                            // println!("recv msg: {:?}", res);
-                            res
-                        }
-                        Either::Right(_) => {
-                            warn!(
-                                "connection {} timedout sending message to the Pulsar server",
-                                connection_id
-                            );
-                            error.set(ConnectionError::Io(std::io::Error::new(
-                                std::io::ErrorKind::TimedOut,
-                                format!(
-                                    " connection {} timedout sending message to the Pulsar server",
-                                    connection_id
-                                ),
-                            )));
-                            Err(ConnectionError::Io(std::io::Error::new(
-                                std::io::ErrorKind::TimedOut,
-                                format!(
-                                    " connection {} timedout sending message to the Pulsar server",
-                                    connection_id
-                                ),
-                            )))
-                        }
-                    }
-                };
-
-                Ok(fut)
-            }
-            (_, Err(e)) if e.is_full() => Err(ConnectionError::SlowDown),
-            _ => {
+        self.registrations
+            .unbounded_send(Register::Request { key, resolver })
+            .map_err(|e| {
                 warn!(
-                    "connection {} disconnected sending message to the Pulsar server",
-                    self.connection_id
+                    "connection {} disconnected when sending the Request: {}",
+                    self.connection_id, e
                 );
-                self.error.set(ConnectionError::Disconnected);
-                Err(ConnectionError::Disconnected)
+                ConnectionError::Disconnected
+            })?;
+        if block_if_queue_full {
+            self.tx.send(msg).await.map_err(|e| {
+                warn!(
+                    "connection {} disconnected when sending the message: {}",
+                    self.connection_id, e
+                );
+                ConnectionError::Disconnected
+            })?;
+        } else {
+            self.tx.try_send(msg).map_err(|e| {
+                if e.is_full() {
+                    ConnectionError::SlowDown
+                } else {
+                    warn!(
+                        "connection {} disconnected when sending the message: {}",
+                        self.connection_id, e
+                    );
+                    ConnectionError::Disconnected
+                }
+            })?;
+        };
+
+        let connection_id = self.connection_id;
+        let error = self.error.clone();
+        let delay_f = self.executor.delay(self.operation_timeout);
+        trace!(
+            "Create timeout futures with operation timeout at {:?}",
+            self.operation_timeout
+        );
+        let fut = async move {
+            pin_mut!(response);
+            pin_mut!(delay_f);
+            match select(response, delay_f).await {
+                Either::Left((res, _)) => {
+                    debug!("Received response: {:?}", res);
+                    res
+                }
+                Either::Right(_) => {
+                    warn!(
+                        "connection {} timedout sending message to the Pulsar server",
+                        connection_id
+                    );
+                    error.set(ConnectionError::Io(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!(
+                            " connection {} timedout sending message to the Pulsar server",
+                            connection_id
+                        ),
+                    )));
+                    Err(ConnectionError::Io(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!(
+                            " connection {} timedout sending message to the Pulsar server",
+                            connection_id
+                        ),
+                    )))
+                }
             }
-        }
+        };
+
+        Ok(fut)
     }
 
     /// wait for desired message(commandproducersuccess with ready field true)
@@ -880,8 +921,7 @@ impl<Exe: Executor> Connection<Exe> {
 
         if retryable_errors.is_empty() {
             error!("connection error, not retryable: {:?}", fatal_errors);
-            Err(ConnectionError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            Err(ConnectionError::Io(std::io::Error::other(
                 "fatal error when connecting to the Pulsar server",
             )))
         } else {
@@ -934,7 +974,7 @@ impl<Exe: Executor> Connection<Exe> {
                         builder.add_root_certificate(certificate.clone());
                     }
                     builder.danger_accept_invalid_hostnames(
-                        allow_insecure_connection && !tls_hostname_verification_enabled,
+                        allow_insecure_connection || !tls_hostname_verification_enabled,
                     );
                     builder.danger_accept_invalid_certs(allow_insecure_connection);
                     let cx = builder.build()?;
@@ -971,40 +1011,33 @@ impl<Exe: Executor> Connection<Exe> {
                     .await
                 }
             }
-            #[cfg(all(feature = "tokio-rustls-runtime", not(feature = "tokio-runtime")))]
+            #[cfg(all(
+                any(
+                    feature = "tokio-rustls-runtime-aws-lc-rs",
+                    feature = "tokio-rustls-runtime-ring"
+                ),
+                not(feature = "tokio-runtime")
+            ))]
             ExecutorKind::Tokio => {
                 if tls {
                     let stream = tokio::net::TcpStream::connect(&address).await?;
                     let mut root_store = rustls::RootCertStore::empty();
+
+                    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
                     for certificate in certificate_chain {
-                        root_store.add(certificate)?;
+                        root_store.add(certificate.clone())?;
                     }
 
-                    let trust_anchors = webpki_roots::TLS_SERVER_ROOTS.iter().fold(
-                        vec![],
-                        |mut acc, trust_anchor| {
-                            acc.push(
-                                rustls::OwnedTrustAnchor::from_subject_spki_name_constraints(
-                                    trust_anchor.subject,
-                                    trust_anchor.spki,
-                                    trust_anchor.name_constraints,
-                                ),
-                            );
-                            acc
-                        },
-                    );
-
-                    root_store.add_trust_anchors(trust_anchors.into_iter());
                     let config = rustls::ClientConfig::builder()
-                        .with_safe_default_cipher_suites()
-                        .with_safe_default_kx_groups()
-                        .with_safe_default_protocol_versions()?
                         .with_root_certificates(root_store)
                         .with_no_client_auth();
 
                     let cx = tokio_rustls::TlsConnector::from(Arc::new(config));
                     let stream = cx
-                        .connect(rustls::ServerName::try_from(hostname.as_str())?, stream)
+                        .connect(
+                            rustls::pki_types::ServerName::try_from(hostname.as_str())?.to_owned(),
+                            stream,
+                        )
                         .await
                         .map(|stream| tokio_util::codec::Framed::new(stream, Codec))?;
 
@@ -1035,7 +1068,11 @@ impl<Exe: Executor> Connection<Exe> {
                     .await
                 }
             }
-            #[cfg(all(not(feature = "tokio-runtime"), not(feature = "tokio-rustls-runtime")))]
+            #[cfg(all(
+                not(feature = "tokio-runtime"),
+                not(feature = "tokio-rustls-runtime-aws-lc-rs"),
+                not(feature = "tokio-rustls-runtime-ring")
+            ))]
             ExecutorKind::Tokio => {
                 unimplemented!("the tokio-runtime cargo feature is not active");
             }
@@ -1048,7 +1085,7 @@ impl<Exe: Executor> Connection<Exe> {
                         connector = connector.add_root_certificate(certificate.clone());
                     }
                     connector = connector.danger_accept_invalid_hostnames(
-                        allow_insecure_connection && !tls_hostname_verification_enabled,
+                        allow_insecure_connection || !tls_hostname_verification_enabled,
                     );
                     connector = connector.danger_accept_invalid_certs(allow_insecure_connection);
                     let stream = connector
@@ -1084,7 +1121,10 @@ impl<Exe: Executor> Connection<Exe> {
                 }
             }
             #[cfg(all(
-                feature = "async-std-rustls-runtime",
+                any(
+                    feature = "async-std-rustls-runtime-aws-lc-rs",
+                    feature = "async-std-rustls-runtime-ring"
+                ),
                 not(feature = "async-std-runtime")
             ))]
             #[allow(deprecated)]
@@ -1092,35 +1132,22 @@ impl<Exe: Executor> Connection<Exe> {
                 if tls {
                     let stream = async_std::net::TcpStream::connect(&address).await?;
                     let mut root_store = rustls::RootCertStore::empty();
+
+                    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
                     for certificate in certificate_chain {
-                        root_store.add(certificate)?;
+                        root_store.add(certificate.clone())?;
                     }
 
-                    let trust_anchors = webpki_roots::TLS_SERVER_ROOTS.iter().fold(
-                        vec![],
-                        |mut acc, trust_anchor| {
-                            acc.push(
-                                rustls::OwnedTrustAnchor::from_subject_spki_name_constraints(
-                                    trust_anchor.subject,
-                                    trust_anchor.spki,
-                                    trust_anchor.name_constraints,
-                                ),
-                            );
-                            acc
-                        },
-                    );
-
-                    root_store.add_trust_anchors(trust_anchors.into_iter());
                     let config = rustls::ClientConfig::builder()
-                        .with_safe_default_cipher_suites()
-                        .with_safe_default_kx_groups()
-                        .with_safe_default_protocol_versions()?
                         .with_root_certificates(root_store)
                         .with_no_client_auth();
 
-                    let connector = async_rustls::TlsConnector::from(Arc::new(config));
+                    let connector = futures_rustls::TlsConnector::from(Arc::new(config));
                     let stream = connector
-                        .connect(rustls::ServerName::try_from(hostname.as_str())?, stream)
+                        .connect(
+                            rustls::pki_types::ServerName::try_from(hostname.as_str())?.to_owned(),
+                            stream,
+                        )
                         .await
                         .map(|stream| asynchronous_codec::Framed::new(stream, Codec))?;
 
@@ -1153,7 +1180,8 @@ impl<Exe: Executor> Connection<Exe> {
             }
             #[cfg(all(
                 not(feature = "async-std-runtime"),
-                not(feature = "async-std-rustls-runtime")
+                not(feature = "async-std-rustls-runtime-aws-lc-rs"),
+                not(feature = "async-std-rustls-runtime-ring")
             ))]
             ExecutorKind::AsyncStd => {
                 unimplemented!("the async-std-runtime cargo feature is not active");
@@ -1198,11 +1226,15 @@ impl<Exe: Executor> Connection<Exe> {
                 Some(error.message),
             )),
             Some(Ok(msg)) => {
-                let cmd = msg.command.clone();
-                trace!("received connection response: {:?}", msg);
-                msg.command.connected.ok_or_else(|| {
-                    ConnectionError::Unexpected(format!("Unexpected message from pulsar: {cmd:?}"))
-                })
+                trace!("received connection response: {:?}", &msg);
+                let Some(c) = msg.command.connected else {
+                    return Err(ConnectionError::Unexpected(format!(
+                        "Unexpected message from pulsar: {:?}",
+                        &msg.command
+                    )));
+                };
+
+                Ok(c)
             }
             Some(Err(e)) => Err(e),
             None => Err(ConnectionError::Disconnected),
@@ -1512,6 +1544,7 @@ pub(crate) mod messages {
                     publish_time: Utc::now().timestamp_millis() as u64,
                     replicated_from: None,
                     partition_key: message.partition_key,
+                    ordering_key: message.ordering_key,
                     replicate_to: message.replicate_to,
                     compression: message.compression,
                     uncompressed_size: message.uncompressed_size,
@@ -1799,7 +1832,11 @@ mod tests {
     use uuid::Uuid;
 
     use super::{Connection, Receiver};
-    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
     use crate::TokioExecutor;
     use crate::{
         authentication::Authentication,
@@ -1809,7 +1846,11 @@ mod tests {
     };
 
     #[tokio::test]
-    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
     async fn receiver_auth_challenge_test() {
         let (message_tx, message_rx) = mpsc::unbounded();
         let (tx, _) = async_channel::bounded(10);
@@ -1867,7 +1908,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
     async fn connection_auth_challenge_test() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
 

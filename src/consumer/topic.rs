@@ -103,7 +103,8 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
                 return Err(Error::Executor);
             }
         }
-        let (tx, rx) = mpsc::channel(1000);
+        let receiver_queue_size = options.receiver_queue_size.unwrap_or(1000);
+        let (tx, rx) = mpsc::channel(receiver_queue_size as usize);
         let mut c = ConsumerEngine::new(
             client.clone(),
             connection.clone(),
@@ -330,7 +331,10 @@ impl<T: DeserializeMessage, Exe: Executor> Stream for TopicConsumer<T, Exe> {
                 self.messages_received += 1;
                 Poll::Ready(Some(Ok(self.create_message(id, payload))))
             }
-            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
+            Poll::Ready(Some(Err(e))) => {
+                error!("we are using in the single-consumer and we got an error, {e}");
+                Poll::Ready(Some(Err(e)))
+            }
         }
     }
 }

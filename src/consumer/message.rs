@@ -9,6 +9,7 @@ use crate::{
 /// a message received by a consumer
 ///
 /// it is generic over the type it can be deserialized to
+#[derive(Debug)]
 pub struct Message<T> {
     /// origin topic of the message
     pub topic: String,

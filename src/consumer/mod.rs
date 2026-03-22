@@ -426,22 +426,30 @@ impl<T: DeserializeMessage + 'static, Exe: Executor> Stream for Consumer<T, Exe>
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::HashSet,
+        collections::{HashMap, HashSet},
         iter,
         time::{SystemTime, UNIX_EPOCH},
     };
 
     use futures::{
         future::{select, Either},
-        StreamExt, TryStreamExt,
+        StreamExt,
     };
     use log::LevelFilter;
     use regex::Regex;
-    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
     use tokio::time::timeout;
 
     use super::*;
-    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
     use crate::executor::TokioExecutor;
     use crate::{
         consumer::initial_position::InitialPosition, producer, proto, tests::TEST_LOGGER,
@@ -454,7 +462,15 @@ mod tests {
         msg: u32,
     }
 
-    impl<'a> SerializeMessage for &'a TestData {
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct TestMessageMetadata {
+        properties: HashMap<String, String>,
+        partition_key: Option<String>,
+        ordering_key: Option<Vec<u8>>,
+        event_time: Option<u64>,
+    }
+
+    impl SerializeMessage for &TestData {
         fn serialize_message(input: Self) -> Result<producer::Message, Error> {
             let payload = serde_json::to_vec(&input).map_err(|e| Error::Custom(e.to_string()))?;
             Ok(producer::Message {
@@ -472,11 +488,32 @@ mod tests {
         }
     }
 
+    const DEFAULT_RECV_TIMEOUT: Duration = Duration::from_secs(5);
+
+    async fn recv_within<T>(
+        c: &mut Consumer<T, TokioExecutor>,
+        dur: Duration,
+    ) -> Result<Message<T>, String>
+    where
+        T: DeserializeMessage + 'static,
+    {
+        match tokio::time::timeout(dur, c.next()).await {
+            Err(_) => Err(format!("timed out waiting for next() after {:?}", dur)),
+            Ok(None) => Err("stream ended (None) while waiting for a message".into()),
+            Ok(Some(Err(e))) => Err(format!("consumer error: {e:?}")),
+            Ok(Some(Ok(m))) => Ok(m),
+        }
+    }
+
     pub static MULTI_LOGGER: crate::tests::SimpleLogger = crate::tests::SimpleLogger {
         tag: "multi_consumer",
     };
     #[tokio::test]
-    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
     async fn multi_consumer() {
         let _result = log::set_logger(&MULTI_LOGGER);
         log::set_max_level(LevelFilter::Debug);
@@ -523,15 +560,22 @@ mod tests {
                 ..Default::default()
             });
 
-        let consumer_1: Consumer<TestData, _> = builder
+        let mut consumer_1: Consumer<TestData, _> = builder
             .clone()
             .with_subscription("consumer_1")
+            .with_consumer_name("consumer_1")
             .with_topics([&topic1, &topic2])
+            .with_subscription_type(SubType::Exclusive)
             .build()
             .await
             .unwrap();
 
-        let consumer_2: Consumer<TestData, _> = builder
+        assert!(&consumer_1.check_connection().await.is_ok());
+        let receive_queue_size = consumer_1.options().receiver_queue_size;
+        assert_eq!(receive_queue_size, None);
+
+        let mut consumer_2: Consumer<TestData, _> = builder
+            .clone()
             .with_subscription("consumer_2")
             .with_topic_regex(Regex::new(&format!("multi_consumer_[ab]_{topic_n}")).unwrap())
             .build()
@@ -539,7 +583,7 @@ mod tests {
             .unwrap();
 
         let expected: HashSet<_> = vec![data1, data2, data3, data4].into_iter().collect();
-        for consumer in [consumer_1, consumer_2].iter_mut() {
+        for consumer in [&mut consumer_1, &mut consumer_2].iter_mut() {
             let connected_topics = consumer.topics();
             debug!(
                 "connected topics for {}: {:?}",
@@ -555,7 +599,16 @@ mod tests {
                 .await
                 .unwrap()
             {
-                received.insert(message.unwrap().deserialize().unwrap());
+                let msg = message.unwrap();
+                received.insert(msg.deserialize().unwrap());
+                if received.len() == 2 {
+                    consumer
+                        .ack_with_id(msg.topic.as_str(), msg.message_id.id)
+                        .await
+                        .unwrap();
+                } else {
+                    consumer.ack(&msg).await.unwrap();
+                }
                 if received.len() == 4 {
                     break;
                 }
@@ -564,10 +617,116 @@ mod tests {
             assert_eq!(consumer.messages_received(), 4);
             assert!(consumer.last_message_received().is_some());
         }
+
+        let stats = consumer_1.get_stats().await.unwrap();
+        assert_eq!(stats.len(), 2);
+        for stat in stats {
+            assert_eq!(stat.consumer_name().to_string(), "consumer_1");
+        }
+
+        let data5 = TestData {
+            topic: "c".to_owned(),
+            msg: 5,
+        };
+        let data6 = TestData {
+            topic: "c".to_owned(),
+            msg: 6,
+        };
+        try_join_all(vec![
+            client.send(&topic1, &data5),
+            client.send(&topic1, &data6),
+        ])
+        .await
+        .unwrap();
+        let mut latest_msg = None;
+        for i in 0..2 {
+            let msg = recv_within(&mut consumer_1, DEFAULT_RECV_TIMEOUT).await;
+            println!("consumer_1 receive {}: {:?}", i, msg);
+            latest_msg = Some(msg.unwrap());
+        }
+        let r = consumer_1.cumulative_ack(&latest_msg.unwrap()).await;
+        assert!(r.is_ok());
+        consumer_1.close().await.unwrap();
+
+        let data6 = TestData {
+            topic: "d".to_owned(),
+            msg: 7,
+        };
+        client.send(&topic1, &data6).await.unwrap();
+
+        // recreate consumer_1
+        consumer_1 = builder
+            .clone()
+            .with_subscription("consumer_1")
+            .with_consumer_name("consumer_1")
+            .with_topics([&topic1])
+            .with_subscription_type(SubType::Shared)
+            .build::<TestData>()
+            .await
+            .unwrap();
+        let msg = recv_within(&mut consumer_1, DEFAULT_RECV_TIMEOUT)
+            .await
+            .unwrap();
+        assert_eq!(data6, msg.deserialize().unwrap());
+
+        // cleanup
+        for consumer in [&mut consumer_1, &mut consumer_2].iter_mut() {
+            consumer.unsubscribe().await.unwrap();
+            consumer.close().await.unwrap();
+        }
+
+        // verify unsubscribe worked
+        let consumer_1_exclusive = builder
+            .clone()
+            .with_subscription("consumer_1")
+            .with_consumer_name("consumer_1")
+            .with_topics([&topic1, &topic2])
+            .with_subscription_type(SubType::Exclusive)
+            .build::<TestData>()
+            .await;
+        assert!(consumer_1_exclusive.is_ok());
     }
 
     #[tokio::test]
-    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
+    async fn consumer_zero_receiver_queue_size() {
+        let _result = log::set_logger(&TEST_LOGGER);
+        log::set_max_level(LevelFilter::Debug);
+        let addr = "pulsar://127.0.0.1:6650";
+        let topic = format!(
+            "consumer_zero_receiver_queue_size_{}",
+            rand::random::<u16>()
+        );
+
+        let client: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await.unwrap();
+        let consumer: Consumer<TestData, _> = client
+            .consumer()
+            .with_topic(&topic)
+            .with_subscription("dropped_ack")
+            .with_subscription_type(SubType::Shared)
+            // get earliest messages
+            .with_options(
+                ConsumerOptions::default()
+                    .with_receiver_queue_size(0)
+                    .with_initial_position(InitialPosition::Earliest),
+            )
+            .build()
+            .await
+            .unwrap();
+        let size = consumer.options().receiver_queue_size.unwrap();
+        assert_eq!(size, 1000);
+    }
+
+    #[tokio::test]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
     async fn consumer_dropped_with_lingering_acks() {
         use rand::{distributions::Alphanumeric, Rng};
         let _result = log::set_logger(&TEST_LOGGER);
@@ -600,15 +759,18 @@ mod tests {
                 .with_subscription("dropped_ack")
                 .with_subscription_type(SubType::Shared)
                 // get earliest messages
-                .with_options(ConsumerOptions {
-                    initial_position: InitialPosition::Earliest,
-                    ..Default::default()
-                })
+                .with_options(
+                    ConsumerOptions::default()
+                        .with_receiver_queue_size(2000)
+                        .with_initial_position(InitialPosition::Earliest),
+                )
                 .build()
                 .await
                 .unwrap();
 
             println!("created consumer");
+            let receive_queue_size = consumer.options().receiver_queue_size;
+            assert_eq!(receive_queue_size, Some(2000));
 
             // consumer.next().await
             let msg: Message<TestData> = timeout(Duration::from_secs(1), consumer.next())
@@ -630,6 +792,7 @@ mod tests {
             let mut consumer: Consumer<TestData, _> = client
                 .consumer()
                 .with_topic(&topic)
+                .with_consumer_name("dropped_ack")
                 .with_subscription("dropped_ack")
                 .with_subscription_type(SubType::Shared)
                 .with_options(ConsumerOptions {
@@ -641,6 +804,12 @@ mod tests {
                 .unwrap();
 
             println!("created second consumer");
+            assert!(consumer.check_connection().await.is_ok());
+            let stats = consumer.get_stats().await.unwrap();
+            assert_eq!(stats.len(), 1);
+            for stat in stats {
+                assert_eq!(stat.consumer_name().to_string(), "dropped_ack");
+            }
 
             // the message has already been acked, so we should not receive anything
             let res: Result<_, tokio::time::error::Elapsed> =
@@ -660,11 +829,18 @@ mod tests {
                 "waiting for a message should have timed out, since we already acknowledged the \
                  only message in the queue"
             );
+            // clean up
+            consumer.unsubscribe().await.unwrap();
+            consumer.close().await.unwrap();
         }
     }
 
     #[tokio::test]
-    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
     async fn dead_letter_queue() {
         let _result = log::set_logger(&TEST_LOGGER);
         log::set_max_level(LevelFilter::Debug);
@@ -674,10 +850,25 @@ mod tests {
         let topic = format!("dead_letter_queue_test_{test_id}");
         let test_msg: u32 = rand::random();
 
-        let message = TestData {
+        let message_data = TestData {
             topic: topic.clone(),
             msg: test_msg,
         };
+        let message_metadata = TestMessageMetadata {
+            properties: HashMap::from([
+                ("k_1".to_string(), "v_1".to_string()),
+                ("k_2".to_string(), "v_2".to_string()),
+            ]),
+            partition_key: Some("partition_key".to_string()),
+            ordering_key: Some(b"ordering_key".to_vec()),
+            event_time: Some(rand::random()),
+        };
+
+        let mut message = <&TestData>::serialize_message(&message_data).unwrap();
+        message.properties = message_metadata.properties.clone();
+        message.partition_key = message_metadata.partition_key.clone();
+        message.ordering_key = message_metadata.ordering_key.clone();
+        message.event_time = message_metadata.event_time;
 
         let dead_letter_topic = format!("{topic}_dlq");
 
@@ -714,31 +905,80 @@ mod tests {
 
         println!("created second consumer");
 
-        client.send(&topic, &message).await.unwrap().await.unwrap();
+        client.send(&topic, message).await.unwrap().await.unwrap();
         println!("producer sends done");
 
-        let msg = consumer.next().await.unwrap().unwrap();
+        let msg = recv_within(&mut consumer, DEFAULT_RECV_TIMEOUT)
+            .await
+            .unwrap();
+
         println!("got message: {:?}", msg.payload);
         assert_eq!(
-            message,
+            message_data,
             msg.deserialize().unwrap(),
             "we probably received a message from a previous run of the test"
         );
         // Nacking message to send it to DLQ
         consumer.nack(&msg).await.unwrap();
 
-        let dlq_msg = dlq_consumer.next().await.unwrap().unwrap();
-        println!("got message: {:?}", msg.payload);
+        let dlq_msg = recv_within(&mut dlq_consumer, DEFAULT_RECV_TIMEOUT)
+            .await
+            .unwrap();
+
+        println!("got message: {:?}", dlq_msg.payload);
         assert_eq!(
-            message,
+            message_data,
             dlq_msg.deserialize().unwrap(),
             "we probably received a message from a previous run of the test"
+        );
+        let mut expected_properties = message_metadata.properties;
+        expected_properties
+            .entry("REAL_TOPIC".to_string())
+            .or_insert_with(|| topic.clone());
+        expected_properties
+            .entry("ORIGIN_MESSAGE_ID".to_string())
+            .or_insert_with(|| {
+                format!(
+                    "{}:{}:{}",
+                    msg.message_id().ledger_id,
+                    msg.message_id().entry_id,
+                    msg.message_id().partition.unwrap_or(-1)
+                )
+            });
+        assert_eq!(
+            expected_properties,
+            dlq_msg
+                .metadata()
+                .properties
+                .iter()
+                .map(|p| (p.key.clone(), p.value.clone()))
+                .collect::<HashMap<_, _>>(),
+            "message properties should be preserved when the message is sent to the DLQ"
+        );
+        assert_eq!(
+            message_metadata.partition_key,
+            dlq_msg.metadata().partition_key,
+            "message partition key should be preserved when the message is sent to the DLQ"
+        );
+        assert_eq!(
+            message_metadata.ordering_key,
+            dlq_msg.metadata().ordering_key,
+            "message ordering key should be preserved when the message is sent to the DLQ"
+        );
+        assert_eq!(
+            message_metadata.event_time,
+            dlq_msg.metadata().event_time,
+            "message event time should be preserved when the message is sent to the DLQ"
         );
         dlq_consumer.ack(&dlq_msg).await.unwrap();
     }
 
     #[tokio::test]
-    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
     async fn dead_letter_queue_batched() {
         use crate::ProducerOptions;
 
@@ -795,45 +1035,126 @@ mod tests {
             .await
             .unwrap();
 
-        let messages = vec![
-            TestData {
-                topic: topic.clone(),
-                msg: rand::random(),
-            },
-            TestData {
-                topic: topic.clone(),
-                msg: rand::random(),
-            },
+        let message_datas = vec![
+            (
+                TestData {
+                    topic: topic.clone(),
+                    msg: rand::random(),
+                },
+                TestMessageMetadata {
+                    properties: HashMap::from([
+                        ("k_1_1".to_string(), "v_1_1".to_string()),
+                        ("k_2_1".to_string(), "v_2_1".to_string()),
+                    ]),
+                    partition_key: Some("partition_key_1".to_string()),
+                    ordering_key: Some(b"ordering_key_1".to_vec()),
+                    event_time: Some(rand::random()),
+                },
+            ),
+            (
+                TestData {
+                    topic: topic.clone(),
+                    msg: rand::random(),
+                },
+                TestMessageMetadata {
+                    properties: HashMap::from([
+                        ("k_1_2".to_string(), "v_1_2".to_string()),
+                        ("k_2_2".to_string(), "v_2_2".to_string()),
+                    ]),
+                    partition_key: Some("partition_key_2".to_string()),
+                    ordering_key: Some(b"ordering_key_2".to_vec()),
+                    event_time: Some(rand::random()),
+                },
+            ),
         ];
-        let receipts = producer.send_all(&messages).await.unwrap();
+        let messages = message_datas
+            .iter()
+            .map(|(data, metadata)| {
+                let mut message = <&TestData>::serialize_message(data).unwrap();
+                message.properties = metadata.properties.clone();
+                message.partition_key = metadata.partition_key.clone();
+                message.ordering_key = metadata.ordering_key.clone();
+                message.event_time = metadata.event_time;
+                message
+            })
+            .collect::<Vec<_>>();
+        let receipts = producer.send_all(messages).await.unwrap();
         producer.send_batch().await.unwrap();
         try_join_all(receipts).await.unwrap();
         println!("producer sends done");
 
-        for message in messages {
-            let msg = consumer.next().await.unwrap().unwrap();
+        for (message_data, message_metadata) in message_datas {
+            let msg = recv_within(&mut consumer, DEFAULT_RECV_TIMEOUT)
+                .await
+                .unwrap();
             println!("got message: {:?}", msg.payload);
             assert_eq!(
-                message,
+                message_data,
                 msg.deserialize().unwrap(),
                 "we probably received a message from a previous run of the test"
             );
             // Nacking message to send it to DLQ
             consumer.nack(&msg).await.unwrap();
 
-            let dlq_msg = dlq_consumer.next().await.unwrap().unwrap();
+            let dlq_msg = recv_within(&mut dlq_consumer, DEFAULT_RECV_TIMEOUT)
+                .await
+                .unwrap();
             println!("got message: {:?}", dlq_msg.payload);
             assert_eq!(
-                message,
+                message_data,
                 dlq_msg.deserialize().unwrap(),
                 "we probably received a message from a previous run of the test"
+            );
+            let mut expected_properties = message_metadata.properties;
+            expected_properties
+                .entry("REAL_TOPIC".to_string())
+                .or_insert_with(|| topic.clone());
+            expected_properties
+                .entry("ORIGIN_MESSAGE_ID".to_string())
+                .or_insert_with(|| {
+                    format!(
+                        "{}:{}:{}:{}",
+                        msg.message_id().ledger_id,
+                        msg.message_id().entry_id,
+                        msg.message_id().partition.unwrap_or(-1),
+                        msg.message_id().batch_index.unwrap_or(-1)
+                    )
+                });
+            assert_eq!(
+                expected_properties,
+                dlq_msg
+                    .metadata()
+                    .properties
+                    .iter()
+                    .map(|p| (p.key.clone(), p.value.clone()))
+                    .collect::<HashMap<_, _>>(),
+                "message properties should be preserved when the message is sent to the DLQ"
+            );
+            assert_eq!(
+                message_metadata.partition_key,
+                dlq_msg.metadata().partition_key,
+                "message partition key should be preserved when the message is sent to the DLQ"
+            );
+            assert_eq!(
+                message_metadata.ordering_key,
+                dlq_msg.metadata().ordering_key,
+                "message ordering key should be preserved when the message is sent to the DLQ"
+            );
+            assert_eq!(
+                message_metadata.event_time,
+                dlq_msg.metadata().event_time,
+                "message event time should be preserved when the message is sent to the DLQ"
             );
             dlq_consumer.ack(&dlq_msg).await.unwrap();
         }
     }
 
     #[tokio::test]
-    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
     async fn failover() {
         let _result = log::set_logger(&MULTI_LOGGER);
         log::set_max_level(LevelFilter::Debug);
@@ -893,7 +1214,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
     async fn seek_single_consumer() {
         let _result = log::set_logger(&MULTI_LOGGER);
         log::set_max_level(LevelFilter::Debug);
@@ -925,38 +1250,34 @@ mod tests {
             .with_subscription("seek_single_test")
             .with_subscription_type(SubType::Shared)
             .with_topic(&topic)
+            // Ensure we see the messages that were published before subscribing.
+            .with_options(ConsumerOptions {
+                initial_position: InitialPosition::Earliest,
+                ..Default::default()
+            })
             .build()
             .await
             .unwrap();
-
         log::info!("built the consumer");
 
         let mut consumed_1 = 0_u32;
-        while let Some(msg) = consumer_1.try_next().await.unwrap() {
-            consumer_1.ack(&msg).await.unwrap();
-            let publish_time = msg.metadata().publish_time;
-            let data = match msg.deserialize() {
-                Ok(data) => data,
-                Err(e) => {
-                    log::error!("could not deserialize message: {:?}", e);
-                    break;
-                }
-            };
 
-            consumed_1 += 1;
+        while consumed_1 < msg_count / 2 {
+            let msg = recv_within(&mut consumer_1, DEFAULT_RECV_TIMEOUT)
+                .await
+                .expect("first loop failed to receive");
+            let publish_time = msg.metadata().publish_time;
+            let data = msg.deserialize().expect("deserialize");
             log::info!(
                 "first loop, got {} messages, content: {}, publish time: {}",
-                consumed_1,
+                consumed_1 + 1,
                 data,
                 publish_time
             );
-
-            // break after enough half of the messages were received
-            if consumed_1 >= msg_count / 2 {
-                log::info!("first loop, received {} messages, so break", consumed_1);
-                break;
-            }
+            consumer_1.ack(&msg).await.unwrap();
+            consumed_1 += 1;
         }
+        log::info!("first loop, received {} messages, so break", consumed_1);
 
         // // call seek(timestamp), roll back the consumer to start_time
         log::info!("calling seek method");
@@ -980,31 +1301,26 @@ mod tests {
         // .unwrap();
 
         // then read the messages again
-        let mut consumed_2 = 0_u32;
         log::info!("reading messages again");
-        while let Some(msg) = consumer_1.try_next().await.unwrap() {
-            let publish_time = msg.metadata().publish_time;
-            consumer_1.ack(&msg).await.unwrap();
-            let data = match msg.deserialize() {
-                Ok(data) => data,
-                Err(e) => {
-                    log::error!("could not deserialize message: {:?}", e);
-                    break;
-                }
-            };
-            consumed_2 += 1;
-            log::info!(
-                "second loop, got {} messages, content: {},  publish time: {}",
-                consumed_2,
-                data,
-                publish_time,
-            );
 
-            if consumed_2 >= msg_count {
-                log::info!("received {} messagses, so break", consumed_2);
-                break;
-            }
+        let mut consumed_2 = 0_u32;
+
+        while consumed_2 < msg_count {
+            let msg = recv_within(&mut consumer_1, DEFAULT_RECV_TIMEOUT)
+                .await
+                .expect("second loop failed to receive after seek");
+            let publish_time = msg.metadata().publish_time;
+            let data = msg.deserialize().expect("deserialize");
+            log::info!(
+                "second loop, got {} messages, content: {}, publish time: {}",
+                consumed_2 + 1,
+                data,
+                publish_time
+            );
+            consumer_1.ack(&msg).await.unwrap();
+            consumed_2 += 1;
         }
+        log::info!("received {} messages in second loop, so break", consumed_2);
 
         // then check if all messages were received
         assert_eq!(50, consumed_1);
@@ -1012,7 +1328,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(any(feature = "tokio-runtime", feature = "tokio-rustls-runtime"))]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
     async fn schema_test() {
         #[derive(Serialize, Deserialize)]
         struct TestData {
@@ -1046,19 +1366,19 @@ mod tests {
         let client: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await.unwrap();
 
         let json_schema = serde_json::json!({
-            "$id": "https://example.com/test.schema.json",
-            "$schema": "https://json-schema.org/draft/2020-12/schema",
-            "title": "TestRecord",
-            "type": "object",
-            "properties": {
-              "name": {
-                "type": "string",
-              },
-              "age": {
-                "type": "integer",
-                "minimum": 0
-              }
+          "type": "record",
+          "name": "TestRecord",
+          "namespace": "com.example",
+          "fields": [
+            {
+              "name": "name",
+              "type": "string"
+            },
+            {
+              "name": "age",
+              "type": "int"
             }
+          ]
         });
 
         let schema_data = serde_json::to_vec(&json_schema).unwrap();
@@ -1094,7 +1414,7 @@ mod tests {
             log::info!("built the consumer");
             tx.send(true).unwrap();
 
-            if let Some(msg) = consumer.try_next().await.unwrap() {
+            if let Ok(msg) = recv_within(&mut consumer, DEFAULT_RECV_TIMEOUT).await {
                 let schema_version = msg.payload.metadata.schema_version.clone();
                 let schema = consumer
                     .get_schema(&topic, schema_version)
@@ -1108,6 +1428,8 @@ mod tests {
                 assert_eq!(json_schema, schema_resolved);
 
                 consumer.ack(&msg).await.unwrap();
+            } else {
+                panic!("timed out waiting for schema_test message");
             }
         });
 
@@ -1126,5 +1448,382 @@ mod tests {
             .unwrap();
 
         join_handle.await.unwrap();
+    }
+
+    // ── schema_version test helpers ───────────────────────────────────
+
+    #[derive(Serialize, Deserialize)]
+    struct SchemaTestData {
+        age: i32,
+        name: String,
+    }
+
+    impl SerializeMessage for SchemaTestData {
+        fn serialize_message(input: Self) -> Result<producer::Message, PulsarError> {
+            let payload =
+                serde_json::to_vec(&input).map_err(|e| PulsarError::Custom(e.to_string()))?;
+            Ok(producer::Message {
+                payload,
+                ..Default::default()
+            })
+        }
+    }
+
+    impl DeserializeMessage for SchemaTestData {
+        type Output = Result<SchemaTestData, serde_json::Error>;
+
+        fn deserialize_message(payload: &Payload) -> Self::Output {
+            serde_json::from_slice(&payload.data)
+        }
+    }
+
+    fn test_json_schema(name: &str) -> Vec<u8> {
+        let json_schema = serde_json::json!({
+          "type": "record",
+          "name": name,
+          "namespace": "com.example",
+          "fields": [
+            { "name": "name", "type": "string" },
+            { "name": "age", "type": "int" }
+          ]
+        });
+        serde_json::to_vec(&json_schema).unwrap()
+    }
+
+    fn init_logger() {
+        let _result = log::set_logger(&MULTI_LOGGER);
+        log::set_max_level(LevelFilter::Debug);
+    }
+
+    async fn new_client() -> Pulsar<TokioExecutor> {
+        let addr = "pulsar://127.0.0.1:6650";
+        Pulsar::builder(addr, TokioExecutor).build().await.unwrap()
+    }
+
+    /// Build a producer with a JSON schema (and optional extra options like
+    /// `batch_size`).
+    async fn schema_producer(
+        client: &Pulsar<TokioExecutor>,
+        topic: &str,
+        name: &str,
+        schema_name: &str,
+        extra: impl FnOnce(&mut producer::ProducerOptions),
+    ) -> producer::Producer<TokioExecutor> {
+        let mut opts = producer::ProducerOptions {
+            schema: Some(proto::Schema {
+                r#type: proto::schema::Type::Json as i32,
+                schema_data: test_json_schema(schema_name),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        extra(&mut opts);
+        client
+            .producer()
+            .with_topic(topic)
+            .with_name(name)
+            .with_options(opts)
+            .build()
+            .await
+            .unwrap()
+    }
+
+    /// Build an Exclusive consumer that starts from Earliest.
+    async fn earliest_consumer<T: DeserializeMessage>(
+        client: &Pulsar<TokioExecutor>,
+        topic: &str,
+        name: &str,
+        sub: &str,
+    ) -> Consumer<T, TokioExecutor> {
+        client
+            .consumer()
+            .with_consumer_name(name)
+            .with_subscription(sub)
+            .with_subscription_type(SubType::Exclusive)
+            .with_topic(topic)
+            .with_options(ConsumerOptions {
+                initial_position: InitialPosition::Earliest,
+                ..Default::default()
+            })
+            .build()
+            .await
+            .unwrap()
+    }
+
+    // ── schema_version tests ────────────────────────────────────────
+
+    #[tokio::test]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
+    async fn schema_version_set_on_produced_messages() {
+        init_logger();
+        let topic = format!("schema_version_test_{}", rand::random::<u16>());
+        let client = new_client().await;
+
+        let mut producer = schema_producer(
+            &client,
+            &topic,
+            "schema_version_producer",
+            "SchemaVersionTest",
+            |_| {},
+        )
+        .await;
+
+        let mut consumer: Consumer<SchemaTestData, _> = earliest_consumer(
+            &client,
+            &topic,
+            "schema_version_consumer",
+            "schema_version_sub",
+        )
+        .await;
+
+        #[allow(deprecated)]
+        producer
+            .send(SchemaTestData {
+                age: 30,
+                name: "test".to_string(),
+            })
+            .await
+            .unwrap()
+            .await
+            .unwrap();
+
+        let msg = recv_within(&mut consumer, DEFAULT_RECV_TIMEOUT)
+            .await
+            .unwrap();
+
+        // The producer attaches the schema_version from CommandProducerSuccess
+        // when the message does not already have one set.
+        assert!(
+            msg.payload
+                .metadata
+                .schema_version
+                .as_ref()
+                .is_some_and(|sv| !sv.is_empty()),
+            "schema_version should be a non-empty byte sequence, got {:?}",
+            msg.payload.metadata.schema_version
+        );
+
+        consumer.ack(&msg).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
+    async fn schema_version_set_on_batched_messages() {
+        init_logger();
+        let topic = format!("schema_version_batch_test_{}", rand::random::<u16>());
+        let client = new_client().await;
+
+        let mut producer = schema_producer(
+            &client,
+            &topic,
+            "schema_version_batch_producer",
+            "SchemaVersionBatchTest",
+            |opts| {
+                opts.batch_size = Some(2);
+            },
+        )
+        .await;
+
+        let mut consumer: Consumer<SchemaTestData, _> = earliest_consumer(
+            &client,
+            &topic,
+            "schema_version_batch_consumer",
+            "schema_version_batch_sub",
+        )
+        .await;
+
+        // Send 2 messages to trigger batch flush (batch_size=2).
+        // Use send_non_blocking to queue both before awaiting receipts,
+        // otherwise the deprecated send() method awaits the receipt inline,
+        // which deadlocks because the batch won't flush until both messages
+        // are queued.
+        let receipt1 = producer
+            .send_non_blocking(SchemaTestData {
+                age: 25,
+                name: "batch1".to_string(),
+            })
+            .await
+            .unwrap();
+        let receipt2 = producer
+            .send_non_blocking(SchemaTestData {
+                age: 35,
+                name: "batch2".to_string(),
+            })
+            .await
+            .unwrap();
+        futures::try_join!(receipt1, receipt2).unwrap();
+
+        let mut schema_versions = Vec::new();
+        for _ in 0..2 {
+            let msg = recv_within(&mut consumer, DEFAULT_RECV_TIMEOUT)
+                .await
+                .unwrap();
+
+            let sv = msg.payload.metadata.schema_version.clone();
+            assert!(
+                sv.is_some(),
+                "schema_version should be set on batched messages produced with a schema"
+            );
+            schema_versions.push(sv.unwrap());
+
+            consumer.ack(&msg).await.unwrap();
+        }
+        // Both messages in the same batch should carry the same schema_version.
+        assert_eq!(
+            schema_versions[0], schema_versions[1],
+            "both messages in the same batch should carry the same schema_version"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
+    async fn user_provided_schema_version_not_overwritten() {
+        // A custom SerializeMessage impl that explicitly sets schema_version
+        // on the outgoing message. The producer should preserve this value
+        // instead of overwriting it with the broker-assigned version.
+        #[derive(Serialize, Deserialize)]
+        struct DataWithCustomSchemaVersion {
+            value: String,
+        }
+
+        const CUSTOM_SCHEMA_VERSION: &[u8] = &[42, 42, 42, 42];
+
+        impl SerializeMessage for DataWithCustomSchemaVersion {
+            fn serialize_message(input: Self) -> Result<producer::Message, PulsarError> {
+                let payload =
+                    serde_json::to_vec(&input).map_err(|e| PulsarError::Custom(e.to_string()))?;
+                Ok(producer::Message {
+                    payload,
+                    schema_version: Some(CUSTOM_SCHEMA_VERSION.to_vec()),
+                    ..Default::default()
+                })
+            }
+        }
+
+        impl DeserializeMessage for DataWithCustomSchemaVersion {
+            type Output = Result<DataWithCustomSchemaVersion, serde_json::Error>;
+
+            fn deserialize_message(payload: &Payload) -> Self::Output {
+                serde_json::from_slice(&payload.data)
+            }
+        }
+
+        init_logger();
+        let topic = format!("schema_version_override_test_{}", rand::random::<u16>());
+        let client = new_client().await;
+
+        let mut producer = schema_producer(
+            &client,
+            &topic,
+            "schema_version_override_producer",
+            "SchemaVersionOverrideTest",
+            |_| {},
+        )
+        .await;
+
+        let mut consumer: Consumer<DataWithCustomSchemaVersion, _> = earliest_consumer(
+            &client,
+            &topic,
+            "schema_version_override_consumer",
+            "schema_version_override_sub",
+        )
+        .await;
+
+        #[allow(deprecated)]
+        producer
+            .send(DataWithCustomSchemaVersion {
+                value: "override_test".to_string(),
+            })
+            .await
+            .unwrap()
+            .await
+            .unwrap();
+
+        let msg = recv_within(&mut consumer, DEFAULT_RECV_TIMEOUT)
+            .await
+            .unwrap();
+
+        // The user-provided schema_version should be preserved, not replaced
+        // by the broker-assigned version.
+        assert_eq!(
+            msg.payload.metadata.schema_version.as_deref(),
+            Some(CUSTOM_SCHEMA_VERSION),
+            "user-provided schema_version should not be overwritten by the broker-assigned version"
+        );
+
+        consumer.ack(&msg).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
+    async fn schemaless_producer_has_no_schema_version() {
+        init_logger();
+        let topic = format!("schemaless_sv_test_{}", rand::random::<u16>());
+        let client = new_client().await;
+
+        // Producer created without a schema — the broker returns an empty
+        // schema_version (Some([])), not a meaningful version byte sequence.
+        let mut producer = client
+            .producer()
+            .with_topic(&topic)
+            .with_name("schemaless_sv_producer")
+            .build()
+            .await
+            .unwrap();
+
+        let mut consumer: Consumer<TestData, _> = earliest_consumer(
+            &client,
+            &topic,
+            "schemaless_sv_consumer",
+            "schemaless_sv_sub",
+        )
+        .await;
+
+        #[allow(deprecated)]
+        producer
+            .send(&TestData {
+                topic: "schemaless".to_string(),
+                msg: 1,
+            })
+            .await
+            .unwrap()
+            .await
+            .unwrap();
+
+        let msg = recv_within(&mut consumer, DEFAULT_RECV_TIMEOUT)
+            .await
+            .unwrap();
+
+        // The broker returns schema_version = Some([]) for schemaless topics,
+        // which is distinct from the non-empty version assigned to schema-ed
+        // topics. Verify the version is either absent or empty.
+        let sv = msg
+            .payload
+            .metadata
+            .schema_version
+            .as_deref()
+            .unwrap_or(&[]);
+        assert!(
+            sv.is_empty(),
+            "schemaless producer should not carry a non-empty schema_version, got {sv:?}"
+        );
+
+        consumer.ack(&msg).await.unwrap();
     }
 }

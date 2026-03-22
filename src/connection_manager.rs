@@ -1,17 +1,14 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use futures::{channel::oneshot, lock::Mutex};
-#[cfg(any(feature = "tokio-runtime", feature = "async-std-runtime"))]
-use native_tls::Certificate;
 use rand::Rng;
-#[cfg(all(
-    any(feature = "tokio-rustls-runtime", feature = "async-std-rustls-runtime"),
-    not(any(feature = "tokio-runtime", feature = "async-std-runtime"))
-))]
-use rustls::Certificate;
 use url::Url;
 
-use crate::{connection::Connection, error::ConnectionError, executor::Executor};
+use crate::{connection::Connection, error::ConnectionError, executor::Executor, Certificate};
 
 /// holds connection information for a broker
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -38,6 +35,8 @@ pub struct ConnectionRetryOptions {
     pub connection_timeout: Duration,
     /// keep-alive interval for each broker connection
     pub keep_alive: Duration,
+    /// maximum idle time before a connection is eligible for cleanup
+    pub connection_max_idle: Duration,
 }
 
 impl Default for ConnectionRetryOptions {
@@ -49,6 +48,7 @@ impl Default for ConnectionRetryOptions {
             max_retries: 12u32,
             connection_timeout: Duration::from_secs(10),
             keep_alive: Duration::from_secs(60),
+            connection_max_idle: Duration::from_secs(120),
         }
     }
 }
@@ -72,6 +72,59 @@ impl Default for OperationRetryOptions {
             retry_delay: Duration::from_secs(5),
             max_retries: None,
         }
+    }
+}
+
+impl OperationRetryOptions {
+    pub fn allow_retry(&self, current: u32) -> bool {
+        self.max_retries.is_none() || current < self.max_retries.unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_allow_retry_no_max_retries() {
+        let options = OperationRetryOptions {
+            operation_timeout: Duration::from_secs(30),
+            retry_delay: Duration::from_secs(5),
+            max_retries: None,
+        };
+
+        // If max_retries is None, it should always allow retries
+        assert!(options.allow_retry(0));
+        assert!(options.allow_retry(100));
+        assert!(options.allow_retry(u32::MAX));
+    }
+
+    #[test]
+    fn test_allow_retry_with_max_retries() {
+        let options = OperationRetryOptions {
+            operation_timeout: Duration::from_secs(30),
+            retry_delay: Duration::from_secs(5),
+            max_retries: Some(3),
+        };
+
+        // If max_retries is set to 3, we allow retries for current < 3
+        assert!(options.allow_retry(0)); // current < 3
+        assert!(options.allow_retry(2)); // current < 3
+        assert!(!options.allow_retry(3)); // current == 3
+        assert!(!options.allow_retry(4)); // current > 3
+    }
+
+    #[test]
+    fn test_allow_retry_max_retries_is_zero() {
+        let options = OperationRetryOptions {
+            operation_timeout: Duration::from_secs(30),
+            retry_delay: Duration::from_secs(5),
+            max_retries: Some(0),
+        };
+
+        // If max_retries is 0, it should not allow any retries
+        assert!(!options.allow_retry(0)); // current == 0
+        assert!(!options.allow_retry(1)); // current > 0
     }
 }
 
@@ -104,7 +157,10 @@ impl Default for TlsOptions {
 }
 
 enum ConnectionStatus<Exe: Executor> {
-    Connected(Arc<Connection<Exe>>),
+    Connected {
+        conn: Arc<Connection<Exe>>,
+        last_used: Instant,
+    },
     Connecting(Vec<oneshot::Sender<Result<Arc<Connection<Exe>>, ConnectionError>>>),
 }
 
@@ -156,25 +212,23 @@ impl<Exe: Executor> ConnectionManager<Exe> {
             None => vec![],
             Some(certificate_chain) => {
                 let mut v = vec![];
-                for cert in pem::parse_many(certificate_chain)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
-                    .iter()
-                    .rev()
-                {
+                let certificates =
+                    pem::parse_many(certificate_chain).map_err(std::io::Error::other)?;
+
+                for cert in certificates.iter().rev() {
                     #[cfg(any(feature = "tokio-runtime", feature = "async-std-runtime"))]
-                    v.push(
-                        Certificate::from_der(cert.contents())
-                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?,
-                    );
+                    v.push(Certificate::from_der(cert.contents()).map_err(std::io::Error::other)?);
 
                     #[cfg(all(
                         any(
-                            feature = "tokio-rustls-runtime",
-                            feature = "async-std-rustls-runtime"
+                            feature = "tokio-rustls-runtime-aws-lc-rs",
+                            feature = "tokio-rustls-runtime-ring",
+                            feature = "async-std-rustls-runtime-aws-lc-rs",
+                            feature = "async-std-rustls-runtime-ring"
                         ),
                         not(any(feature = "tokio-runtime", feature = "async-std-runtime"))
                     ))]
-                    v.push(Certificate(cert.contents().to_vec()));
+                    v.push(Certificate::from(cert.contents().to_vec()));
                 }
                 v
             }
@@ -233,19 +287,31 @@ impl<Exe: Executor> ConnectionManager<Exe> {
         &self,
         broker: &BrokerAddress,
     ) -> Result<Arc<Connection<Exe>>, ConnectionError> {
+        trace!("Looking for connection to {}...", broker.url);
         let rx = {
             let mut conns = self.connections.lock().await;
             match conns.get_mut(broker) {
-                None => None,
-                Some(ConnectionStatus::Connected(conn)) => {
+                None => {
+                    trace!("[] no connection for {}", broker.url);
+                    None
+                }
+                Some(ConnectionStatus::Connected { conn, last_used }) => {
                     if conn.is_valid() {
+                        trace!("[connected] returning valid connection for {}", broker.url);
+                        // Update last_used timestamp to prevent premature cleanup
+                        *last_used = Instant::now();
                         return Ok(conn.clone());
                     } else {
+                        warn!("[connected] invalid connection for {}", broker.url);
                         None
                     }
                 }
                 Some(ConnectionStatus::Connecting(ref mut v)) => {
                     let (tx, rx) = oneshot::channel();
+                    debug!(
+                        "[connecting...] existing pending connection to {}",
+                        broker.url
+                    );
                     v.push(tx);
                     Some(rx)
                 }
@@ -253,9 +319,15 @@ impl<Exe: Executor> ConnectionManager<Exe> {
         };
 
         match rx {
-            None => self.connect(broker.clone()).await,
+            None => {
+                info!("No existing connection, creating new for {}", broker.url);
+                self.connect(broker.clone()).await
+            }
             Some(rx) => match rx.await {
-                Ok(res) => res,
+                Ok(res) => {
+                    debug!("Connection found for {}", broker.url);
+                    res
+                }
                 Err(_) => Err(ConnectionError::Canceled),
             },
         }
@@ -266,8 +338,6 @@ impl<Exe: Executor> ConnectionManager<Exe> {
         &self,
         broker: &BrokerAddress,
     ) -> Result<Arc<Connection<Exe>>, ConnectionError> {
-        debug!("ConnectionManager::connect({:?})", broker);
-
         let rx = {
             match self
                 .connections
@@ -285,7 +355,7 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                         Some(rx)
                     }
                 }
-                ConnectionStatus::Connected(_) => None,
+                ConnectionStatus::Connected { .. } => None,
             }
         };
         if let Some(rx) = rx {
@@ -418,6 +488,20 @@ impl<Exe: Executor> ConnectionManager<Exe> {
         let res = self.executor.spawn(Box::pin(async move {
             use crate::futures::StreamExt;
             while let Some(()) = interval.next().await {
+                let Some(strong_conn) = weak_conn.upgrade() else {
+                    debug!(
+                        "connection {} was dropped, stopping keepalive task",
+                        connection_id
+                    );
+                    break;
+                };
+                if !strong_conn.is_valid() {
+                    debug!(
+                        "connection {} is not valid anymore, stopping keepalive task",
+                        connection_id
+                    );
+                    break;
+                }
                 if let Some(url) = proxy_to_broker_url.as_ref() {
                     trace!(
                         "will ping connection {} to {} via proxy {}",
@@ -428,38 +512,26 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                 } else {
                     trace!("will ping connection {} to {}", connection_id, broker_url);
                 }
-                if let Some(strong_conn) = weak_conn.upgrade() {
-                    if !strong_conn.is_valid() {
-                        trace!(
-                            "connection {} is not valid anymore, skip heart beat task",
-                            connection_id
-                        );
-                        break;
-                    }
-                    if let Err(e) = strong_conn.sender().send_ping().await {
-                        error!(
-                            "could not ping connection {} to the server at {}: {}",
-                            connection_id, broker_url, e
-                        );
-                    }
-                } else {
-                    // if the strong pointers were dropped, we can stop the heartbeat for this
-                    // connection
-                    trace!("strong connection was dropped, stopping keepalive task");
-                    break;
+                if let Err(e) = strong_conn.sender().send_ping().await {
+                    error!(
+                        "could not ping connection {} to the server at {}: {}",
+                        connection_id, broker_url, e
+                    );
                 }
             }
         }));
         if res.is_err() {
-            error!("the executor could not spawn the heartbeat future");
+            error!("the executor could not spawn the keepalive future");
             return Err(ConnectionError::Shutdown);
         }
 
-        let old = self
-            .connections
-            .lock()
-            .await
-            .insert(broker, ConnectionStatus::Connected(c.clone()));
+        let old = self.connections.lock().await.insert(
+            broker,
+            ConnectionStatus::Connected {
+                conn: c.clone(),
+                last_used: Instant::now(),
+            },
+        );
         match old {
             Some(ConnectionStatus::Connecting(mut v)) => {
                 //info!("was in connecting state({} waiting)", v.len());
@@ -467,11 +539,11 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                     let _ = tx.send(Ok(c.clone()));
                 }
             }
-            Some(ConnectionStatus::Connected(_)) => {
+            Some(ConnectionStatus::Connected { .. }) => {
                 info!("removing old connection");
             }
             None => {
-                //info!("setting up new connection");
+                debug!("setting up new connection");
             }
         };
 
@@ -485,22 +557,43 @@ impl<Exe: Executor> ConnectionManager<Exe> {
         self.connections
             .lock()
             .await
-            .retain(|_, ref mut connection| match connection {
-                ConnectionStatus::Connecting(_) => true,
-                ConnectionStatus::Connected(conn) => {
-                    // if the manager holds the only reference to that
-                    // connection, we can remove it from the manager
-                    // no need for special synchronization here: we're already
-                    // in a mutex, and a case appears where the Arc is cloned
-                    // somewhere at the same time, that just means the manager
-                    // will create a new connection the next time it is asked
+            .retain(|broker, ref mut connection| match connection {
+                ConnectionStatus::Connecting(_) => {
+                    trace!("Retaining connection in `Connecting` state");
+                    true
+                }
+                ConnectionStatus::Connected { conn, last_used } => {
+                    let max_idle = self.connection_retry_options.connection_max_idle;
+                    let idle_time = last_used.elapsed();
+                    let recently_used = idle_time < max_idle;
+                    let strong_count = Arc::strong_count(conn);
+                    let is_valid = conn.is_valid();
+
+                    // Keep connection if valid AND (actively held OR recently used)
+                    // This allows periodic use (like topic refresh) while cleaning up truly abandoned connections
+                    let should_retain = is_valid && (strong_count > 1 || recently_used);
+
                     trace!(
-                        "checking connection {}, is valid? {}, strong_count {}",
+                        "checking broker {} connection {}, is_valid: {}, strong_count: {}, idle_time: {:?}, max_idle: {:?}, recently_used: {}",
+                        broker.url,
                         conn.id(),
-                        conn.is_valid(),
-                        Arc::strong_count(conn)
+                        is_valid,
+                        strong_count,
+                        idle_time,
+                        max_idle,
+                        recently_used
                     );
-                    conn.is_valid() && Arc::strong_count(conn) > 1
+                    if !should_retain {
+                        info!(
+                            "Removing {} connection {} to {} (max_idle: {:?}, idle_time: {:?})",
+                            if is_valid { "unused" } else { "invalid" },
+                            conn.id(),
+                            broker.url,
+                            max_idle,
+                            idle_time
+                        );
+                    }
+                    should_retain
                 }
             });
     }

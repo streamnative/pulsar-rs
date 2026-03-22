@@ -65,7 +65,7 @@ async fn main() -> Result<(), pulsar::Error> {
         loop {
             println!("will send");
             let receipt_rx = producer
-                .send(TestData {
+                .send_non_blocking(TestData {
                     data: "data".to_string(),
                 })
                 .await

@@ -1,6 +1,6 @@
 //! Message publication
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{btree_map::Entry, BTreeMap, HashMap, VecDeque},
     io::Write,
     pin::Pin,
     sync::{
@@ -11,12 +11,12 @@ use std::{
 };
 
 use futures::{
-    channel::oneshot,
-    future::try_join_all,
-    lock::Mutex,
+    channel::{mpsc, oneshot},
+    future::{self, try_join_all, Either},
     task::{Context, Poll},
-    Future,
+    Future, SinkExt, StreamExt,
 };
+use rand::Rng;
 
 use crate::{
     client::SerializeMessage,
@@ -28,7 +28,9 @@ use crate::{
         proto::{self, CommandSendReceipt, EncryptionKeys, Schema},
         BatchedMessage,
     },
+    proto::CommandSuccess,
     retry_op::retry_create_producer,
+    routing_policy::RoutingPolicy,
     BrokerAddress, Error, Pulsar,
 };
 
@@ -81,6 +83,9 @@ pub struct Message {
     pub event_time: ::std::option::Option<u64>,
     /// current version of the schema
     pub schema_version: ::std::option::Option<Vec<u8>>,
+    /// UTC Unix timestamp in milliseconds, time at which the message should be
+    /// delivered to consumers
+    pub deliver_at_time: ::std::option::Option<i64>,
 }
 
 /// internal message type carrying options that must be defined
@@ -126,6 +131,7 @@ impl From<Message> for ProducerMessage {
             replicate_to: m.replicate_to,
             event_time: m.event_time,
             schema_version: m.schema_version,
+            deliver_at_time: m.deliver_at_time,
             ..Default::default()
         }
     }
@@ -145,11 +151,28 @@ pub struct ProducerOptions {
     /// batch size in bytes treshold (only relevant when batch_size active).
     /// batch is sent when batch size in bytes is reached
     pub batch_byte_size: Option<usize>,
+    /// the batch will be sent if this timeout is reached after the 1st message is added into the
+    /// batch even if it does not reach the size or byte size limit.
+    pub batch_timeout: Option<Duration>,
     /// algorithm used to compress the messages
     pub compression: Option<Compression>,
     /// producer access mode: shared = 0, exclusive = 1, waitforexclusive =2,
     /// exclusivewithoutfencing =3
     pub access_mode: Option<i32>,
+    /// Whether to block if the internal pending queue, whose size is configured by
+    /// [`crate::client::PulsarBuilder::with_outbound_channel_size`] is full, when awaiting
+    /// [`Producer::send_non_blocking`]. (default: false)
+    pub block_queue_if_full: bool,
+    pub routing_policy: Option<RoutingPolicy>,
+}
+
+impl ProducerOptions {
+    fn enabled_batching(&self) -> bool {
+        match self.batch_size {
+            Some(batch_size) => batch_size > 1,
+            None => self.batch_byte_size.is_some() || self.batch_timeout.is_some(),
+        }
+    }
 }
 
 /// Wrapper structure that manges multiple producers at once, creating them as needed
@@ -162,8 +185,8 @@ pub struct ProducerOptions {
 /// # let message = "data".to_owned();
 /// let pulsar: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await?;
 /// let mut producer = pulsar.producer().with_name("name").build_multi_topic();
-/// let send_1 = producer.send(topic, &message).await?;
-/// let send_2 = producer.send(topic, &message).await?;
+/// let send_1 = producer.send_non_blocking(topic, &message).await?;
+/// let send_2 = producer.send_non_blocking(topic, &message).await?;
 /// send_1.await?;
 /// send_2.await?;
 /// # Ok(())
@@ -222,20 +245,22 @@ impl<Exe: Executor> MultiTopicProducer<Exe> {
     ) -> Result<SendFuture, Error> {
         let message = T::serialize_message(message)?;
         let topic = topic.into();
-        if !self.producers.contains_key(&topic) {
-            let mut builder = self
-                .client
-                .producer()
-                .with_topic(&topic)
-                .with_options(self.options.clone());
-            if let Some(name) = &self.name {
-                builder = builder.with_name(name.clone());
+        let producer = match self.producers.entry(topic) {
+            Entry::Vacant(entry) => {
+                let mut builder = self
+                    .client
+                    .producer()
+                    .with_topic(entry.key())
+                    .with_options(self.options.clone());
+                if let Some(name) = &self.name {
+                    builder = builder.with_name(name);
+                }
+                let producer = builder.build().await?;
+                entry.insert(producer)
             }
-            let producer = builder.build().await?;
-            self.producers.insert(topic.clone(), producer);
-        }
+            Entry::Occupied(entry) => entry.into_mut(),
+        };
 
-        let producer = self.producers.get_mut(&topic).unwrap();
         producer.send_non_blocking(message).await
     }
 
@@ -337,7 +362,7 @@ impl<Exe: Executor> Producer<Exe> {
     ///
     /// the created message will ber sent by this producer in [MessageBuilder::send]
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub fn create_message(&mut self) -> MessageBuilder<(), Exe> {
+    pub fn create_message<'a>(&'a mut self) -> MessageBuilder<'a, (), Exe> {
         MessageBuilder::new(self)
     }
 
@@ -359,8 +384,28 @@ impl<Exe: Executor> Producer<Exe> {
     /// this function returns a `SendFuture` because the receipt can come long after
     /// this function was called, for various reasons:
     /// - the message was sent successfully but Pulsar did not send the receipt yet
-    /// - the producer is batching messages, so this function must return immediately,
-    /// and the receipt will come when the batched messages are actually sent
+    /// - the producer is batching messages, so this function must return immediately, and the
+    ///   receipt will come when the batched messages are actually sent
+    ///
+    /// If [`ProducerOptions::block_queue_if_full`] is false (by default) and the internal pending
+    /// queue is full, which means the send rate is too fast,
+    /// [`crate::error::ConnectionError::SlowDown`] will be returned. You should handle the error
+    /// like:
+    ///
+    /// ```rust,no_run
+    /// use pulsar::error::{ConnectionError, Error, ProducerError};
+    ///
+    /// # async fn run(mut producer: pulsar::Producer<pulsar::TokioExecutor>) -> Result<(), pulsar::Error> {
+    /// match producer.send_non_blocking("msg").await {
+    ///     Ok(future) => { /* handle the send future */ }
+    ///     Err(Error::Producer(ProducerError::Connection(ConnectionError::SlowDown))) => {
+    ///         /* wait for a while and resent */
+    ///     }
+    ///     Err(e) => { /* handle other errors */ }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     ///
     /// Usage:
     ///
@@ -378,9 +423,14 @@ impl<Exe: Executor> Producer<Exe> {
         &mut self,
         message: T,
     ) -> Result<SendFuture, Error> {
+        let serialized_message = T::serialize_message(message)?;
         match &mut self.inner {
-            ProducerInner::Single(p) => p.send(message).await,
-            ProducerInner::Partitioned(p) => p.next().send(message).await,
+            ProducerInner::Single(p) => p.send(serialized_message).await,
+            ProducerInner::Partitioned(p) => {
+                p.choose_partition(&serialized_message)
+                    .send(serialized_message)
+                    .await
+            }
         }
     }
 
@@ -398,8 +448,8 @@ impl<Exe: Executor> Producer<Exe> {
     ///
     /// ```rust,no_run
     /// # async fn run(mut producer: pulsar::Producer<pulsar::TokioExecutor>) -> Result<(), pulsar::Error> {
-    /// let f1 = producer.send("hello").await?;
-    /// let f2 = producer.send("world").await?;
+    /// let f1 = producer.send_non_blocking("hello").await?;
+    /// let f2 = producer.send_non_blocking("world").await?;
     /// let receipt1 = f1.await?;
     /// let receipt2 = f2.await?;
     /// # Ok(())
@@ -424,13 +474,15 @@ impl<Exe: Executor> Producer<Exe> {
         T: SerializeMessage,
         I: IntoIterator<Item = T>,
     {
-        let producer = match &mut self.inner {
-            ProducerInner::Single(p) => p,
-            ProducerInner::Partitioned(p) => p.next(),
-        };
         let mut sends = Vec::new();
         for message in messages {
-            sends.push(producer.send(message).await);
+            let serialized_message = T::serialize_message(message)?;
+            let producer = match &mut self.inner {
+                ProducerInner::Single(p) => p,
+                ProducerInner::Partitioned(p) => p.choose_partition(&serialized_message),
+            };
+
+            sends.push(producer.send(serialized_message).await);
         }
         if sends.iter().all(|s| s.is_ok()) {
             Ok(sends.into_iter().map(|s| s.unwrap()).collect())
@@ -453,20 +505,14 @@ impl<Exe: Executor> Producer<Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub(crate) async fn send_raw(&mut self, message: ProducerMessage) -> Result<SendFuture, Error> {
-        match &mut self.inner {
-            ProducerInner::Single(p) => p.send_raw(message).await,
-            ProducerInner::Partitioned(p) => p.next().send_raw(message).await,
-        }
-    }
-
-    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn close(&mut self) -> Result<(), Error> {
         match &mut self.inner {
             ProducerInner::Single(producer) => producer.close().await,
-            ProducerInner::Partitioned(p) => try_join_all(p.producers.iter().map(|p| p.close()))
-                .await
-                .map(drop),
+            ProducerInner::Partitioned(p) => {
+                try_join_all(p.producers.iter_mut().map(|p| p.close()))
+                    .await
+                    .map(drop)
+            }
         }
     }
 }
@@ -478,16 +524,52 @@ enum ProducerInner<Exe: Executor> {
 
 struct PartitionedProducer<Exe: Executor> {
     // Guaranteed to be non-empty
-    producers: VecDeque<TopicProducer<Exe>>,
+    producers: Vec<TopicProducer<Exe>>,
+    last_used_producer_index: usize,
     topic: String,
     options: ProducerOptions,
 }
 
 impl<Exe: Executor> PartitionedProducer<Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub fn next(&mut self) -> &mut TopicProducer<Exe> {
-        self.producers.rotate_left(1);
-        self.producers.front_mut().unwrap()
+    fn get_next_round_robin_producer(&mut self) -> &mut TopicProducer<Exe> {
+        let amount_of_producers = self.producers.len();
+        self.last_used_producer_index += 1;
+        if self.last_used_producer_index >= amount_of_producers {
+            self.last_used_producer_index = 0;
+        }
+        self.producers
+            .get_mut(self.last_used_producer_index)
+            .unwrap()
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn choose_partition(&mut self, message: &Message) -> &mut TopicProducer<Exe> {
+        match &self.options.routing_policy {
+            Some(RoutingPolicy::RoundRobin) => {
+                // If the message has a partition key, use it
+                if let Some(partition_key) = &message.partition_key {
+                    let index = RoutingPolicy::compute_partition_index_for_key(
+                        partition_key,
+                        self.producers.len(),
+                    );
+                    return self.producers.get_mut(index).unwrap();
+                }
+                // If not, use round robin
+                self.get_next_round_robin_producer()
+            }
+            Some(RoutingPolicy::Single) => self
+                .producers
+                .get_mut(self.last_used_producer_index)
+                .unwrap(),
+            Some(RoutingPolicy::Custom(policy)) => {
+                let amount_of_producers = self.producers.len();
+                self.producers
+                    .get_mut(policy.route(message, amount_of_producers))
+                    .unwrap()
+            }
+            None => self.get_next_round_robin_producer(),
+        }
     }
 }
 
@@ -498,12 +580,23 @@ struct TopicProducer<Exe: Executor> {
     id: ProducerId,
     name: ProducerName,
     topic: String,
-    message_id: SerialId,
-    // putting it in a mutex because we must send multiple messages at once
-    // while we might be pushing more messages from elsewhere
-    batch: Option<Mutex<Batch>>,
+    batch: Option<Batch>,
+    sequence_id: SerialId,
     compression: Option<Compression>,
     options: ProducerOptions,
+    /// Schema version returned by the broker in `CommandProducerSuccess`.
+    ///
+    /// * **Non-batched path** — used as a default when the message does not
+    ///   already have a `schema_version` set (`send_raw`).  Updated in-place
+    ///   on reconnection via `send_message`.
+    /// * **Batched path** — a clone is passed by value to the spawned
+    ///   `message_send_loop`, which owns its own independent copy.  That copy
+    ///   is updated on reconnection within the loop; this field is **not**
+    ///   kept in sync and may go stale for batched producers.
+    ///
+    /// Per-message `schema_version` is not supported by the Pulsar protocol
+    /// for batched messages (`SingleMessageMetadata` has no such field).
+    schema_version: Option<Vec<u8>>,
 }
 
 impl<Exe: Executor> TopicProducer<Exe> {
@@ -519,15 +612,13 @@ impl<Exe: Executor> TopicProducer<Exe> {
 
         let topic = topic.into();
         let producer_id = PRODUCER_ID_GENERATOR.fetch_add(1, Ordering::SeqCst);
-        let sequence_ids = SerialId::new();
+        let sequence_id = SerialId::new();
 
         let topic = topic.clone();
-        let batch_size = options.batch_size;
-        let batch_byte_size = options.batch_byte_size;
         let compression = options.compression.clone();
         let mut connection = client.manager.get_connection(&addr).await?;
 
-        let producer_name = retry_create_producer(
+        let (producer_name, schema_version) = retry_create_producer(
             &client,
             &mut connection,
             addr,
@@ -538,9 +629,57 @@ impl<Exe: Executor> TopicProducer<Exe> {
         )
         .await?;
 
-        let batch = batch_size
-            .map(|batch_size| Batch::new(batch_size, batch_byte_size))
-            .map(Mutex::new);
+        if !options.enabled_batching() {
+            return Ok(TopicProducer {
+                client,
+                connection,
+                id: producer_id,
+                name: producer_name,
+                topic,
+                sequence_id,
+                compression,
+                options,
+                batch: None,
+                schema_version,
+            });
+        }
+        let executor = client.executor.clone();
+        let batch_storage = BatchStorage {
+            max_size: options.batch_size,
+            max_byte_size: options.batch_byte_size,
+            timeout: options.batch_timeout,
+            size: 0,
+            storage: match options.batch_size {
+                Some(batch_size) => VecDeque::with_capacity(batch_size as usize),
+                None => VecDeque::new(),
+            },
+        };
+        // the message should be received quickly, so a small buffer is okay
+        let (msg_sender, msg_receiver) = mpsc::channel::<BatchItem>(10);
+        let executor_clone = executor.clone();
+        let (batch_sender, batch_receiver) = mpsc::channel::<Vec<BatchItem>>(1);
+        let (close_sender, close_receiver) =
+            oneshot::channel::<Result<CommandSuccess, ConnectionError>>();
+
+        let _ = executor.spawn(Box::pin(batch_process_loop(
+            producer_id,
+            batch_storage,
+            msg_receiver,
+            batch_sender,
+            executor_clone,
+        )));
+        let _ = executor.spawn(Box::pin(message_send_loop(
+            batch_receiver,
+            close_sender,
+            client.clone(),
+            connection.clone(),
+            topic.clone(),
+            producer_id,
+            producer_name.clone(),
+            sequence_id.clone(),
+            options.clone(),
+            schema_version.clone(),
+        )));
 
         Ok(TopicProducer {
             client,
@@ -548,10 +687,14 @@ impl<Exe: Executor> TopicProducer<Exe> {
             id: producer_id,
             name: producer_name,
             topic,
-            message_id: sequence_ids,
-            batch,
+            batch: Some(Batch {
+                msg_sender,
+                close_receiver,
+            }),
+            sequence_id,
             compression,
             options,
+            schema_version,
         })
     }
 
@@ -572,264 +715,261 @@ impl<Exe: Executor> TopicProducer<Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    async fn send<T: SerializeMessage + Sized>(&mut self, message: T) -> Result<SendFuture, Error> {
-        match T::serialize_message(message) {
-            Ok(message) => self.send_raw(message.into()).await,
-            Err(e) => Err(e),
-        }
+    async fn send(&mut self, message: Message) -> Result<SendFuture, Error> {
+        self.send_raw(message.into()).await
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn send_batch(&mut self) -> Result<(), Error> {
-        match self.batch.as_ref() {
-            None => Err(ProducerError::Custom("not a batching producer".to_string()).into()),
-            Some(batch) => {
-                let mut payload: Vec<u8> = Vec::new();
-                let mut receipts = Vec::new();
-                let message_count;
-
-                {
-                    let batch = batch.lock().await;
-                    let messages = batch.get_messages().await;
-                    message_count = messages.len();
-                    for (tx, message) in messages {
-                        receipts.push(tx);
-                        message.serialize(&mut payload);
-                    }
-                }
-
-                if message_count == 0 {
-                    return Ok(());
-                }
-
-                let message = ProducerMessage {
-                    payload,
-                    num_messages_in_batch: Some(message_count as i32),
-                    ..Default::default()
-                };
-
-                trace!("sending a batched message of size {}", message_count);
-                let send_receipt = self.send_compress(message).await?.await.map_err(Arc::new);
-                for resolver in receipts {
-                    let _ = resolver.send(
-                        send_receipt
-                            .clone()
-                            .map_err(|e| ProducerError::Batch(e).into()),
-                    );
-                }
-
+        match &mut self.batch.as_mut().map(|batch| &mut batch.msg_sender) {
+            Some(msg_sender) => {
+                let (tx, rx) = oneshot::channel::<()>();
+                let item = BatchItem::Flush(tx);
+                let _ = msg_sender.send(item).await;
+                let _ = rx.await; // ignore any error
                 Ok(())
             }
+            None if self.options.enabled_batching() => Err(ProducerError::Closed.into()),
+            _ => Err(ProducerError::Custom("not a batching producer".to_string()).into()),
         }
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub(crate) async fn send_raw(&mut self, message: ProducerMessage) -> Result<SendFuture, Error> {
+    pub(crate) async fn send_raw(
+        &mut self,
+        mut message: ProducerMessage,
+    ) -> Result<SendFuture, Error> {
         let (tx, rx) = oneshot::channel();
-        match self.batch.as_ref() {
-            None => {
-                let fut = self.send_compress(message).await?;
+        match &mut self.batch.as_mut().map(|batch| &mut batch.msg_sender) {
+            Some(msg_sender) => {
+                // Per-message schema_version is not supported by the Pulsar
+                // protocol for batched messages. The schema_version is set
+                // on the batch envelope in message_send_loop instead. Any
+                // user-provided schema_version on individual messages is
+                // structurally dropped here.
+                let properties = message
+                    .properties
+                    .into_iter()
+                    .map(|(key, value)| proto::KeyValue { key, value })
+                    .collect();
+                let batched = BatchedMessage {
+                    metadata: proto::SingleMessageMetadata {
+                        properties,
+                        partition_key: message.partition_key,
+                        ordering_key: message.ordering_key,
+                        payload_size: message.payload.len() as i32,
+                        event_time: message.event_time,
+                        ..Default::default()
+                    },
+                    payload: message.payload,
+                };
+                let item = BatchItem::SingleMessage(tx, batched);
+                msg_sender.send(item).await.map_err(|e| {
+                    Error::Producer(ProducerError::Custom(format!(
+                        "failed to send message to batch_process_loop: {e}"
+                    )))
+                })?;
+            }
+            None if self.options.enabled_batching() => {
+                return Err(ProducerError::Closed.into());
+            }
+            _ => {
+                // If the user didn't set a schema_version on the message,
+                // use the one returned by the broker in
+                // CommandProducerSuccess.
+                if message.schema_version.is_none() {
+                    message.schema_version = self.schema_version.clone();
+                }
+                let compressed_message = compress_message(message, &self.compression)?;
+                let fut = send_message(
+                    &self.client,
+                    &self.topic,
+                    &mut self.connection,
+                    compressed_message,
+                    self.id,
+                    &self.name,
+                    &self.sequence_id,
+                    &self.options,
+                    &mut self.schema_version,
+                )
+                .await?;
                 self.client
                     .executor
                     .spawn(Box::pin(async move {
                         let _ = tx.send(fut.await);
                     }))
                     .map_err(|_| Error::Executor)?;
-                Ok(SendFuture(rx))
             }
-            Some(batch) => {
-                let mut payload: Vec<u8> = Vec::new();
-                let mut receipts = Vec::new();
-                let mut counter = 0i32;
-
-                {
-                    let batch = batch.lock().await;
-                    batch.push_back((tx, message)).await;
-
-                    if batch.is_full().await {
-                        for (tx, message) in batch.get_messages().await {
-                            receipts.push(tx);
-                            message.serialize(&mut payload);
-                            counter += 1;
-                        }
-                    }
-                }
-
-                if counter > 0 {
-                    let message = ProducerMessage {
-                        payload,
-                        num_messages_in_batch: Some(counter),
-                        ..Default::default()
-                    };
-
-                    trace!("sending a batched message of size {}", counter);
-                    let receipt_fut = self.send_compress(message).await?;
-                    self.client
-                        .executor
-                        .spawn(Box::pin(async move {
-                            let res = receipt_fut.await.map_err(Arc::new);
-                            for tx in receipts.drain(..) {
-                                let _ = tx
-                                    .send(res.clone().map_err(|e| ProducerError::Batch(e).into()));
-                            }
-                        }))
-                        .map_err(|_| Error::Executor)?;
-                }
-
-                Ok(SendFuture(rx))
-            }
-        }
+        };
+        Ok(SendFuture(rx))
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    async fn send_compress(
-        &mut self,
-        mut message: ProducerMessage,
-    ) -> Result<impl Future<Output = Result<CommandSendReceipt, Error>>, Error> {
-        let compressed_message = match self.compression.clone() {
-            None | Some(Compression::None) => message,
-            #[cfg(feature = "lz4")]
-            Some(Compression::Lz4(compression)) => {
-                let compressed_payload: Vec<u8> =
-                    lz4::block::compress(&message.payload[..], Some(compression.mode), false)
-                        .map_err(ProducerError::Io)?;
+    async fn close(&mut self) -> Result<(), Error> {
+        match self.batch.take() {
+            None => {
+                self.connection.sender().close_producer(self.id).await?;
+            }
+            Some(mut batch) if self.options.enabled_batching() => {
+                batch.msg_sender.close_channel();
+                let close_receiver = &mut batch.close_receiver;
+                return match close_receiver.await {
+                    Ok(Ok(_)) => Ok(()),
+                    Ok(Err(e)) => Err(Error::Producer(ProducerError::Connection(e))),
+                    Err(_) => Err(Error::Producer(ProducerError::Closed)),
+                };
+            }
+            _ => {
+                warn!(
+                    "close called multiple times on producer {} for topic {}",
+                    self.id, self.topic
+                );
+            }
+        };
+        Ok(())
+    }
+}
 
-                message.uncompressed_size = Some(message.payload.len() as u32);
-                message.payload = compressed_payload;
-                message.compression = Some(proto::CompressionType::Lz4.into());
-                message
-            }
-            #[cfg(feature = "flate2")]
-            Some(Compression::Zlib(compression)) => {
-                let mut e = flate2::write::ZlibEncoder::new(Vec::new(), compression.level);
-                e.write_all(&message.payload[..])
+#[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+fn compress_message(
+    mut message: ProducerMessage,
+    compression: &Option<Compression>,
+) -> Result<ProducerMessage, Error> {
+    let compressed_message = match compression {
+        None | Some(Compression::None) => message,
+        #[cfg(feature = "lz4")]
+        Some(Compression::Lz4(compression)) => {
+            let compressed_payload: Vec<u8> =
+                lz4::block::compress(&message.payload[..], Some(compression.mode), false)
                     .map_err(ProducerError::Io)?;
-                let compressed_payload = e.finish().map_err(ProducerError::Io)?;
 
-                message.uncompressed_size = Some(message.payload.len() as u32);
-                message.payload = compressed_payload;
-                message.compression = Some(proto::CompressionType::Zlib.into());
-                message
-            }
-            #[cfg(feature = "zstd")]
-            Some(Compression::Zstd(compression)) => {
-                let compressed_payload = zstd::encode_all(&message.payload[..], compression.level)
-                    .map_err(ProducerError::Io)?;
-                message.uncompressed_size = Some(message.payload.len() as u32);
-                message.payload = compressed_payload;
-                message.compression = Some(proto::CompressionType::Zstd.into());
-                message
-            }
-            #[cfg(feature = "snap")]
-            Some(Compression::Snappy(..)) => {
-                let compressed_payload: Vec<u8> = Vec::new();
-                let mut encoder = snap::write::FrameEncoder::new(compressed_payload);
+            message.uncompressed_size = Some(message.payload.len() as u32);
+            message.payload = compressed_payload;
+            message.compression = Some(proto::CompressionType::Lz4.into());
+            message
+        }
+        #[cfg(feature = "flate2")]
+        Some(Compression::Zlib(compression)) => {
+            let mut e = flate2::write::ZlibEncoder::new(Vec::new(), compression.level);
+            e.write_all(&message.payload[..])
+                .map_err(ProducerError::Io)?;
+            let compressed_payload = e.finish().map_err(ProducerError::Io)?;
+
+            message.uncompressed_size = Some(message.payload.len() as u32);
+            message.payload = compressed_payload;
+            message.compression = Some(proto::CompressionType::Zlib.into());
+            message
+        }
+        #[cfg(feature = "zstd")]
+        Some(Compression::Zstd(compression)) => {
+            let compressed_payload = zstd::encode_all(&message.payload[..], compression.level)
+                .map_err(ProducerError::Io)?;
+            message.uncompressed_size = Some(message.payload.len() as u32);
+            message.payload = compressed_payload;
+            message.compression = Some(proto::CompressionType::Zstd.into());
+            message
+        }
+        #[cfg(feature = "snap")]
+        Some(Compression::Snappy(..)) => {
+            let mut compressed_payload = Vec::new();
+            {
+                let mut encoder = snap::write::FrameEncoder::new(&mut compressed_payload);
                 encoder
-                    .write(&message.payload[..])
+                    .write_all(&message.payload[..])
                     .map_err(ProducerError::Io)?;
-                let compressed_payload = encoder
-                    .into_inner()
-                    //FIXME
-                    .map_err(|e| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            format!("Snappy compression error: {e:?}"),
-                        )
-                    })
-                    .map_err(ProducerError::Io)?;
+                encoder.flush().map_err(ProducerError::Io)?;
+            }
 
-                message.uncompressed_size = Some(message.payload.len() as u32);
-                message.payload = compressed_payload;
-                message.compression = Some(proto::CompressionType::Snappy.into());
-                message
+            message.uncompressed_size = Some(message.payload.len() as u32);
+            message.payload = compressed_payload;
+            message.compression = Some(proto::CompressionType::Snappy.into());
+            message
+        }
+    };
+    Ok(compressed_message)
+}
+
+#[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+async fn send_message<Exe>(
+    client: &Pulsar<Exe>,
+    topic: &String,
+    connection: &mut Arc<Connection<Exe>>,
+    message: ProducerMessage,
+    producer_id: ProducerId,
+    producer_name: &ProducerName,
+    sequence_id: &SerialId,
+    options: &ProducerOptions,
+    schema_version: &mut Option<Vec<u8>>,
+) -> Result<impl Future<Output = Result<CommandSendReceipt, Error>>, Error>
+where
+    Exe: Executor,
+{
+    loop {
+        match connection
+            .sender()
+            .send(
+                producer_id,
+                producer_name.clone(),
+                sequence_id.get(),
+                message.clone(),
+                options.block_queue_if_full,
+            )
+            .await
+        {
+            Ok(fut) => {
+                let fut = async move {
+                    let res = fut.await;
+                    res.map_err(|e| {
+                        error!("wait send receipt got error: {:?}", e);
+                        Error::Producer(ProducerError::Connection(e))
+                    })
+                };
+                return Ok(fut);
+            }
+            Err(ConnectionError::Disconnected) => {}
+            Err(ConnectionError::Io(e)) => {
+                if e.kind() != std::io::ErrorKind::TimedOut {
+                    error!("send_message got io error: {:?}", e);
+                    return Err(ProducerError::Connection(ConnectionError::Io(e)).into());
+                }
+            }
+            Err(e) => {
+                error!("send_message got error: {:?}", e);
+                return Err(ProducerError::Connection(e).into());
             }
         };
 
-        self.send_inner(compressed_message).await
-    }
+        error!(
+            "send_message: connection {} disconnected, reconnecting producer for topic: {}",
+            connection.id(),
+            &topic
+        );
 
-    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    async fn send_inner(
-        &mut self,
-        message: ProducerMessage,
-    ) -> Result<impl Future<Output = Result<CommandSendReceipt, Error>>, Error> {
-        loop {
-            let msg = message.clone();
-            match self.connection.sender().send(
-                self.id,
-                self.name.clone(),
-                self.message_id.get(),
-                msg,
-            ) {
-                Ok(fut) => {
-                    let fut = async move {
-                        let res = fut.await;
-                        res.map_err(|e| {
-                            error!("wait send receipt got error: {:?}", e);
-                            Error::Producer(ProducerError::Connection(e))
-                        })
-                    };
-                    return Ok(fut);
-                }
-                Err(ConnectionError::Disconnected) => {}
-                Err(ConnectionError::Io(e)) => {
-                    if e.kind() != std::io::ErrorKind::TimedOut {
-                        error!("send_inner got io error: {:?}", e);
-                        return Err(ProducerError::Connection(ConnectionError::Io(e)).into());
-                    }
-                }
-                Err(e) => {
-                    error!("send_inner got error: {:?}", e);
-                    return Err(ProducerError::Connection(e).into());
-                }
-            };
-
-            error!(
-                "send_inner: connection {} disconnected",
-                self.connection.id()
-            );
-
-            self.reconnect().await?;
-        }
-    }
-
-    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    async fn reconnect(&mut self) -> Result<(), Error> {
-        debug!("reconnecting producer for topic: {}", self.topic);
-
-        if let Err(e) = self.connection.sender().close_producer(self.id).await {
+        if let Err(e) = connection.sender().close_producer(producer_id).await {
             error!(
                 "could not close producer {:?}({}) for topic {}: {:?}",
-                self.name, self.id, self.topic, e
+                producer_name, producer_id, &topic, e
             );
         }
-        let broker_address = self.client.lookup_topic(&self.topic).await?;
 
-        // should we ignore, test or use producer_name?
-        let _producer_name = retry_create_producer(
-            &self.client,
-            &mut self.connection,
+        let broker_address = client.lookup_topic(topic).await?;
+
+        let (_producer_name, new_schema_version) = retry_create_producer(
+            client,
+            connection,
             broker_address,
-            &self.topic,
-            self.id,
-            Some(self.name.clone()),
-            &self.options,
+            topic,
+            producer_id,
+            Some(producer_name.clone()),
+            options,
         )
         .await?;
 
-        self.batch = self
-            .options
-            .batch_size
-            .map(|batch_size| Batch::new(batch_size, self.options.batch_byte_size))
-            .map(Mutex::new);
-
-        Ok(())
-    }
-
-    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub async fn close(&self) -> Result<(), Error> {
-        self.connection.sender().close_producer(self.id).await?;
-        Ok(())
+        // Update the producer-level schema_version for future messages.
+        // The in-flight message keeps its original schema_version: it was
+        // set before entering send_message and matches the schema used to
+        // serialize its payload.
+        *schema_version = new_schema_version;
     }
 }
 
@@ -839,6 +979,9 @@ impl<Exe: Executor> std::ops::Drop for TopicProducer<Exe> {
         let id = self.id;
         let name = self.name.clone();
         let topic = self.topic.clone();
+        if let Some(mut batch) = self.batch.take() {
+            batch.msg_sender.close_channel();
+        }
         let _ = self.client.executor.spawn(Box::pin(async move {
             if let Err(e) = conn.sender().close_producer(id).await {
                 error!(
@@ -906,7 +1049,7 @@ impl<Exe: Executor> ProducerBuilder<Exe> {
         let topic = topic.ok_or_else(|| Error::Custom("topic not set".to_string()))?;
         let options = producer_options.unwrap_or_default();
 
-        let producers: Vec<TopicProducer<Exe>> = try_join_all(
+        let mut producers: Vec<TopicProducer<Exe>> = try_join_all(
             pulsar
                 .lookup_partitioned_topic(&topic)
                 .await?
@@ -924,23 +1067,22 @@ impl<Exe: Executor> ProducerBuilder<Exe> {
         )
         .await?;
 
+        // sort by partition id
+        producers.sort_by_key(|prod| prod.id);
+
         let producer = match producers.len() {
             0 => {
                 return Err(Error::Custom(format!(
                     "Unexpected error: Partition lookup returned no topics for {topic}"
-                )))
+                )));
             }
             1 => ProducerInner::Single(producers.into_iter().next().unwrap()),
-            _ => {
-                let mut producers = VecDeque::from(producers);
-                // write to topic-1 first
-                producers.rotate_right(1);
-                ProducerInner::Partitioned(PartitionedProducer {
-                    producers,
-                    topic,
-                    options,
-                })
-            }
+            len => ProducerInner::Partitioned(PartitionedProducer {
+                producers,
+                last_used_producer_index: rand::thread_rng().gen_range(0..len),
+                topic,
+                options,
+            }),
         };
 
         Ok(Producer { inner: producer })
@@ -959,111 +1101,239 @@ impl<Exe: Executor> ProducerBuilder<Exe> {
 }
 
 struct BatchStorage {
+    max_size: Option<u32>,
+    max_byte_size: Option<usize>,
+    timeout: Option<Duration>,
     size: usize,
-    storage: VecDeque<(
-        oneshot::Sender<Result<CommandSendReceipt, Error>>,
-        BatchedMessage,
-    )>,
+    storage: VecDeque<BatchItem>,
 }
 
 impl BatchStorage {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub fn new(length: u32) -> BatchStorage {
-        BatchStorage {
-            size: 0,
-            storage: VecDeque::with_capacity(length as usize),
+    pub fn push_back(&mut self, item: BatchItem) {
+        if let BatchItem::SingleMessage(_, batched_msg) = &item {
+            self.size += batched_msg.metadata.payload_size as usize;
         }
+        self.storage.push_back(item);
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub fn push_back(
-        &mut self,
-        tx: oneshot::Sender<Result<CommandSendReceipt, Error>>,
-        batched: BatchedMessage,
-    ) {
-        self.size += batched.metadata.payload_size as usize;
-        self.storage.push_back((tx, batched))
-    }
-
-    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub fn get_messages(
-        &mut self,
-    ) -> Vec<(
-        oneshot::Sender<Result<CommandSendReceipt, Error>>,
-        BatchedMessage,
-    )> {
+    pub fn get_messages(&mut self) -> Vec<BatchItem> {
         self.size = 0;
         self.storage.drain(..).collect()
     }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn ready_to_flush(&self) -> bool {
+        if let Some(max_size) = self.max_size {
+            if self.storage.len() >= max_size as usize {
+                return true;
+            }
+        }
+        if let Some(max_byte_size) = self.max_byte_size {
+            if self.size >= max_byte_size {
+                return true;
+            }
+        }
+        matches!(self.storage.back(), Some(BatchItem::Flush(_)))
+    }
+}
+
+enum BatchItem {
+    SingleMessage(
+        oneshot::Sender<Result<CommandSendReceipt, Error>>,
+        BatchedMessage,
+    ),
+    Flush(oneshot::Sender<()>),
 }
 
 struct Batch {
-    // max number of message
-    pub length: u32,
-    // message bytes threshold
-    pub size: Option<usize>,
-    // put it in a mutex because the design of Producer requires an immutable TopicProducer,
-    // so we cannot have a mutable Batch in a send_raw(&mut self, ...)
-    pub storage: Mutex<BatchStorage>,
+    // sends a message or trigger a flush
+    msg_sender: mpsc::Sender<BatchItem>,
+    // receives the notification when `bath_process_loop` is closed
+    close_receiver: oneshot::Receiver<Result<CommandSuccess, ConnectionError>>,
 }
 
-impl Batch {
-    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub fn new(length: u32, size: Option<usize>) -> Batch {
-        Batch {
-            length,
-            size,
-            storage: Mutex::new(BatchStorage::new(length)),
+#[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+async fn batch_process_loop(
+    producer_id: ProducerId,
+    mut batch_storage: BatchStorage,
+    mut msg_receiver: mpsc::Receiver<BatchItem>,
+    mut batch_sender: mpsc::Sender<Vec<BatchItem>>,
+    executor: impl Executor,
+) {
+    let mut recv_future = msg_receiver.next();
+    let mut timer_future: Pin<Box<dyn Future<Output = ()> + Send + 'static>> =
+        Box::pin(future::pending());
+
+    let flush = async |batch_sender: &mut mpsc::Sender<Vec<BatchItem>>,
+                       messages: Vec<BatchItem>| {
+        if !messages.is_empty() {
+            let _ = batch_sender.send(messages).await;
+        }
+    };
+
+    loop {
+        match future::select(recv_future, timer_future).await {
+            Either::Left((Some(batch_item), previous_timer_future)) => {
+                batch_storage.push_back(batch_item);
+                if batch_storage.ready_to_flush() {
+                    flush(&mut batch_sender, batch_storage.get_messages()).await;
+                    timer_future = Box::pin(future::pending());
+                } else {
+                    timer_future = match batch_storage.timeout {
+                        Some(timeout) if batch_storage.storage.len() == 1 => {
+                            Box::pin(executor.delay(timeout))
+                        }
+                        _ => previous_timer_future,
+                    };
+                }
+                recv_future = msg_receiver.next();
+            }
+            Either::Left((None, _)) => {
+                let count = batch_storage.storage.len();
+                if count > 0 {
+                    warn!("producer {}'s batch_process_loop exits when there are {} messages not flushed",
+                        producer_id, count);
+                    for item in batch_storage.get_messages() {
+                        if let BatchItem::SingleMessage(tx, _) = item {
+                            let _ = tx.send(Err(Error::Producer(ProducerError::Closed)));
+                        }
+                    }
+                } else {
+                    info!("producer {producer_id}'s batch_process_loop: channel closed, exiting");
+                }
+                break;
+            }
+            Either::Right((_, previous_recv_future)) => {
+                if batch_storage.timeout.is_some() {
+                    flush(&mut batch_sender, batch_storage.get_messages()).await;
+                }
+                timer_future = Box::pin(future::pending());
+                recv_future = previous_recv_future;
+            }
         }
     }
+}
 
-    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub async fn is_full(&self) -> bool {
-        let s = self.storage.lock().await;
-        match self.size {
-            None => s.storage.len() >= self.length as usize,
-            Some(size) => s.storage.len() >= self.length as usize || s.size >= size,
+#[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+async fn message_send_loop<Exe>(
+    mut msg_receiver: mpsc::Receiver<Vec<BatchItem>>,
+    close_sender: oneshot::Sender<Result<CommandSuccess, ConnectionError>>,
+    client: Pulsar<Exe>,
+    mut connection: Arc<Connection<Exe>>,
+    topic: String,
+    producer_id: ProducerId,
+    producer_name: ProducerName,
+    sequence_id: SerialId,
+    options: ProducerOptions,
+    mut schema_version: Option<Vec<u8>>,
+) where
+    Exe: Executor,
+{
+    loop {
+        match msg_receiver.next().await {
+            Some(mut batch_items) => {
+                if batch_items.is_empty() {
+                    error!(
+                        "producer {}'s message_send_loop received an empty batch unexpectedly",
+                        producer_id
+                    );
+                    continue;
+                }
+                let mut payload: Vec<u8> = Vec::new();
+                let mut receipts = Vec::new();
+
+                let flush_tx = {
+                    if let Some(BatchItem::Flush(_)) = batch_items.last() {
+                        if let BatchItem::Flush(tx) = batch_items.pop().unwrap() {
+                            Some(tx)
+                        } else {
+                            unreachable!()
+                        }
+                    } else {
+                        None
+                    }
+                };
+                let counter = batch_items.len();
+                for item in batch_items {
+                    if let BatchItem::SingleMessage(tx, batched_msg) = item {
+                        receipts.push(tx);
+                        batched_msg.serialize(&mut payload);
+                    } else {
+                        error!(
+                            "producer {}'s message_send_loop received a Flush item unexpectedly",
+                            producer_id
+                        );
+                    }
+                }
+                if counter == 0 {
+                    if let Some(flush_tx) = flush_tx {
+                        let _ = flush_tx.send(());
+                    }
+                    continue;
+                }
+
+                let message = ProducerMessage {
+                    payload,
+                    num_messages_in_batch: Some(counter as i32),
+                    schema_version: schema_version.clone(),
+                    ..Default::default()
+                };
+
+                trace!("sending a batched message of size {}", counter);
+
+                let send = async || {
+                    let compressed_message = compress_message(message, &options.compression)?;
+                    send_message(
+                        &client,
+                        &topic,
+                        &mut connection,
+                        compressed_message,
+                        producer_id,
+                        &producer_name,
+                        &sequence_id,
+                        &options,
+                        &mut schema_version,
+                    )
+                    .await?
+                    .await
+                };
+                match send().await {
+                    Ok(receipt) => {
+                        for (batch_index, tx) in receipts.into_iter().enumerate() {
+                            let mut receipt = receipt.clone();
+                            if let Some(msg_id) = &mut receipt.message_id {
+                                msg_id.batch_index = Some(batch_index as i32);
+                                msg_id.batch_size = Some(counter as i32);
+                            }
+                            let _ = tx.send(Ok(receipt));
+                        }
+                        if let Some(flush_tx) = flush_tx {
+                            let _ = flush_tx.send(());
+                        }
+                    }
+                    Err(e) => {
+                        let error = Arc::new(e);
+                        for tx in receipts {
+                            let _ =
+                                tx.send(Err(Error::Producer(ProducerError::Batch(error.clone()))));
+                        }
+                    }
+                };
+            }
+            None => {
+                debug!("producer {producer_id} message_send_loop: channel closed, exiting");
+                let close_result = connection.sender().close_producer(producer_id).await;
+                let _ = close_sender.send(close_result).inspect_err(|e| {
+                    warn!(
+                        "{producer_id} could not notify the message_send_loop is closed: {:?}, the producer might be dropped without closing",
+                        e
+                    );
+                });
+                break;
+            }
         }
-    }
-
-    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub async fn push_back(
-        &self,
-        msg: (
-            oneshot::Sender<Result<CommandSendReceipt, Error>>,
-            ProducerMessage,
-        ),
-    ) {
-        let (tx, message) = msg;
-
-        let properties = message
-            .properties
-            .into_iter()
-            .map(|(key, value)| proto::KeyValue { key, value })
-            .collect();
-
-        let batched = BatchedMessage {
-            metadata: proto::SingleMessageMetadata {
-                properties,
-                partition_key: message.partition_key,
-                ordering_key: message.ordering_key,
-                payload_size: message.payload.len() as i32,
-                event_time: message.event_time,
-                ..Default::default()
-            },
-            payload: message.payload,
-        };
-        self.storage.lock().await.push_back(tx, batched)
-    }
-
-    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub async fn get_messages(
-        &self,
-    ) -> Vec<(
-        oneshot::Sender<Result<CommandSendReceipt, Error>>,
-        BatchedMessage,
-    )> {
-        self.storage.lock().await.get_messages()
     }
 }
 
@@ -1157,11 +1427,6 @@ impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn delay(mut self, delay: Duration) -> Result<Self, std::time::SystemTimeError> {
         let date = SystemTime::now() + delay;
-        println!(
-            "current date: {}, deliver_at: {}",
-            SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
-            date.duration_since(UNIX_EPOCH)?.as_millis()
-        );
         self.deliver_at_time = Some(date.duration_since(UNIX_EPOCH)?.as_millis() as i64);
         Ok(self)
     }
@@ -1178,7 +1443,7 @@ impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
     }
 }
 
-impl<'a, T: SerializeMessage + Sized, Exe: Executor> MessageBuilder<'a, T, Exe> {
+impl<T: SerializeMessage + Sized, Exe: Executor> MessageBuilder<'_, T, Exe> {
     /// sends the message through the producer that created it
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     #[deprecated = "instead use send_non_blocking"]
@@ -1207,9 +1472,337 @@ impl<'a, T: SerializeMessage + Sized, Exe: Executor> MessageBuilder<'a, T, Exe> 
         message.partition_key = partition_key;
         message.ordering_key = ordering_key;
         message.event_time = event_time;
+        message.deliver_at_time = deliver_at_time;
+        producer.send_non_blocking(message).await
+    }
+}
 
-        let mut producer_message: ProducerMessage = message.into();
-        producer_message.deliver_at_time = deliver_at_time;
-        producer.send_raw(producer_message).await
+#[cfg(test)]
+mod tests {
+    use futures::executor::block_on;
+    use log::LevelFilter;
+
+    use super::*;
+    use crate::{
+        routing_policy::CustomRoutingPolicy, test_utils, tests::TEST_LOGGER, TokioExecutor,
+    };
+
+    #[test]
+    fn send_future_errors_when_sender_dropped() {
+        let (tx, rx) = futures::channel::oneshot::channel::<Result<CommandSendReceipt, Error>>();
+        // Drop the sender immediately to simulate an unexpected disconnect:
+        drop(tx);
+
+        let fut = SendFuture(rx);
+        let err = block_on(fut).expect_err("expected an error when sender is dropped");
+
+        // It should be mapped to a ProducerError::Custom inside Error::Producer
+        match err {
+            Error::Producer(ProducerError::Custom(msg)) => {
+                assert!(
+                    msg.contains("unexpectedly disconnected"),
+                    "unexpected error message: {msg}"
+                );
+            }
+            other => panic!("unexpected error variant: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn message_converts_into_producer_message() {
+        let mut props = HashMap::new();
+        props.insert("a".to_string(), "1".to_string());
+        props.insert("b".to_string(), "2".to_string());
+
+        let m = Message {
+            payload: b"hello".to_vec(),
+            properties: props.clone(),
+            partition_key: Some("key".into()),
+            ordering_key: Some(vec![1, 2, 3]),
+            replicate_to: vec!["r1".into(), "r2".into()],
+            event_time: Some(42),
+            schema_version: Some(vec![9, 9]),
+            deliver_at_time: Some(123456789),
+        };
+
+        let pm: ProducerMessage = m.clone().into();
+
+        assert_eq!(pm.payload, m.payload);
+        assert_eq!(pm.properties, m.properties);
+        assert_eq!(pm.partition_key, m.partition_key);
+        assert_eq!(pm.ordering_key, m.ordering_key);
+        assert_eq!(pm.replicate_to, m.replicate_to);
+        assert_eq!(pm.event_time, m.event_time);
+        assert_eq!(pm.schema_version, m.schema_version);
+        assert_eq!(pm.deliver_at_time, m.deliver_at_time);
+
+        // And defaults that the producer fills later:
+        assert!(pm.num_messages_in_batch.is_none());
+        assert!(pm.compression.is_none());
+        assert!(pm.uncompressed_size.is_none());
+    }
+
+    #[tokio::test]
+    async fn block_if_queue_full() {
+        let _result = log::set_logger(&TEST_LOGGER);
+        log::set_max_level(LevelFilter::Debug);
+        let pulsar: Pulsar<_> = Pulsar::builder("pulsar://127.0.0.1:6650", TokioExecutor)
+            .with_outbound_channel_size(3)
+            .build()
+            .await
+            .unwrap();
+        let mut producer = pulsar
+            .producer()
+            .with_topic(format!("block_queue_if_full_{}", rand::random::<u16>()))
+            .build()
+            .await
+            .unwrap();
+        let mut send_results = Vec::with_capacity(10);
+        for i in 0..10 {
+            send_results.push(producer.send_non_blocking(format!("msg-{i}")).await);
+        }
+        let mut failed_indexes = vec![];
+        for (i, result) in send_results.into_iter().enumerate() {
+            match result {
+                Ok(_) => {}
+                Err(Error::Producer(ProducerError::Connection(ConnectionError::SlowDown))) => {
+                    failed_indexes.push(i);
+                }
+                Err(e) => panic!("failed to send {}: {}", i, e),
+            }
+        }
+        info!("Messages failed due to SlowDown: {:?}", &failed_indexes);
+        assert!(!failed_indexes.is_empty());
+
+        let mut producer = pulsar
+            .producer()
+            .with_topic(format!("block_queue_if_full_{}", rand::random::<u16>()))
+            .with_options(ProducerOptions {
+                block_queue_if_full: true,
+                ..Default::default()
+            })
+            .build()
+            .await
+            .unwrap();
+        let mut send_results = Vec::with_capacity(10);
+        for i in 0..10 {
+            send_results.push(producer.send_non_blocking(format!("msg-{i}")).await);
+        }
+        for (i, result) in send_results.into_iter().enumerate() {
+            match result {
+                Ok(_) => {}
+                Err(e) => panic!("failed to send {}: {}", i, e),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn move_producer_to_spawned_task() {
+        let _result = log::set_logger(&TEST_LOGGER);
+        log::set_max_level(LevelFilter::Debug);
+        let pulsar: Pulsar<_> = Pulsar::builder("pulsar://127.0.0.1:6650", TokioExecutor)
+            .with_outbound_channel_size(3)
+            .build()
+            .await
+            .unwrap();
+        let mut producer = pulsar
+            .producer()
+            .with_topic(format!("topic_{}", rand::random::<u16>()))
+            .build()
+            .await
+            .unwrap();
+        let (sender, receiver) = oneshot::channel();
+        let _ = pulsar.executor.spawn(Box::pin(async move {
+            sender.send(producer.close().await).unwrap();
+        }));
+        assert!(receiver.await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_round_robin_routing_policy() {
+        let _result = log::set_logger(&TEST_LOGGER);
+        log::set_max_level(LevelFilter::Debug);
+        let pulsar: Pulsar<_> = Pulsar::builder("pulsar://127.0.0.1:6650", TokioExecutor)
+            .build()
+            .await
+            .unwrap();
+        let topic = format!("topic_{}", rand::random::<u16>());
+        let options = ProducerOptions {
+            routing_policy: Some(RoutingPolicy::RoundRobin),
+            ..Default::default()
+        };
+        let partition_count = 3;
+        test_utils::create_partitioned_topic("public", "default", &topic, partition_count).await;
+
+        let mut producer = pulsar
+            .producer()
+            .with_topic(topic)
+            .with_options(options)
+            .build()
+            .await
+            .unwrap();
+
+        // test round robin without key
+        let message = "test".to_string();
+        let mut producer_id = 0;
+        for _ in 1..100 {
+            let send_receipt = producer
+                .send_non_blocking(&message)
+                .await
+                .unwrap()
+                .await
+                .unwrap();
+
+            assert!(send_receipt.producer_id != producer_id);
+            producer_id = send_receipt.producer_id;
+        }
+
+        // test round robin with key
+        let key = "test";
+        let message = Message {
+            payload: "test".to_string().into(),
+            partition_key: Some(key.to_string()),
+            ..Default::default()
+        };
+        let CommandSendReceipt { producer_id, .. } = producer
+            .send_non_blocking(message)
+            .await
+            .unwrap()
+            .await
+            .unwrap();
+        for _ in 1..100 {
+            let message = Message {
+                payload: "test".to_string().into(),
+                partition_key: Some(key.to_string()),
+                ..Default::default()
+            };
+
+            let send_receipt = producer
+                .send_non_blocking(message)
+                .await
+                .unwrap()
+                .await
+                .unwrap();
+
+            assert!(send_receipt.producer_id == producer_id);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_single_routing_policy() {
+        let _result = log::set_logger(&TEST_LOGGER);
+        log::set_max_level(LevelFilter::Debug);
+        let pulsar: Pulsar<_> = Pulsar::builder("pulsar://127.0.0.1:6650", TokioExecutor)
+            .build()
+            .await
+            .unwrap();
+        let topic = format!("topic_{}", rand::random::<u16>());
+        let options = ProducerOptions {
+            routing_policy: Some(RoutingPolicy::Single),
+            ..Default::default()
+        };
+        let partition_count = 3;
+        test_utils::create_partitioned_topic("public", "default", &topic, partition_count).await;
+
+        let mut producer = pulsar
+            .producer()
+            .with_topic(topic)
+            .with_options(options)
+            .build()
+            .await
+            .unwrap();
+
+        let key = "test";
+        let message = Message {
+            payload: "test".to_string().into(),
+            partition_key: Some(key.to_string()),
+            ..Default::default()
+        };
+
+        let CommandSendReceipt { producer_id, .. } = producer
+            .send_non_blocking(message)
+            .await
+            .unwrap()
+            .await
+            .unwrap();
+        for _ in 1..100 {
+            let message = Message {
+                payload: "test".to_string().into(),
+                partition_key: Some(key.to_string()),
+                ..Default::default()
+            };
+
+            let send_receipt = producer
+                .send_non_blocking(message)
+                .await
+                .unwrap()
+                .await
+                .unwrap();
+
+            assert!(send_receipt.producer_id == producer_id);
+        }
+    }
+
+    struct TestCustomRoutingPolicy {}
+
+    impl CustomRoutingPolicy for TestCustomRoutingPolicy {
+        fn route(&self, _message: &Message, _num_producers: usize) -> usize {
+            1
+        }
+    }
+
+    #[tokio::test]
+    async fn test_custom_routing_policy() {
+        let _result = log::set_logger(&TEST_LOGGER);
+        log::set_max_level(LevelFilter::Debug);
+        let pulsar: Pulsar<_> = Pulsar::builder("pulsar://127.0.0.1:6650", TokioExecutor)
+            .build()
+            .await
+            .unwrap();
+        let topic = format!("topic_{}", rand::random::<u16>());
+        let options = ProducerOptions {
+            routing_policy: Some(RoutingPolicy::Custom(Arc::new(TestCustomRoutingPolicy {}))),
+            ..Default::default()
+        };
+        let partition_count = 3;
+        test_utils::create_partitioned_topic("public", "default", &topic, partition_count).await;
+
+        let mut producer = pulsar
+            .producer()
+            .with_topic(topic)
+            .with_options(options)
+            .build()
+            .await
+            .unwrap();
+
+        let key = "test";
+        let message = Message {
+            payload: "test".to_string().into(),
+            partition_key: Some(key.to_string()),
+            ..Default::default()
+        };
+
+        let CommandSendReceipt { producer_id, .. } = producer
+            .send_non_blocking(message)
+            .await
+            .unwrap()
+            .await
+            .unwrap();
+        for _ in 1..100 {
+            let message = Message {
+                payload: "test".to_string().into(),
+                partition_key: Some(key.to_string()),
+                ..Default::default()
+            };
+
+            let send_receipt = producer
+                .send_non_blocking(message)
+                .await
+                .unwrap()
+                .await
+                .unwrap();
+
+            assert!(send_receipt.producer_id == producer_id);
+        }
     }
 }

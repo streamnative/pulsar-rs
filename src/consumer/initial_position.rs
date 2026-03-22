@@ -1,5 +1,5 @@
 /// position of the first message that will be consumed
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone, Debug, PartialEq)]
 pub enum InitialPosition {
     /// start at the oldest message
     Earliest,

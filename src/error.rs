@@ -92,12 +92,22 @@ pub enum ConnectionError {
     #[cfg(any(feature = "tokio-runtime", feature = "async-std-runtime"))]
     Tls(native_tls::Error),
     #[cfg(all(
-        any(feature = "tokio-rustls-runtime", feature = "async-std-rustls-runtime"),
+        any(
+            feature = "tokio-rustls-runtime-aws-lc-rs",
+            feature = "tokio-rustls-runtime-ring",
+            feature = "async-std-rustls-runtime-aws-lc-rs",
+            feature = "async-std-rustls-runtime-ring",
+        ),
         not(any(feature = "tokio-runtime", feature = "async-std-runtime"))
     ))]
     Tls(rustls::Error),
-    #[cfg(any(feature = "tokio-rustls-runtime", feature = "async-std-rustls-runtime"))]
-    DnsName(rustls::client::InvalidDnsNameError),
+    #[cfg(any(
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring",
+        feature = "async-std-rustls-runtime-aws-lc-rs",
+        feature = "async-std-rustls-runtime-ring",
+    ))]
+    DnsName(rustls::pki_types::InvalidDnsNameError),
     Authentication(AuthenticationError),
     NotFound,
     Canceled,
@@ -110,6 +120,7 @@ impl ConnectionError {
             ConnectionError::Io(e) => {
                 e.kind() == io::ErrorKind::ConnectionRefused || e.kind() == io::ErrorKind::TimedOut
             }
+            ConnectionError::Authentication(AuthenticationError::Retriable(_)) => true,
             _ => false,
         }
     }
@@ -131,7 +142,12 @@ impl From<native_tls::Error> for ConnectionError {
 }
 
 #[cfg(all(
-    any(feature = "tokio-rustls-runtime", feature = "async-std-rustls-runtime"),
+    any(
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring",
+        feature = "async-std-rustls-runtime-aws-lc-rs",
+        feature = "async-std-rustls-runtime-ring",
+    ),
     not(any(feature = "tokio-runtime", feature = "async-std-runtime"))
 ))]
 impl From<rustls::Error> for ConnectionError {
@@ -141,10 +157,15 @@ impl From<rustls::Error> for ConnectionError {
     }
 }
 
-#[cfg(any(feature = "tokio-rustls-runtime", feature = "async-std-rustls-runtime"))]
-impl From<rustls::client::InvalidDnsNameError> for ConnectionError {
+#[cfg(any(
+    feature = "tokio-rustls-runtime-aws-lc-rs",
+    feature = "tokio-rustls-runtime-ring",
+    feature = "async-std-rustls-runtime-aws-lc-rs",
+    feature = "async-std-rustls-runtime-ring",
+))]
+impl From<rustls::pki_types::InvalidDnsNameError> for ConnectionError {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    fn from(err: rustls::client::InvalidDnsNameError) -> Self {
+    fn from(err: rustls::pki_types::InvalidDnsNameError) -> Self {
         ConnectionError::DnsName(err)
     }
 }
@@ -153,6 +174,13 @@ impl From<AuthenticationError> for ConnectionError {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn from(err: AuthenticationError) -> Self {
         ConnectionError::Authentication(err)
+    }
+}
+
+impl<T> From<async_channel::SendError<T>> for ConnectionError {
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    fn from(_err: async_channel::SendError<T>) -> Self {
+        ConnectionError::Disconnected
     }
 }
 
@@ -181,9 +209,14 @@ impl fmt::Display for ConnectionError {
             ConnectionError::Encoding(e) => write!(f, "Error encoding message: {e}"),
             ConnectionError::SocketAddr(e) => write!(f, "Error obtaining socket address: {e}"),
             ConnectionError::Tls(e) => write!(f, "Error connecting TLS stream: {e}"),
-            #[cfg(any(feature = "tokio-rustls-runtime", feature = "async-std-rustls-runtime"))]
+            #[cfg(any(
+                feature = "tokio-rustls-runtime-aws-lc-rs",
+                feature = "tokio-rustls-runtime-ring",
+                feature = "async-std-rustls-runtime-aws-lc-rs",
+                feature = "async-std-rustls-runtime-ring",
+            ))]
             ConnectionError::DnsName(e) => write!(f, "Error resolving hostname: {e}"),
-            ConnectionError::Authentication(e) => write!(f, "Error authentication: {e}"),
+            ConnectionError::Authentication(e) => write!(f, "Authentication error: {e}"),
             ConnectionError::UnexpectedResponse(e) => {
                 write!(f, "Unexpected response from pulsar: {e}")
             }
@@ -279,6 +312,8 @@ pub enum ProducerError {
     /// Indicates this producer has lost exclusive access to the topic. Client can decided whether
     /// to recreate or not
     Fenced,
+    /// Indicates the producer is closed or dropped
+    Closed,
 }
 
 impl From<ConnectionError> for ProducerError {
@@ -326,6 +361,7 @@ impl fmt::Display for ProducerError {
                 Ok(())
             }
             ProducerError::Fenced => write!(f, "Producer is fenced"),
+            ProducerError::Closed => write!(f, "Producer is closed or dropped"),
         }
     }
 }
@@ -352,6 +388,7 @@ impl fmt::Debug for ProducerError {
                 write!(f, ")")
             }
             ProducerError::Fenced => write!(f, "Producer is fenced"),
+            ProducerError::Closed => write!(f, "Producer is closed or dropped"),
         }
     }
 }
@@ -369,6 +406,7 @@ impl std::error::Error for ProducerError {
                 .map(|r| r.as_ref().map(drop).unwrap_err() as _),
             ProducerError::Custom(_) => None,
             ProducerError::Fenced => None,
+            ProducerError::Closed => None,
         }
     }
 }
@@ -421,13 +459,15 @@ impl std::error::Error for ServiceDiscoveryError {
 #[derive(Clone, Debug)]
 pub enum AuthenticationError {
     Custom(String),
+    Retriable(String),
 }
 
 impl fmt::Display for AuthenticationError {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            AuthenticationError::Custom(m) => write!(f, "authentication error [{m}]"),
+            AuthenticationError::Custom(m) => write!(f, "{m}"),
+            AuthenticationError::Retriable(m) => write!(f, "{m} (retriable)"),
         }
     }
 }
