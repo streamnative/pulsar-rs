@@ -905,39 +905,52 @@ where
     Exe: Executor,
 {
     loop {
-        match connection
-            .sender()
-            .send(
-                producer_id,
-                producer_name.clone(),
-                sequence_id.get(),
-                message.clone(),
-                options.block_queue_if_full,
-            )
-            .await
-        {
-            Ok(fut) => {
-                let fut = async move {
-                    let res = fut.await;
-                    res.map_err(|e| {
-                        error!("wait send receipt got error: {:?}", e);
-                        Error::Producer(ProducerError::Connection(e))
-                    })
-                };
-                return Ok(fut);
-            }
-            Err(ConnectionError::Disconnected) => {}
-            Err(ConnectionError::Io(e)) => {
-                if e.kind() != std::io::ErrorKind::TimedOut {
-                    error!("send_message got io error: {:?}", e);
-                    return Err(ProducerError::Connection(ConnectionError::Io(e)).into());
+        // If a previous send timed out waiting for a receipt, the connection
+        // is poisoned (error flag set) but the underlying TCP channel may
+        // still be open.  Detect this early and fall through to reconnection
+        // instead of sending into a black hole that will time out again.
+        if !connection.is_valid() {
+            warn!(
+                "send_message: connection {} is no longer valid, reconnecting producer for topic: {}",
+                connection.id(),
+                topic
+            );
+            // fall through to reconnection below
+        } else {
+            match connection
+                .sender()
+                .send(
+                    producer_id,
+                    producer_name.clone(),
+                    sequence_id.get(),
+                    message.clone(),
+                    options.block_queue_if_full,
+                )
+                .await
+            {
+                Ok(fut) => {
+                    let fut = async move {
+                        let res = fut.await;
+                        res.map_err(|e| {
+                            error!("wait send receipt got error: {:?}", e);
+                            Error::Producer(ProducerError::Connection(e))
+                        })
+                    };
+                    return Ok(fut);
+                }
+                Err(ConnectionError::Disconnected) => {}
+                Err(ConnectionError::Io(e)) => {
+                    if e.kind() != std::io::ErrorKind::TimedOut {
+                        error!("send_message got io error: {:?}", e);
+                        return Err(ProducerError::Connection(ConnectionError::Io(e)).into());
+                    }
+                }
+                Err(e) => {
+                    error!("send_message got error: {:?}", e);
+                    return Err(ProducerError::Connection(e).into());
                 }
             }
-            Err(e) => {
-                error!("send_message got error: {:?}", e);
-                return Err(ProducerError::Connection(e).into());
-            }
-        };
+        }
 
         error!(
             "send_message: connection {} disconnected, reconnecting producer for topic: {}",

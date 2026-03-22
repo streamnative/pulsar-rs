@@ -26,6 +26,8 @@ pub async fn handle_retry_error<Exe: Executor>(
                 proto::ServerError::ServiceNotReady
                     | proto::ServerError::ConsumerBusy
                     | proto::ServerError::ProducerBusy
+                    | proto::ServerError::ProducerBlockedQuotaExceededError
+                    | proto::ServerError::ProducerBlockedQuotaExceededException
             ) =>
         {
             (
