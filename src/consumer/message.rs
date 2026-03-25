@@ -21,6 +21,15 @@ pub struct Message<T> {
 }
 
 impl<T> Message<T> {
+    pub fn new(topic: &str, message_id: MessageData, payload: Payload) -> Self {
+        Message {
+            topic: topic.to_string(),
+            message_id,
+            payload,
+            _phantom: PhantomData,
+        }
+    }
+
     /// Pulsar metadata for the message
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn metadata(&self) -> &MessageMetadata {
