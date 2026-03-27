@@ -17,14 +17,14 @@ use crate::{
 };
 
 /// A client that acknowledges messages systematically
-pub struct Reader<T: DeserializeMessage, Exe: Executor> {
+pub struct Reader<T: DeserializeMessage + Send, Exe: Executor> {
     pub(crate) consumer: TopicConsumer<T, Exe>,
     pub(crate) state: Option<State<T>>,
 }
 
-impl<T: DeserializeMessage + 'static, Exe: Executor> Unpin for Reader<T, Exe> {}
+impl<T: DeserializeMessage + Send + 'static, Exe: Executor> Unpin for Reader<T, Exe> {}
 
-pub enum State<T: DeserializeMessage> {
+pub enum State<T: DeserializeMessage + Send> {
     PollingConsumer,
     PollingAck(
         Message<T>,
@@ -32,7 +32,7 @@ pub enum State<T: DeserializeMessage> {
     ),
 }
 
-impl<T: DeserializeMessage + 'static, Exe: Executor> Stream for Reader<T, Exe> {
+impl<T: DeserializeMessage + Send + 'static, Exe: Executor> Stream for Reader<T, Exe> {
     type Item = Result<Message<T>, Error>;
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
@@ -84,7 +84,7 @@ impl<T: DeserializeMessage + 'static, Exe: Executor> Stream for Reader<T, Exe> {
     }
 }
 
-impl<T: DeserializeMessage, Exe: Executor> Reader<T, Exe> {
+impl<T: DeserializeMessage + Send + 'static, Exe: Executor> Reader<T, Exe> {
     // this is totally useless as calling ConsumerBuilder::new(&pulsar_client)
     // does just the same
     /*

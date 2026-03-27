@@ -1,3 +1,6 @@
+[workspace]
+members = ["pulsar-schema-confluent"]
+
 [package]
 name = "pulsar"
 version = "6.4.1"

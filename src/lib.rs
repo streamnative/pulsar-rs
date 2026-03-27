@@ -44,10 +44,7 @@
 //!     fn serialize_message(input: Self) -> Result<producer::Message, PulsarError> {
 //!         let payload =
 //!             serde_json::to_vec(&input).map_err(|e| PulsarError::Custom(e.to_string()))?;
-//!         Ok(producer::Message {
-//!             payload,
-//!             ..Default::default()
-//!         })
+//!         Ok(producer::Message::new(payload))
 //!     }
 //! }
 //!
@@ -210,6 +207,7 @@ pub use message::{
     Payload,
 };
 pub use producer::{MultiTopicProducer, Producer, ProducerOptions};
+pub use schema::{EncodeData, PulsarSchema};
 
 pub mod authentication;
 mod client;
@@ -224,6 +222,7 @@ pub mod producer;
 pub mod reader;
 mod retry_op;
 pub mod routing_policy;
+pub mod schema;
 mod service_discovery;
 mod test_utils;
 

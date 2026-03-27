@@ -40,7 +40,7 @@ use crate::{
     DeserializeMessage, Pulsar,
 };
 
-enum InnerConsumer<T: DeserializeMessage, Exe: Executor> {
+enum InnerConsumer<T: DeserializeMessage + Send, Exe: Executor> {
     Single(TopicConsumer<T, Exe>),
     Multi(MultiTopicConsumer<T, Exe>),
 }
@@ -79,11 +79,13 @@ enum InnerConsumer<T: DeserializeMessage, Exe: Executor> {
 /// # Ok(())
 /// # }
 /// ```
-pub struct Consumer<T: DeserializeMessage, Exe: Executor> {
+pub struct Consumer<T: DeserializeMessage + Send, Exe: Executor> {
     inner: InnerConsumer<T, Exe>,
+    /// Retained schema for re-creating TopicConsumers on seek/reconnect.
+    schema: Option<std::sync::Arc<dyn crate::schema::PulsarSchema<T>>>,
 }
 
-impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
+impl<T: DeserializeMessage + Send + 'static, Exe: Executor> Consumer<T, Exe> {
     /// creates a [ConsumerBuilder] from a client instance
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn builder(pulsar: &Pulsar<Exe>) -> ConsumerBuilder<Exe> {
@@ -195,7 +197,9 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
                 let topic = c.topic().to_string();
                 let addr = client.lookup_topic(&topic).await?;
                 let config = c.config().clone();
-                InnerConsumer::Single(TopicConsumer::new(client, topic, addr, config).await?)
+                InnerConsumer::Single(
+                    TopicConsumer::new(client, topic, addr, config, self.schema.clone()).await?,
+                )
             }
             InnerConsumer::Multi(c) => {
                 c.seek(consumer_ids, message_id, timestamp).await?;
@@ -207,10 +211,11 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
                     try_join_all(topics.into_iter().map(|topic| client.lookup_topic(topic)))
                         .await?;
 
+                let schema = self.schema.clone();
                 let topic_addr_pair = c.topics.iter().cloned().zip(addrs.iter().cloned());
 
                 let consumers = try_join_all(topic_addr_pair.map(|(topic, addr)| {
-                    TopicConsumer::new(client.clone(), topic, addr, config.clone())
+                    TopicConsumer::new(client.clone(), topic, addr, config.clone(), schema.clone())
                 }))
                 .await?;
 
@@ -235,6 +240,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
                     new_consumers: None,
                     refresh,
                     config,
+                    schema: self.schema.clone(),
                     disc_last_message_received: None,
                     disc_messages_received: 0,
                 })
@@ -411,7 +417,7 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
 }
 
 //TODO: why does T need to be 'static?
-impl<T: DeserializeMessage + 'static, Exe: Executor> Stream for Consumer<T, Exe> {
+impl<T: DeserializeMessage + Send + 'static, Exe: Executor> Stream for Consumer<T, Exe> {
     type Item = Result<Message<T>, Error>;
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
@@ -495,7 +501,7 @@ mod tests {
         dur: Duration,
     ) -> Result<Message<T>, String>
     where
-        T: DeserializeMessage + 'static,
+        T: DeserializeMessage + Send + 'static,
     {
         match tokio::time::timeout(dur, c.next()).await {
             Err(_) => Err(format!("timed out waiting for next() after {:?}", dur)),
@@ -1529,7 +1535,7 @@ mod tests {
     }
 
     /// Build an Exclusive consumer that starts from Earliest.
-    async fn earliest_consumer<T: DeserializeMessage>(
+    async fn earliest_consumer<T: DeserializeMessage + Send + 'static>(
         client: &Pulsar<TokioExecutor>,
         topic: &str,
         name: &str,

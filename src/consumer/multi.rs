@@ -22,7 +22,7 @@ use crate::{
 
 /// A consumer that can subscribe on multiple topics, from a regex matching
 /// topic names
-pub struct MultiTopicConsumer<T: DeserializeMessage, Exe: Executor> {
+pub struct MultiTopicConsumer<T: DeserializeMessage + Send, Exe: Executor> {
     pub(super) namespace: String,
     pub(super) topic_regex: Option<Regex>,
     pub(super) pulsar: Pulsar<Exe>,
@@ -35,12 +35,14 @@ pub struct MultiTopicConsumer<T: DeserializeMessage, Exe: Executor> {
     >,
     pub(super) refresh: Pin<Box<dyn Stream<Item = ()> + Send + Sync>>,
     pub(super) config: ConsumerConfig,
+    /// Retained schema for re-creating TopicConsumers on topic refresh.
+    pub(super) schema: Option<std::sync::Arc<dyn crate::schema::PulsarSchema<T>>>,
     // Stats on disconnected consumers to keep metrics correct
     pub(super) disc_messages_received: u64,
     pub(super) disc_last_message_received: Option<DateTime<Utc>>,
 }
 
-impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
+impl<T: DeserializeMessage + Send + 'static, Exe: Executor> MultiTopicConsumer<T, Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn topics(&self) -> Vec<String> {
         self.topics.iter().map(|s| s.to_string()).collect()
@@ -148,6 +150,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
         let pulsar = self.pulsar.clone();
         let topic_regex = self.topic_regex.clone();
         let namespace = self.namespace.clone();
+        let schema = self.schema.clone();
 
         // 1. get topics
         // 1.1 original topics from builder
@@ -190,7 +193,13 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
                     .into_iter()
                     .filter(|(t, _)| !existing_topics.contains(t))
                     .map(|(topic, addr)| {
-                        TopicConsumer::new(pulsar.clone(), topic, addr, consumer_config.clone())
+                        TopicConsumer::new(
+                            pulsar.clone(),
+                            topic,
+                            addr,
+                            consumer_config.clone(),
+                            schema.clone(),
+                        )
                     }),
             )
             .await?;
@@ -327,7 +336,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
     }
 }
 
-impl<T: DeserializeMessage, Exe: Executor> Debug for MultiTopicConsumer<T, Exe> {
+impl<T: DeserializeMessage + Send, Exe: Executor> Debug for MultiTopicConsumer<T, Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(
@@ -338,7 +347,7 @@ impl<T: DeserializeMessage, Exe: Executor> Debug for MultiTopicConsumer<T, Exe> 
     }
 }
 
-impl<T: 'static + DeserializeMessage, Exe: Executor> Stream for MultiTopicConsumer<T, Exe> {
+impl<T: 'static + DeserializeMessage + Send, Exe: Executor> Stream for MultiTopicConsumer<T, Exe> {
     type Item = Result<Message<T>, Error>;
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]

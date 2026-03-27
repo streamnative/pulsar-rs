@@ -244,9 +244,9 @@ impl OAuth2Authentication {
                 .await?;
                 if let Some(token_endpoint) = metadata.token_endpoint() {
                     self.token_url = Some(token_endpoint.clone());
-                    return Ok(token_endpoint.clone());
+                    Ok(token_endpoint.clone())
                 } else {
-                    return Err(Box::from("token url not exists"));
+                    Err(Box::from("token url not exists"))
                 }
             }
         }

@@ -16,6 +16,7 @@ pub enum Error {
     Producer(ProducerError),
     ServiceDiscovery(ServiceDiscoveryError),
     Authentication(AuthenticationError),
+    SchemaRegistry(String),
     Custom(String),
     Executor,
 }
@@ -57,6 +58,7 @@ impl fmt::Display for Error {
             Error::Producer(e) => write!(f, "producer error: {e}"),
             Error::ServiceDiscovery(e) => write!(f, "service discovery error: {e}"),
             Error::Authentication(e) => write!(f, "authentication error: {e}"),
+            Error::SchemaRegistry(e) => write!(f, "schema registry error: {e}"),
             Error::Custom(e) => write!(f, "error: {e}"),
             Error::Executor => write!(f, "could not spawn task"),
         }
@@ -72,6 +74,7 @@ impl std::error::Error for Error {
             Error::Producer(e) => e.source(),
             Error::ServiceDiscovery(e) => e.source(),
             Error::Authentication(e) => e.source(),
+            Error::SchemaRegistry(_) => None,
             Error::Custom(_) => None,
             Error::Executor => None,
         }

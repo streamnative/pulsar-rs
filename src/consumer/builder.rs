@@ -1,5 +1,7 @@
 use std::{
+    any::Any,
     collections::{BTreeMap, VecDeque},
+    sync::Arc,
     time::Duration,
 };
 
@@ -20,7 +22,6 @@ use crate::{
 /// Builder structure for consumers
 ///
 /// This is the main way to create a [Consumer] or a [Reader]
-#[derive(Clone)]
 pub struct ConsumerBuilder<Exe: Executor> {
     pulsar: Pulsar<Exe>,
     topics: Option<Vec<String>>,
@@ -35,6 +36,33 @@ pub struct ConsumerBuilder<Exe: Executor> {
     consumer_options: Option<ConsumerOptions>,
     namespace: Option<String>,
     topic_refresh: Option<Duration>,
+    schema_info: Option<crate::message::proto::Schema>,
+    schema_object: Option<Box<dyn Any + Send + Sync>>,
+}
+
+impl<Exe: Executor> Clone for ConsumerBuilder<Exe> {
+    fn clone(&self) -> Self {
+        ConsumerBuilder {
+            pulsar: self.pulsar.clone(),
+            topics: self.topics.clone(),
+            topic_regex: self.topic_regex.clone(),
+            subscription: self.subscription.clone(),
+            subscription_type: self.subscription_type,
+            consumer_id: self.consumer_id,
+            consumer_name: self.consumer_name.clone(),
+            batch_size: self.batch_size,
+            unacked_message_resend_delay: self.unacked_message_resend_delay,
+            consumer_options: self.consumer_options.clone(),
+            dead_letter_policy: self.dead_letter_policy.clone(),
+            namespace: self.namespace.clone(),
+            topic_refresh: self.topic_refresh,
+            // schema_object cannot be cloned (Box<dyn Any>). Clear schema_info
+            // too so that a clone never negotiates an External schema it cannot
+            // decode. Clones are only used for validate().
+            schema_info: None,
+            schema_object: None,
+        }
+    }
 }
 
 impl<Exe: Executor> ConsumerBuilder<Exe> {
@@ -56,6 +84,8 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
             consumer_options: None,
             namespace: None,
             topic_refresh: None,
+            schema_info: None,
+            schema_object: None,
         }
     }
 
@@ -158,6 +188,18 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
         self
     }
 
+    /// Attach an external schema to this consumer.
+    /// The schema is type-erased internally; it is downcast back to
+    /// `PulsarSchema<T>` when `build()` is called.
+    pub fn with_schema<T: Send + 'static>(
+        mut self,
+        schema: Arc<dyn crate::schema::PulsarSchema<T>>,
+    ) -> Self {
+        self.schema_info = Some(schema.schema_info());
+        self.schema_object = Some(Box::new(schema));
+        self
+    }
+
     /// sets the dead letter policy
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_dead_letter_policy(mut self, dead_letter_policy: DeadLetterPolicy) -> Self {
@@ -192,6 +234,8 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
             dead_letter_policy,
             namespace: _,
             topic_refresh: _,
+            schema_info: _,
+            schema_object: _,
         } = self;
 
         if consumer_name.is_none() {
@@ -268,12 +312,47 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
 
     /// creates a [Consumer] from this builder
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub async fn build<T: DeserializeMessage>(self) -> Result<Consumer<T, Exe>, Error> {
-        // would this clone() consume too much memory?
+    pub async fn build<T: DeserializeMessage + Send + 'static>(
+        self,
+    ) -> Result<Consumer<T, Exe>, Error> {
+        // clone() is only used for validate(); schema_object is NOT cloneable.
+        // Guard: if schema_info is set, schema_object must still be present on `self`.
+        if self.schema_info.is_some() && self.schema_object.is_none() {
+            return Err(Error::Custom(
+                "schema_object lost — was build() called on a cloned ConsumerBuilder? \
+                 Only the original builder retains the schema."
+                    .to_string(),
+            ));
+        }
         let (config, joined_topics) = self.clone().validate().await?;
 
+        // Apply schema_info to options if set (takes precedence over .with_options())
+        let mut config = config;
+        if let Some(ref info) = self.schema_info {
+            config.options.schema = Some(info.clone());
+        }
+
+        // Downcast schema_object: Box<dyn Any> wrapping Arc<dyn PulsarSchema<T>>
+        let schema: Option<Arc<dyn crate::schema::PulsarSchema<T>>> =
+            if let Some(ref obj) = self.schema_object {
+                Some(
+                    obj.downcast_ref::<Arc<dyn crate::schema::PulsarSchema<T>>>()
+                        .cloned()
+                        .ok_or_else(|| {
+                            Error::Custom(format!(
+                                "Schema type mismatch: with_schema() was called with a different \
+                                 type parameter than build::<{}>()",
+                                std::any::type_name::<T>()
+                            ))
+                        })?,
+                )
+            } else {
+                None
+            };
+
         let consumers = try_join_all(joined_topics.into_iter().map(|(topic, addr)| {
-            TopicConsumer::new(self.pulsar.clone(), topic, addr, config.clone())
+            let schema = schema.clone();
+            TopicConsumer::new(self.pulsar.clone(), topic, addr, config.clone(), schema)
         }))
         .await?;
 
@@ -303,6 +382,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
                 new_consumers: None,
                 refresh,
                 config,
+                schema: schema.clone(),
                 disc_last_message_received: None,
                 disc_messages_received: 0,
             };
@@ -313,14 +393,47 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
             }
             InnerConsumer::Multi(consumer)
         };
-        Ok(Consumer { inner: consumer })
+        Ok(Consumer {
+            inner: consumer,
+            schema,
+        })
     }
 
     /// creates a [Reader] from this builder
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub async fn into_reader<T: DeserializeMessage>(self) -> Result<Reader<T, Exe>, Error> {
-        // would this clone() consume too much memory?
+    pub async fn into_reader<T: DeserializeMessage + Send + 'static>(
+        self,
+    ) -> Result<Reader<T, Exe>, Error> {
+        if self.schema_info.is_some() && self.schema_object.is_none() {
+            return Err(Error::Custom(
+                "schema_object lost — was into_reader() called on a cloned ConsumerBuilder? \
+                 Only the original builder retains the schema."
+                    .to_string(),
+            ));
+        }
         let (mut config, mut joined_topics) = self.clone().validate().await?;
+
+        if let Some(ref info) = self.schema_info {
+            config.options.schema = Some(info.clone());
+        }
+
+        // Downcast schema (same pattern as build())
+        let schema: Option<Arc<dyn crate::schema::PulsarSchema<T>>> =
+            if let Some(ref obj) = self.schema_object {
+                Some(
+                    obj.downcast_ref::<Arc<dyn crate::schema::PulsarSchema<T>>>()
+                        .cloned()
+                        .ok_or_else(|| {
+                            Error::Custom(format!(
+                                "Schema type mismatch: with_schema() was called with a different \
+                                 type parameter than into_reader::<{}>()",
+                                std::any::type_name::<T>()
+                            ))
+                        })?,
+                )
+            } else {
+                None
+            };
 
         // Internally, the reader interface is implemented as a consumer using an exclusive,
         // non-durable subscription
@@ -338,7 +451,8 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
         }
 
         let (topic, addr) = joined_topics.pop().unwrap();
-        let consumer = TopicConsumer::new(self.pulsar.clone(), topic, addr, config.clone()).await?;
+        let consumer =
+            TopicConsumer::new(self.pulsar.clone(), topic, addr, config.clone(), schema).await?;
 
         Ok(Reader {
             consumer,
