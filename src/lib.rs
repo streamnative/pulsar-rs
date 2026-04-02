@@ -185,6 +185,8 @@ compile_error!("You have selected both features \"async-std-rustls-runtime-ring\
 ))]
 compile_error!("You have selected both features \"async-std-rustls-runtime-aws-lc-rs\" and \"async-std-rustls-runtime-ring\" which are exclusive, please choose one of them");
 
+#[cfg(feature = "admin-api")]
+pub use admin::AdminClient;
 pub use client::{DeserializeMessage, Pulsar, PulsarBuilder, SerializeMessage};
 pub use connection::Authentication;
 pub use connection_manager::{
@@ -211,6 +213,8 @@ pub use message::{
 };
 pub use producer::{MultiTopicProducer, Producer, ProducerOptions};
 
+#[cfg(feature = "admin-api")]
+pub mod admin;
 pub mod authentication;
 mod client;
 pub mod compression;
@@ -801,6 +805,74 @@ mod tests {
         } else {
             panic!("No publishers in the stats");
         }
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "admin-api")]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
+    async fn admin_sets_max_unacked_messages_per_consumer() {
+        let pulsar = Pulsar::builder("pulsar://127.0.0.1:6650", TokioExecutor)
+            .build()
+            .await
+            .unwrap();
+
+        // Wait for the topic-level policies service to be ready. The broker
+        // health endpoint can report OK before this service is fully initialized,
+        // especially on some Pulsar versions. A 404 response (topic not found)
+        // means the service is up; anything else means it is still starting.
+        for _ in 0..30 {
+            let status = reqwest::get(
+                "http://127.0.0.1:8080/admin/v2/persistent/public/default\
+                 /readiness-probe/maxUnackedMessagesOnConsumer",
+            )
+            .await
+            .map(|r| r.status().as_u16())
+            .unwrap_or(0);
+            if status == 404 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+
+        let topic_name = format!("test_admin_unacked_{}", rand::random::<u16>());
+        let topic = format!("persistent://public/default/{topic_name}");
+
+        // Subscribe first so the topic exists, then apply the policy via the
+        // admin API. Topic-level policies can only be set after the topic exists.
+        let _consumer: Consumer<TestData, _> = pulsar
+            .consumer()
+            .with_topic(&topic)
+            .with_consumer_name("admin_consumer")
+            .with_subscription_type(SubType::Exclusive)
+            .with_subscription("admin_sub")
+            .build()
+            .await
+            .unwrap();
+
+        let admin = pulsar.admin("http://127.0.0.1:8080").unwrap();
+        admin
+            .set_max_unacked_messages_per_consumer(&topic, 200)
+            .await
+            .unwrap();
+
+        // The broker writes the policy to an internal compacted topic and a
+        // separate service applies it asynchronously, so wait briefly before
+        // verifying.
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        // Verify the broker stored it.
+        let verify_url = format!(
+            "http://127.0.0.1:8080/admin/v2/persistent/public/default\
+             /{topic_name}/maxUnackedMessagesOnConsumer"
+        );
+        let resp = reqwest::get(&verify_url).await.unwrap();
+        assert!(resp.status().is_success());
+        let value: u32 = resp.json().await.unwrap();
+        assert_eq!(value, 200);
     }
 
     #[tokio::test]

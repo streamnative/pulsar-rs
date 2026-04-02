@@ -447,6 +447,40 @@ impl<Exe: Executor> Pulsar<Exe> {
             .map_err(|_| Error::Custom("producer unexpectedly disconnected".into()))?;
         Ok(SendFuture(future))
     }
+
+    /// Creates an [`AdminClient`][crate::AdminClient] for this cluster.
+    ///
+    /// The admin client reuses the TLS and authentication configuration
+    /// already present on this `Pulsar` instance. Requires one of the
+    /// `admin-api` feature flags and a tokio runtime.
+    ///
+    /// # Arguments
+    ///
+    /// * `admin_url` — base URL of the Pulsar admin HTTP endpoint, e.g.
+    ///   `"http://pulsar-proxy"`.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # async fn run(pulsar: pulsar::Pulsar<pulsar::TokioExecutor>) -> Result<(), pulsar::Error> {
+    /// let admin = pulsar.admin("http://pulsar-proxy")?;
+    /// admin
+    ///     .set_max_unacked_messages_per_consumer(
+    ///         "persistent://public/default/my-topic",
+    ///         500,
+    ///     )
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "admin-api")]
+    pub fn admin(&self, admin_url: impl Into<String>) -> Result<crate::AdminClient, Error> {
+        crate::admin::AdminClient::new(
+            admin_url.into(),
+            &self.manager.tls_options,
+            self.manager.auth.clone(),
+        )
+    }
 }
 
 /// Helper structure to generate a [Pulsar] client
@@ -574,7 +608,7 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
             executor,
         } = self;
 
-        Pulsar::new(
+        let pulsar = Pulsar::new(
             url,
             auth_provider.map(|p| Arc::new(Mutex::new(p))),
             connection_retry_options,
@@ -583,7 +617,9 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
             outbound_channel_size,
             executor,
         )
-        .await
+        .await?;
+
+        Ok(pulsar)
     }
 }
 

@@ -172,12 +172,12 @@ enum ConnectionStatus<Exe: Executor> {
 #[derive(Clone)]
 pub struct ConnectionManager<Exe: Executor> {
     pub url: Url,
-    auth: Option<Arc<Mutex<Box<dyn crate::authentication::Authentication>>>>,
+    pub(crate) auth: Option<Arc<Mutex<Box<dyn crate::authentication::Authentication>>>>,
     pub(crate) executor: Arc<Exe>,
     connections: Arc<Mutex<HashMap<BrokerAddress, ConnectionStatus<Exe>>>>,
     connection_retry_options: ConnectionRetryOptions,
     pub(crate) operation_retry_options: OperationRetryOptions,
-    tls_options: TlsOptions,
+    pub(crate) tls_options: TlsOptions,
     certificate_chain: Vec<Certificate>,
     outbound_channel_size: usize,
 }
