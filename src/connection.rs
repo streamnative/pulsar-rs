@@ -93,7 +93,7 @@ impl crate::authentication::Authentication for Authentication {
 
 pub(crate) struct Receiver<S: Stream<Item = Result<Message, ConnectionError>>> {
     inbound: Pin<Box<S>>,
-    outbound: async_channel::Sender<Message>,
+    pong_tx: async_channel::Sender<Message>,
     error: SharedError,
     pending_requests: BTreeMap<RequestKey, oneshot::Sender<Message>>,
     consumers: BTreeMap<u64, mpsc::UnboundedSender<Message>>,
@@ -108,7 +108,7 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Receiver<S> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn new(
         inbound: S,
-        outbound: async_channel::Sender<Message>,
+        pong_tx: async_channel::Sender<Message>,
         error: SharedError,
         registrations: mpsc::UnboundedReceiver<Register>,
         shutdown: oneshot::Receiver<()>,
@@ -116,7 +116,7 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Receiver<S> {
     ) -> Receiver<S> {
         Receiver {
             inbound: Box::pin(inbound),
-            outbound,
+            pong_tx,
             error,
             pending_requests: BTreeMap::new(),
             received_messages: BTreeMap::new(),
@@ -177,75 +177,77 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> 
 
         loop {
             match self.inbound.as_mut().poll_next(cx) {
-                Poll::Ready(Some(Ok(msg))) => match msg {
-                    Message {
-                        command: BaseCommand { ping: Some(_), .. },
-                        ..
-                    } => {
-                        if let Err(e) = self.outbound.try_send(messages::pong()) {
-                            error!("failed to send pong: {}", e);
-                        }
-                    }
-                    Message {
-                        command: BaseCommand { pong: Some(_), .. },
-                        ..
-                    } => {
-                        if let Some(sender) = self.ping.take() {
-                            let _ = sender.send(());
-                        }
-                    }
-                    msg => match msg.request_key() {
-                        Some(key @ RequestKey::RequestId(_))
-                        | Some(key @ RequestKey::ProducerSend { .. }) => {
-                            trace!("received this message: {:?}", msg);
-                            if let Some(resolver) = self.pending_requests.remove(&key) {
-                                // We don't care if the receiver has dropped their future
-                                let _ = resolver.send(msg);
-                            } else {
-                                self.received_messages.insert(key, msg);
+                Poll::Ready(Some(Ok(msg))) => {
+                    match msg {
+                        Message {
+                            command: BaseCommand { ping: Some(_), .. },
+                            ..
+                        } => {
+                            if self.pong_tx.try_send(messages::pong()).is_err() {
+                                error!("failed to send pong: pong already pending, sink may be stalled");
                             }
                         }
-                        Some(RequestKey::Consumer { consumer_id }) => {
-                            let _ = self
-                                .consumers
-                                .get_mut(&consumer_id)
-                                .map(move |consumer| consumer.unbounded_send(msg));
+                        Message {
+                            command: BaseCommand { pong: Some(_), .. },
+                            ..
+                        } => {
+                            if let Some(sender) = self.ping.take() {
+                                let _ = sender.send(());
+                            }
                         }
-                        Some(RequestKey::CloseConsumer {
-                            consumer_id,
-                            request_id,
-                        }) => {
-                            // FIXME: could the registration still be in queue while we get the
-                            // CloseConsumer message?
-                            if let Some(resolver) = self
-                                .pending_requests
-                                .remove(&RequestKey::RequestId(request_id))
-                            {
-                                // We don't care if the receiver has dropped their future
-                                let _ = resolver.send(msg);
-                            } else {
-                                let res = self
+                        msg => match msg.request_key() {
+                            Some(key @ RequestKey::RequestId(_))
+                            | Some(key @ RequestKey::ProducerSend { .. }) => {
+                                trace!("received this message: {:?}", msg);
+                                if let Some(resolver) = self.pending_requests.remove(&key) {
+                                    // We don't care if the receiver has dropped their future
+                                    let _ = resolver.send(msg);
+                                } else {
+                                    self.received_messages.insert(key, msg);
+                                }
+                            }
+                            Some(RequestKey::Consumer { consumer_id }) => {
+                                let _ = self
                                     .consumers
                                     .get_mut(&consumer_id)
                                     .map(move |consumer| consumer.unbounded_send(msg));
+                            }
+                            Some(RequestKey::CloseConsumer {
+                                consumer_id,
+                                request_id,
+                            }) => {
+                                // FIXME: could the registration still be in queue while we get the
+                                // CloseConsumer message?
+                                if let Some(resolver) = self
+                                    .pending_requests
+                                    .remove(&RequestKey::RequestId(request_id))
+                                {
+                                    // We don't care if the receiver has dropped their future
+                                    let _ = resolver.send(msg);
+                                } else {
+                                    let res = self
+                                        .consumers
+                                        .get_mut(&consumer_id)
+                                        .map(move |consumer| consumer.unbounded_send(msg));
 
-                                if !res.as_ref().map(|r| r.is_ok()).unwrap_or(false) {
-                                    error!("ConnectionReceiver: error transmitting message to consumer: {:?}", res);
+                                    if !res.as_ref().map(|r| r.is_ok()).unwrap_or(false) {
+                                        error!("ConnectionReceiver: error transmitting message to consumer: {:?}", res);
+                                    }
                                 }
                             }
-                        }
-                        Some(RequestKey::AuthChallenge) => {
-                            debug!("Received AuthChallenge");
-                            let _ = self.auth_challenge.unbounded_send(());
-                        }
-                        None => {
-                            warn!(
-                                "Received unexpected message; dropping. Message {:?}",
-                                msg.command
-                            )
-                        }
-                    },
-                },
+                            Some(RequestKey::AuthChallenge) => {
+                                debug!("Received AuthChallenge");
+                                let _ = self.auth_challenge.unbounded_send(());
+                            }
+                            None => {
+                                warn!(
+                                    "Received unexpected message; dropping. Message {:?}",
+                                    msg.command
+                                )
+                            }
+                        },
+                    }
+                }
                 Poll::Ready(None) => {
                     self.error.set(ConnectionError::Disconnected);
                     return Poll::Ready(Err(()));
@@ -1242,6 +1244,7 @@ impl<Exe: Executor> Connection<Exe> {
 
         let (mut sink, stream) = stream.split();
         let (tx, rx) = async_channel::bounded(outbound_channel_size);
+        let (pong_tx, pong_rx) = async_channel::bounded(1);
         let (registrations_tx, registrations_rx) = mpsc::unbounded();
         let error = SharedError::new();
         let (receiver_shutdown_tx, receiver_shutdown_rx) = oneshot::channel();
@@ -1251,7 +1254,7 @@ impl<Exe: Executor> Connection<Exe> {
             .spawn(Box::pin(
                 Receiver::new(
                     stream,
-                    tx.clone(),
+                    pong_tx,
                     error.clone(),
                     registrations_rx,
                     receiver_shutdown_rx,
@@ -1267,8 +1270,19 @@ impl<Exe: Executor> Connection<Exe> {
 
         let err = error.clone();
         let res = executor.spawn(Box::pin(async move {
-            while let Ok(msg) = rx.recv().await {
-                // println!("real sent msg: {:?}", msg);
+            loop {
+                // Drain pong responses ahead of regular outbound messages so that
+                // broker keepalive pings are answered promptly even under high load.
+                let msg = futures::select_biased! {
+                    msg = pong_rx.recv().fuse() => match msg {
+                        Ok(msg) => msg,
+                        Err(_) => break,
+                    },
+                    msg = rx.recv().fuse() => match msg {
+                        Ok(msg) => msg,
+                        Err(_) => break,
+                    },
+                };
                 if let Err(e) = sink.send(msg).await {
                     err.set(e);
                     break;
@@ -1852,7 +1866,7 @@ mod tests {
     ))]
     async fn receiver_auth_challenge_test() {
         let (message_tx, message_rx) = mpsc::unbounded();
-        let (tx, _) = async_channel::bounded(10);
+        let (pong_tx, _pong_rx) = async_channel::bounded(1);
         let (_registrations_tx, registrations_rx) = mpsc::unbounded();
         let error = SharedError::new();
         let (_receiver_shutdown_tx, receiver_shutdown_rx) = oneshot::channel();
@@ -1871,7 +1885,7 @@ mod tests {
 
         tokio::spawn(Box::pin(Receiver::new(
             message_rx,
-            tx,
+            pong_tx,
             error.clone(),
             registrations_rx,
             receiver_shutdown_rx,
