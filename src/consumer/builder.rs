@@ -118,7 +118,8 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
         self
     }
 
-    /// Interval for refreshing the topics when using a topic regex or when errors occur with a MultiTopicConsumer
+    /// Interval for refreshing the topics when using a topic regex or when errors occur with a
+    /// MultiTopicConsumer
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_topic_refresh(mut self, refresh_interval: Duration) -> Self {
         self.topic_refresh = Some(refresh_interval);
@@ -331,9 +332,9 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
         warn!("Subscription Type for a reader is `Exclusive`. Resetting.");
         config.sub_type = SubType::Exclusive;
 
-        if self.topics.unwrap().len() > 1 {
+        if joined_topics.len() > 1 {
             return Err(Error::Custom(
-                "Unable to create a reader - one topic max".to_string(),
+                "Unable to create a reader - one topic partition max".to_string(),
             ));
         }
 
