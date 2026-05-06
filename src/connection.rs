@@ -182,11 +182,16 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> 
                         Message {
                             command: BaseCommand { ping: Some(_), .. },
                             ..
-                        } => {
-                            if self.pong_tx.try_send(messages::pong()).is_err() {
+                        } => match self.pong_tx.try_send(messages::pong()) {
+                            Ok(()) => {}
+                            Err(async_channel::TrySendError::Full(_)) => {
                                 error!("failed to send pong: pong already pending, sink may be stalled");
                             }
-                        }
+                            Err(async_channel::TrySendError::Closed(_)) => {
+                                error!("failed to send pong: sink channel closed");
+                                self.error.set(ConnectionError::Disconnected);
+                            }
+                        },
                         Message {
                             command: BaseCommand { pong: Some(_), .. },
                             ..
