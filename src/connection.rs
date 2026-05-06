@@ -1907,6 +1907,46 @@ mod tests {
         };
     }
 
+    #[tokio::test]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
+    async fn receiver_routes_ping_to_pong_channel() {
+        let (message_tx, message_rx) = mpsc::unbounded();
+        let (pong_tx, pong_rx) = async_channel::bounded(1);
+        let (_registrations_tx, registrations_rx) = mpsc::unbounded();
+        let error = SharedError::new();
+        let (_receiver_shutdown_tx, receiver_shutdown_rx) = oneshot::channel();
+        let (auth_challenge_tx, _auth_challenge_rx) = mpsc::unbounded();
+
+        message_tx
+            .unbounded_send(Ok(super::messages::ping()))
+            .unwrap();
+
+        tokio::spawn(Box::pin(Receiver::new(
+            message_rx,
+            pong_tx,
+            error.clone(),
+            registrations_rx,
+            receiver_shutdown_rx,
+            auth_challenge_tx,
+        )));
+
+        let pong = tokio::time::timeout(Duration::from_secs(1), pong_rx.recv())
+            .await
+            .expect("timed out waiting for pong on dedicated channel")
+            .expect("pong channel closed unexpectedly");
+
+        assert!(
+            pong.command.pong.is_some(),
+            "expected pong response on dedicated channel, got {:?}",
+            pong.command
+        );
+        assert!(!error.is_set(), "receiver should not set error on ping");
+    }
+
     struct TestAuthentication {
         count: Arc<RwLock<usize>>,
     }
