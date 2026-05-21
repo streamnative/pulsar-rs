@@ -93,7 +93,7 @@ impl crate::authentication::Authentication for Authentication {
 
 pub(crate) struct Receiver<S: Stream<Item = Result<Message, ConnectionError>>> {
     inbound: Pin<Box<S>>,
-    outbound: async_channel::Sender<Message>,
+    control_tx: async_channel::Sender<Message>,
     error: SharedError,
     pending_requests: BTreeMap<RequestKey, oneshot::Sender<Message>>,
     consumers: BTreeMap<u64, mpsc::UnboundedSender<Message>>,
@@ -108,7 +108,7 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Receiver<S> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn new(
         inbound: S,
-        outbound: async_channel::Sender<Message>,
+        control_tx: async_channel::Sender<Message>,
         error: SharedError,
         registrations: mpsc::UnboundedReceiver<Register>,
         shutdown: oneshot::Receiver<()>,
@@ -116,7 +116,7 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Receiver<S> {
     ) -> Receiver<S> {
         Receiver {
             inbound: Box::pin(inbound),
-            outbound,
+            control_tx,
             error,
             pending_requests: BTreeMap::new(),
             received_messages: BTreeMap::new(),
@@ -177,75 +177,78 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> 
 
         loop {
             match self.inbound.as_mut().poll_next(cx) {
-                Poll::Ready(Some(Ok(msg))) => match msg {
-                    Message {
-                        command: BaseCommand { ping: Some(_), .. },
-                        ..
-                    } => {
-                        if let Err(e) = self.outbound.try_send(messages::pong()) {
-                            error!("failed to send pong: {}", e);
-                        }
-                    }
-                    Message {
-                        command: BaseCommand { pong: Some(_), .. },
-                        ..
-                    } => {
-                        if let Some(sender) = self.ping.take() {
-                            let _ = sender.send(());
-                        }
-                    }
-                    msg => match msg.request_key() {
-                        Some(key @ RequestKey::RequestId(_))
-                        | Some(key @ RequestKey::ProducerSend { .. }) => {
-                            trace!("received this message: {:?}", msg);
-                            if let Some(resolver) = self.pending_requests.remove(&key) {
-                                // We don't care if the receiver has dropped their future
-                                let _ = resolver.send(msg);
-                            } else {
-                                self.received_messages.insert(key, msg);
+                Poll::Ready(Some(Ok(msg))) => {
+                    match msg {
+                        Message {
+                            command: BaseCommand { ping: Some(_), .. },
+                            ..
+                        } => {
+                            if self.control_tx.try_send(messages::pong()).is_err() {
+                                error!("failed to send pong: control channel closed");
+                                self.error.set(ConnectionError::Disconnected);
                             }
                         }
-                        Some(RequestKey::Consumer { consumer_id }) => {
-                            let _ = self
-                                .consumers
-                                .get_mut(&consumer_id)
-                                .map(move |consumer| consumer.unbounded_send(msg));
+                        Message {
+                            command: BaseCommand { pong: Some(_), .. },
+                            ..
+                        } => {
+                            if let Some(sender) = self.ping.take() {
+                                let _ = sender.send(());
+                            }
                         }
-                        Some(RequestKey::CloseConsumer {
-                            consumer_id,
-                            request_id,
-                        }) => {
-                            // FIXME: could the registration still be in queue while we get the
-                            // CloseConsumer message?
-                            if let Some(resolver) = self
-                                .pending_requests
-                                .remove(&RequestKey::RequestId(request_id))
-                            {
-                                // We don't care if the receiver has dropped their future
-                                let _ = resolver.send(msg);
-                            } else {
-                                let res = self
+                        msg => match msg.request_key() {
+                            Some(key @ RequestKey::RequestId(_))
+                            | Some(key @ RequestKey::ProducerSend { .. }) => {
+                                trace!("received this message: {:?}", msg);
+                                if let Some(resolver) = self.pending_requests.remove(&key) {
+                                    // We don't care if the receiver has dropped their future
+                                    let _ = resolver.send(msg);
+                                } else {
+                                    self.received_messages.insert(key, msg);
+                                }
+                            }
+                            Some(RequestKey::Consumer { consumer_id }) => {
+                                let _ = self
                                     .consumers
                                     .get_mut(&consumer_id)
                                     .map(move |consumer| consumer.unbounded_send(msg));
+                            }
+                            Some(RequestKey::CloseConsumer {
+                                consumer_id,
+                                request_id,
+                            }) => {
+                                // FIXME: could the registration still be in queue while we get the
+                                // CloseConsumer message?
+                                if let Some(resolver) = self
+                                    .pending_requests
+                                    .remove(&RequestKey::RequestId(request_id))
+                                {
+                                    // We don't care if the receiver has dropped their future
+                                    let _ = resolver.send(msg);
+                                } else {
+                                    let res = self
+                                        .consumers
+                                        .get_mut(&consumer_id)
+                                        .map(move |consumer| consumer.unbounded_send(msg));
 
-                                if !res.as_ref().map(|r| r.is_ok()).unwrap_or(false) {
-                                    error!("ConnectionReceiver: error transmitting message to consumer: {:?}", res);
+                                    if !res.as_ref().map(|r| r.is_ok()).unwrap_or(false) {
+                                        error!("ConnectionReceiver: error transmitting message to consumer: {:?}", res);
+                                    }
                                 }
                             }
-                        }
-                        Some(RequestKey::AuthChallenge) => {
-                            debug!("Received AuthChallenge");
-                            let _ = self.auth_challenge.unbounded_send(());
-                        }
-                        None => {
-                            warn!(
-                                "Received unexpected message; dropping. Message {:?}",
-                                msg.command
-                            )
-                        }
-                    },
-                },
+                            Some(RequestKey::AuthChallenge) => {
+                                debug!("Received AuthChallenge");
+                                let _ = self.auth_challenge.unbounded_send(());
+                            }
+                            None => {
+                                warn!(
+                                    "Received unexpected message; dropping. Message {:?}",
+                                    msg.command
+                                )
+                            }
+                        },
+                    }
+                }
                 Poll::Ready(None) => {
                     self.error.set(ConnectionError::Disconnected);
                     return Poll::Ready(Err(()));
@@ -282,11 +285,30 @@ impl SerialId {
     }
 }
 
+/// Which outbound channel a message should travel on, and the backpressure
+/// behavior to apply.
+#[derive(Debug, Clone, Copy)]
+enum SendChannel {
+    /// Unbounded control plane. Used for every command other than producer
+    /// `Send` (Ping, Pong, Ack, Flow, Lookup, AuthChallenge, Subscribe and
+    /// its close, GetTopicsOfNamespace, etc.). Never blocks; only fails if
+    /// the sink task has exited.
+    Control,
+    /// Bounded data plane: wait until there is room. Used by `Connection::send`
+    /// when the caller opts into producer-side backpressure.
+    DataBlocking,
+    /// Bounded data plane: return `ConnectionError::SlowDown` if the channel
+    /// is full. Used by `Connection::send` when the caller wants to react to
+    /// backpressure rather than block.
+    DataTrySend,
+}
+
 /// An owned type that can send messages like a connection
 //#[derive(Clone)]
 pub struct ConnectionSender<Exe: Executor> {
     connection_id: Uuid,
-    tx: async_channel::Sender<Message>,
+    data_tx: async_channel::Sender<Message>,
+    control_tx: async_channel::Sender<Message>,
     registrations: mpsc::UnboundedSender<Register>,
     receiver_shutdown: Option<oneshot::Sender<()>>,
     request_id: SerialId,
@@ -299,7 +321,8 @@ impl<Exe: Executor> ConnectionSender<Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub(crate) fn new(
         connection_id: Uuid,
-        tx: async_channel::Sender<Message>,
+        data_tx: async_channel::Sender<Message>,
+        control_tx: async_channel::Sender<Message>,
         registrations: mpsc::UnboundedSender<Register>,
         receiver_shutdown: oneshot::Sender<()>,
         request_id: SerialId,
@@ -309,7 +332,8 @@ impl<Exe: Executor> ConnectionSender<Exe> {
     ) -> ConnectionSender<Exe> {
         ConnectionSender {
             connection_id,
-            tx,
+            data_tx,
+            control_tx,
             registrations,
             receiver_shutdown: Some(receiver_shutdown),
             request_id,
@@ -336,13 +360,13 @@ impl<Exe: Executor> ConnectionSender<Exe> {
             sequence_id,
         };
         let msg = messages::send(producer_id, producer_name, sequence_id, message);
-        self.send_message_non_blocking(
-            msg,
-            key,
-            |resp| resp.command.send_receipt,
-            block_if_queue_full,
-        )
-        .await
+        let via = if block_if_queue_full {
+            SendChannel::DataBlocking
+        } else {
+            SendChannel::DataTrySend
+        };
+        self.send_message_non_blocking(msg, key, |resp| resp.command.send_receipt, via)
+            .await
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
@@ -353,7 +377,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         match (
             self.registrations
                 .unbounded_send(Register::Ping { resolver }),
-            self.tx.send(messages::ping()).await?,
+            self.control_tx.send(messages::ping()).await?,
         ) {
             (Ok(_), ()) => {
                 debug!("set timeout to {:?} for ping-pong", self.operation_timeout);
@@ -536,7 +560,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         consumer_id: u64,
         message_permits: u32,
     ) -> Result<(), ConnectionError> {
-        self.tx
+        self.control_tx
             .send(messages::flow(consumer_id, message_permits))
             .await?;
         Ok(())
@@ -549,7 +573,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         message_ids: Vec<proto::MessageIdData>,
         cumulative: bool,
     ) -> Result<(), ConnectionError> {
-        self.tx
+        self.control_tx
             .send(messages::ack(consumer_id, message_ids, cumulative))
             .await?;
         Ok(())
@@ -561,7 +585,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         consumer_id: u64,
         message_ids: Vec<proto::MessageIdData>,
     ) -> Result<(), ConnectionError> {
-        self.tx
+        self.control_tx
             .send(messages::redeliver_unacknowleged_messages(
                 consumer_id,
                 message_ids,
@@ -641,11 +665,9 @@ impl<Exe: Executor> ConnectionSender<Exe> {
     where
         F: FnOnce(Message) -> Option<R> + 'static,
     {
-        // This method is called for RPCs other than CommandSend. If the queue is full due to too
-        // many CommandSend RPCs not processed in time, we should wait rather than fail fast
-        // because it's a client side issue that can be recovered later. Hence, set
-        // block_if_queue_full to true here.
-        self.send_message_non_blocking(msg, key, extract, true)
+        // RPCs other than CommandSend go through the unbounded control channel so they are
+        // never throttled by producer-side backpressure on the bounded data channel.
+        self.send_message_non_blocking(msg, key, extract, SendChannel::Control)
             .await?
             .await
     }
@@ -656,7 +678,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         msg: Message,
         key: RequestKey,
         extract: F,
-        block_if_queue_full: bool,
+        via: SendChannel,
     ) -> Result<impl Future<Output = Result<R, ConnectionError>>, ConnectionError>
     where
         F: FnOnce(Message) -> Option<R> + 'static,
@@ -692,26 +714,38 @@ impl<Exe: Executor> ConnectionSender<Exe> {
                 );
                 ConnectionError::Disconnected
             })?;
-        if block_if_queue_full {
-            self.tx.send(msg).await.map_err(|e| {
-                warn!(
-                    "connection {} disconnected when sending the message: {}",
-                    self.connection_id, e
-                );
-                ConnectionError::Disconnected
-            })?;
-        } else {
-            self.tx.try_send(msg).map_err(|e| {
-                if e.is_full() {
-                    ConnectionError::SlowDown
-                } else {
+        match via {
+            SendChannel::Control => {
+                self.control_tx.try_send(msg).map_err(|e| {
                     warn!(
                         "connection {} disconnected when sending the message: {}",
                         self.connection_id, e
                     );
                     ConnectionError::Disconnected
-                }
-            })?;
+                })?;
+            }
+            SendChannel::DataBlocking => {
+                self.data_tx.send(msg).await.map_err(|e| {
+                    warn!(
+                        "connection {} disconnected when sending the message: {}",
+                        self.connection_id, e
+                    );
+                    ConnectionError::Disconnected
+                })?;
+            }
+            SendChannel::DataTrySend => {
+                self.data_tx.try_send(msg).map_err(|e| {
+                    if e.is_full() {
+                        ConnectionError::SlowDown
+                    } else {
+                        warn!(
+                            "connection {} disconnected when sending the message: {}",
+                            self.connection_id, e
+                        );
+                        ConnectionError::Disconnected
+                    }
+                })?;
+            }
         };
 
         let connection_id = self.connection_id;
@@ -1241,7 +1275,12 @@ impl<Exe: Executor> Connection<Exe> {
         }?;
 
         let (mut sink, stream) = stream.split();
-        let (tx, rx) = async_channel::bounded(outbound_channel_size);
+        // Data plane: bounded so that producer Send commands experience natural
+        // backpressure when the broker can't keep up.
+        let (data_tx, data_rx) = async_channel::bounded(outbound_channel_size);
+        // Control plane: unbounded so that Ping/Pong/Ack/Flow/AuthChallenge/etc.
+        // can never be throttled by producer queue depth.
+        let (control_tx, control_rx) = async_channel::unbounded();
         let (registrations_tx, registrations_rx) = mpsc::unbounded();
         let error = SharedError::new();
         let (receiver_shutdown_tx, receiver_shutdown_rx) = oneshot::channel();
@@ -1251,7 +1290,7 @@ impl<Exe: Executor> Connection<Exe> {
             .spawn(Box::pin(
                 Receiver::new(
                     stream,
-                    tx.clone(),
+                    control_tx.clone(),
                     error.clone(),
                     registrations_rx,
                     receiver_shutdown_rx,
@@ -1267,8 +1306,20 @@ impl<Exe: Executor> Connection<Exe> {
 
         let err = error.clone();
         let res = executor.spawn(Box::pin(async move {
-            while let Ok(msg) = rx.recv().await {
-                // println!("real sent msg: {:?}", msg);
+            loop {
+                // Drain the control plane ahead of the data plane so that broker
+                // keepalive pongs and other RPCs are flushed promptly even when
+                // producer fan-in has saturated the data channel.
+                let msg = futures::select_biased! {
+                    msg = control_rx.recv().fuse() => match msg {
+                        Ok(msg) => msg,
+                        Err(_) => break,
+                    },
+                    msg = data_rx.recv().fuse() => match msg {
+                        Ok(msg) => msg,
+                        Err(_) => break,
+                    },
+                };
                 if let Err(e) = sink.send(msg).await {
                     err.set(e);
                     break;
@@ -1283,13 +1334,13 @@ impl<Exe: Executor> Connection<Exe> {
         if auth.is_some() {
             let auth_challenge_res = executor.spawn({
                 let err = error.clone();
-                let tx = tx.clone();
+                let control_tx = control_tx.clone();
                 let auth = auth.clone();
                 Box::pin(async move {
                     while auth_challenge_rx.next().await.is_some() {
                         match Self::prepare_auth_data(auth.clone()).await {
                             Ok(Some(auth_data)) => {
-                                let _ = tx.send(messages::auth_challenge(auth_data)).await;
+                                let _ = control_tx.send(messages::auth_challenge(auth_data)).await;
                             }
                             Ok(None) => (),
                             Err(e) => {
@@ -1308,7 +1359,8 @@ impl<Exe: Executor> Connection<Exe> {
 
         let sender = ConnectionSender::new(
             connection_id,
-            tx,
+            data_tx,
+            control_tx,
             registrations_tx,
             receiver_shutdown_tx,
             SerialId::new(),
@@ -1852,7 +1904,7 @@ mod tests {
     ))]
     async fn receiver_auth_challenge_test() {
         let (message_tx, message_rx) = mpsc::unbounded();
-        let (tx, _) = async_channel::bounded(10);
+        let (control_tx, _control_rx) = async_channel::unbounded();
         let (_registrations_tx, registrations_rx) = mpsc::unbounded();
         let error = SharedError::new();
         let (_receiver_shutdown_tx, receiver_shutdown_rx) = oneshot::channel();
@@ -1871,7 +1923,7 @@ mod tests {
 
         tokio::spawn(Box::pin(Receiver::new(
             message_rx,
-            tx,
+            control_tx,
             error.clone(),
             registrations_rx,
             receiver_shutdown_rx,
@@ -1886,6 +1938,46 @@ mod tests {
             Ok(auth) => assert!(auth.is_some()),
             _ => panic!("operation timeout"),
         };
+    }
+
+    #[tokio::test]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
+    async fn receiver_routes_ping_to_control_channel() {
+        let (message_tx, message_rx) = mpsc::unbounded();
+        let (control_tx, control_rx) = async_channel::unbounded();
+        let (_registrations_tx, registrations_rx) = mpsc::unbounded();
+        let error = SharedError::new();
+        let (_receiver_shutdown_tx, receiver_shutdown_rx) = oneshot::channel();
+        let (auth_challenge_tx, _auth_challenge_rx) = mpsc::unbounded();
+
+        message_tx
+            .unbounded_send(Ok(super::messages::ping()))
+            .unwrap();
+
+        tokio::spawn(Box::pin(Receiver::new(
+            message_rx,
+            control_tx,
+            error.clone(),
+            registrations_rx,
+            receiver_shutdown_rx,
+            auth_challenge_tx,
+        )));
+
+        let pong = tokio::time::timeout(Duration::from_secs(1), control_rx.recv())
+            .await
+            .expect("timed out waiting for pong on control channel")
+            .expect("control channel closed unexpectedly");
+
+        assert!(
+            pong.command.pong.is_some(),
+            "expected pong response on control channel, got {:?}",
+            pong.command
+        );
+        assert!(!error.is_set(), "receiver should not set error on ping");
     }
 
     struct TestAuthentication {
