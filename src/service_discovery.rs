@@ -71,11 +71,17 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
                     == Some(command_lookup_topic_response::LookupType::Failed as i32)
             {
                 let error = response.error.and_then(crate::error::server_error);
-                if error == Some(crate::message::proto::ServerError::ServiceNotReady) {
+                if matches!(
+                    error,
+                    Some(
+                        crate::message::proto::ServerError::ServiceNotReady
+                            | crate::message::proto::ServerError::MetadataError,
+                    )
+                ) {
                     if operation_retry_options.max_retries.is_none()
                         || operation_retry_options.max_retries.unwrap() > current_retries
                     {
-                        error!("lookup({}) answered ServiceNotReady, retrying request after {}ms (max_retries = {:?})", topic, operation_retry_options.retry_delay.as_millis(), operation_retry_options.max_retries);
+                        error!("lookup({}) failed with {:?}, retrying request after {}ms (max_retries = {:?})", topic, error, operation_retry_options.retry_delay.as_millis(), operation_retry_options.max_retries);
                         current_retries += 1;
                         self.manager
                             .executor
