@@ -8,6 +8,7 @@ mod engine;
 pub(crate) mod initial_position;
 pub mod message;
 mod multi;
+pub mod negative_ack_backoff;
 pub mod options;
 pub mod topic;
 
@@ -28,6 +29,9 @@ use futures::{
 pub use initial_position::InitialPosition;
 pub use message::Message;
 use multi::MultiTopicConsumer;
+pub use negative_ack_backoff::{
+    MultiplierRedeliveryBackoff, MultiplierRedeliveryBackoffBuilder, NegativeAckBackoff,
+};
 pub use options::ConsumerOptions;
 pub use topic::TopicConsumer;
 use url::Url;
