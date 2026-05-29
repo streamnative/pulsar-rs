@@ -215,7 +215,9 @@ mod tests {
 
     #[test]
     fn validation_rejects_multiplier_less_than_or_equal_to_one() {
-        let result = MultiplierRedeliveryBackoff::builder().multiplier(1.0).build();
+        let result = MultiplierRedeliveryBackoff::builder()
+            .multiplier(1.0)
+            .build();
 
         assert_custom_error(result, MULTIPLIER_MUST_BE_GREATER_THAN_ONE);
     }
