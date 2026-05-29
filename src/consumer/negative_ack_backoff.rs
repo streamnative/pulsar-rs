@@ -40,8 +40,37 @@ impl MultiplierRedeliveryBackoff {
 }
 
 impl NegativeAckBackoff for MultiplierRedeliveryBackoff {
-    fn next(&self, _redelivery_count: u32) -> Duration {
-        self.min_delay
+    fn next(&self, redelivery_count: u32) -> Duration {
+        if self.min_delay == Duration::ZERO {
+            return Duration::ZERO;
+        }
+
+        if redelivery_count == 0 {
+            return self.min_delay;
+        }
+
+        if self.min_delay >= self.max_delay {
+            return self.max_delay;
+        }
+
+        let min_delay_secs = self.min_delay.as_secs_f64();
+        let max_delay_secs = self.max_delay.as_secs_f64();
+        let multiplier_log = self.multiplier.ln();
+        let cap_after = (max_delay_secs / min_delay_secs).ln() / multiplier_log;
+
+        if !cap_after.is_finite() || redelivery_count as f64 >= cap_after {
+            return self.max_delay;
+        }
+
+        let delay_secs = min_delay_secs * self.multiplier.powf(redelivery_count as f64);
+        if !delay_secs.is_finite() || delay_secs >= max_delay_secs {
+            return self.max_delay;
+        }
+
+        match Duration::try_from_secs_f64(delay_secs) {
+            Ok(delay) if delay < self.max_delay => delay,
+            _ => self.max_delay,
+        }
     }
 }
 
@@ -84,12 +113,39 @@ impl MultiplierRedeliveryBackoffBuilder {
 
     /// Builds a validated [`MultiplierRedeliveryBackoff`].
     pub fn build(self) -> Result<MultiplierRedeliveryBackoff, Error> {
+        validate_delay_duration(self.min_delay)?;
+        validate_delay_duration(self.max_delay)?;
+
+        if self.min_delay > self.max_delay {
+            return Err(Error::Custom(
+                MIN_DELAY_MUST_NOT_EXCEED_MAX_DELAY.to_string(),
+            ));
+        }
+
+        if !self.multiplier.is_finite() {
+            return Err(Error::Custom(MULTIPLIER_MUST_BE_FINITE.to_string()));
+        }
+
+        if self.multiplier <= 1.0 {
+            return Err(Error::Custom(
+                MULTIPLIER_MUST_BE_GREATER_THAN_ONE.to_string(),
+            ));
+        }
+
         Ok(MultiplierRedeliveryBackoff {
             min_delay: self.min_delay,
             max_delay: self.max_delay,
             multiplier: self.multiplier,
         })
     }
+}
+
+fn validate_delay_duration(delay: Duration) -> Result<(), Error> {
+    if delay.as_millis() > u64::MAX as u128 {
+        return Err(Error::Custom(DELAY_DURATION_TOO_LARGE.to_string()));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
