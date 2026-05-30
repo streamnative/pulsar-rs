@@ -62,6 +62,8 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
             unacked_message_redelivery_delay,
             options,
             dead_letter_policy,
+            nack_redelivery_delay: _nack_redelivery_delay,
+            negative_ack_backoff: _negative_ack_backoff,
         } = config.clone();
         let consumer_id =
             consumer_id.unwrap_or_else(|| CONSUMER_ID_GENERATOR.fetch_add(1, Ordering::SeqCst));

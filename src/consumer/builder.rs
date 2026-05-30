@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, VecDeque},
+    sync::Arc,
     time::Duration,
 };
 
@@ -10,7 +11,8 @@ use regex::Regex;
 use crate::{
     consumer::{
         config::ConsumerConfig, data::DeadLetterPolicy, multi::MultiTopicConsumer,
-        options::ConsumerOptions, topic::TopicConsumer, InnerConsumer,
+        negative_ack_backoff::NegativeAckBackoff, options::ConsumerOptions, topic::TopicConsumer,
+        InnerConsumer,
     },
     message::proto::command_subscribe::SubType,
     reader::{Reader, State},
@@ -35,6 +37,8 @@ pub struct ConsumerBuilder<Exe: Executor> {
     consumer_options: Option<ConsumerOptions>,
     namespace: Option<String>,
     topic_refresh: Option<Duration>,
+    nack_redelivery_delay: Option<Duration>,
+    negative_ack_backoff: Option<Arc<dyn NegativeAckBackoff + Send + Sync>>,
 }
 
 fn check_nack_delay_duration(delay: Duration) -> Result<(), Error> {
@@ -64,6 +68,8 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
             consumer_options: None,
             namespace: None,
             topic_refresh: None,
+            nack_redelivery_delay: None,
+            negative_ack_backoff: None,
         }
     }
 
@@ -183,6 +189,30 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
         self
     }
 
+    /// Sets the fixed negative-ack redelivery delay. Messages that are negatively acknowledged
+    /// will be redelivered after this duration.
+    ///
+    /// `Duration::ZERO` is valid and means immediate redelivery; use this to preserve the
+    /// previous Rust-client default behavior. Repeated calls are last-call-wins.
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn with_nack_redelivery_delay(mut self, delay: Duration) -> Self {
+        self.nack_redelivery_delay = Some(delay);
+        self
+    }
+
+    /// Configures an optional negative-ack backoff policy. When set, message-based nack uses the
+    /// policy for delay calculation. Compatible with with_nack_redelivery_delay; Phase 4 resolves
+    /// precedence at runtime.
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn with_negative_ack_backoff<B>(mut self, backoff: B) -> Self
+    where
+        B: NegativeAckBackoff + 'static,
+    {
+        self.negative_ack_backoff =
+            Some(Arc::new(backoff) as Arc<dyn NegativeAckBackoff + Send + Sync>);
+        self
+    }
+
     // Checks the builder for inconsistencies
     // returns a config and a list of topics with associated brokers
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
@@ -201,6 +231,8 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
             dead_letter_policy,
             namespace: _,
             topic_refresh: _,
+            nack_redelivery_delay,
+            negative_ack_backoff,
         } = self;
 
         if consumer_name.is_none() {
@@ -215,6 +247,9 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
             return Err(Error::Custom(
                 "Cannot create consumer with no topics and no topic regex".into(),
             ));
+        }
+        if let Some(delay) = nack_redelivery_delay {
+            check_nack_delay_duration(delay)?;
         }
 
         let topics: Vec<(String, BrokerAddress)> = try_join_all(
@@ -271,6 +306,8 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
             unacked_message_redelivery_delay: unacked_message_resend_delay,
             options: consumer_options.unwrap_or_default(),
             dead_letter_policy,
+            nack_redelivery_delay,
+            negative_ack_backoff,
         };
         Ok((config, topics))
     }
@@ -374,5 +411,50 @@ mod tests {
         let result = check_nack_delay_duration(Duration::ZERO);
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_consumer_config_nack_delay_default_is_none() {
+        let config = ConsumerConfig::default();
+
+        assert!(config.nack_redelivery_delay.is_none());
+        assert!(config.negative_ack_backoff.is_none());
+    }
+
+    #[test]
+    fn test_consumer_config_stores_nack_delay() {
+        let config = ConsumerConfig {
+            nack_redelivery_delay: Some(Duration::from_secs(5)),
+            ..ConsumerConfig::default()
+        };
+
+        assert_eq!(config.nack_redelivery_delay, Some(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn test_consumer_config_stores_both_nack_configs_independently() {
+        let config = ConsumerConfig {
+            nack_redelivery_delay: Some(Duration::from_secs(5)),
+            negative_ack_backoff: Some(Arc::new(
+                crate::consumer::negative_ack_backoff::MultiplierRedeliveryBackoff::default(),
+            )),
+            ..ConsumerConfig::default()
+        };
+
+        assert!(config.nack_redelivery_delay.is_some());
+        assert!(config.negative_ack_backoff.is_some());
+    }
+
+    #[test]
+    fn test_consumer_config_backoff_only_stores_none_for_delay() {
+        let config = ConsumerConfig {
+            negative_ack_backoff: Some(Arc::new(
+                crate::consumer::negative_ack_backoff::MultiplierRedeliveryBackoff::default(),
+            )),
+            ..ConsumerConfig::default()
+        };
+
+        assert!(config.nack_redelivery_delay.is_none());
+        assert!(config.negative_ack_backoff.is_some());
     }
 }

@@ -1,7 +1,9 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use crate::{
-    consumer::{data::DeadLetterPolicy, options::ConsumerOptions},
+    consumer::{
+        data::DeadLetterPolicy, negative_ack_backoff::NegativeAckBackoff, options::ConsumerOptions,
+    },
     message::proto::command_subscribe::SubType,
 };
 
@@ -28,4 +30,8 @@ pub struct ConsumerConfig {
     pub(crate) options: ConsumerOptions,
     /// dead letter policy
     pub(crate) dead_letter_policy: Option<DeadLetterPolicy>,
+    /// fixed negative-ack redelivery delay
+    pub(crate) nack_redelivery_delay: Option<Duration>,
+    /// negative-ack redelivery backoff policy
+    pub(crate) negative_ack_backoff: Option<Arc<dyn NegativeAckBackoff + Send + Sync>>,
 }

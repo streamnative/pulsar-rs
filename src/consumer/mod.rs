@@ -382,6 +382,15 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         }
     }
 
+    /// Returns the configured fixed negative-ack redelivery delay, or None if not set.
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn nack_redelivery_delay(&self) -> Option<Duration> {
+        match &self.inner {
+            InnerConsumer::Single(c) => c.config.nack_redelivery_delay,
+            InnerConsumer::Multi(c) => c.config.nack_redelivery_delay,
+        }
+    }
+
     /// returns the date of the last message reception
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn last_message_received(&self) -> Option<DateTime<Utc>> {
