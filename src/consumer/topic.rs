@@ -19,7 +19,7 @@ use crate::{
     connection::Connection,
     consumer::{
         config::ConsumerConfig,
-        data::{DeadLetterPolicy, EngineMessage, MessageData, MessageIdDataReceiver},
+        data::{DeadLetterPolicy, InternalEngineMessage, MessageData, MessageIdDataReceiver},
         engine::ConsumerEngine,
         message::Message,
     },
@@ -36,7 +36,7 @@ pub struct TopicConsumer<T: DeserializeMessage, Exe: Executor> {
     pub(crate) config: ConsumerConfig,
     topic: String,
     messages: Pin<Box<MessageIdDataReceiver>>,
-    engine_tx: mpsc::UnboundedSender<EngineMessage<Exe>>,
+    engine_tx: mpsc::UnboundedSender<InternalEngineMessage<Exe>>,
     data_type: PhantomData<fn(Payload) -> T::Output>,
     pub(crate) dead_letter_policy: Option<DeadLetterPolicy>,
     pub(super) last_message_received: Option<DateTime<Utc>>,
@@ -92,7 +92,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
             let res = client.executor.spawn(Box::pin(async move {
                 while interval.next().await.is_some() {
                     if redelivery_tx
-                        .send(EngineMessage::UnackedRedelivery)
+                        .send(InternalEngineMessage::UnackedRedelivery)
                         .await
                         .is_err()
                     {
@@ -156,7 +156,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
     pub async fn connection(&mut self) -> Result<Arc<Connection<Exe>>, Error> {
         let (resolver, response) = oneshot::channel();
         self.engine_tx
-            .send(EngineMessage::GetConnection(resolver))
+            .send(InternalEngineMessage::GetConnection(resolver))
             .await
             .map_err(|_| ConsumerError::Connection(ConnectionError::Disconnected))?;
 
@@ -185,7 +185,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         self.engine_tx
-            .send(EngineMessage::Ack(msg.message_id().clone(), false))
+            .send(InternalEngineMessage::Ack(msg.message_id().clone(), false))
             .await?;
         Ok(())
     }
@@ -193,20 +193,20 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn ack_with_id(&mut self, msg_id: MessageIdData) -> Result<(), ConsumerError> {
         self.engine_tx
-            .send(EngineMessage::Ack(msg_id, false))
+            .send(InternalEngineMessage::Ack(msg_id, false))
             .await?;
         Ok(())
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub(crate) fn acker(&self) -> mpsc::UnboundedSender<EngineMessage<Exe>> {
+    pub(crate) fn acker(&self) -> mpsc::UnboundedSender<InternalEngineMessage<Exe>> {
         self.engine_tx.clone()
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn cumulative_ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         self.engine_tx
-            .send(EngineMessage::Ack(msg.message_id().clone(), true))
+            .send(InternalEngineMessage::Ack(msg.message_id().clone(), true))
             .await?;
         Ok(())
     }
@@ -217,7 +217,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         msg_id: MessageIdData,
     ) -> Result<(), ConsumerError> {
         self.engine_tx
-            .send(EngineMessage::Ack(msg_id, true))
+            .send(InternalEngineMessage::Ack(msg_id, true))
             .await?;
         Ok(())
     }
@@ -225,7 +225,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn nack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         self.engine_tx
-            .send(EngineMessage::Nack(
+            .send(InternalEngineMessage::Nack(
                 msg.message_id().clone(),
                 Some(msg.redelivery_count()),
             ))
@@ -236,7 +236,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn nack_with_id(&mut self, msg_id: MessageIdData) -> Result<(), ConsumerError> {
         self.engine_tx
-            .send(EngineMessage::Nack(msg_id, None))
+            .send(InternalEngineMessage::Nack(msg_id, None))
             .await?;
         Ok(())
     }
@@ -311,9 +311,8 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         let message_id = MessageData {
             id: message_id,
             batch_size: payload.metadata.num_messages_in_batch,
-            redelivery_count,
         };
-        Message::new(&self.topic, message_id, payload)
+        Message::new_with_redelivery_count(&self.topic, message_id, payload, redelivery_count)
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]

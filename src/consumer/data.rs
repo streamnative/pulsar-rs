@@ -17,6 +17,18 @@ pub enum EngineEvent<Exe: Executor> {
 
 pub enum EngineMessage<Exe: Executor> {
     Ack(MessageIdData, bool),
+    Nack(MessageIdData),
+    UnackedRedelivery,
+    GetConnection(oneshot::Sender<Arc<Connection<Exe>>>),
+}
+
+pub(crate) enum InternalEngineEvent<Exe: Executor> {
+    Message(Option<RawMessage>),
+    EngineMessage(Option<InternalEngineMessage<Exe>>),
+}
+
+pub(crate) enum InternalEngineMessage<Exe: Executor> {
+    Ack(MessageIdData, bool),
     Nack(MessageIdData, Option<u32>),
     UnackedRedelivery,
     GetConnection(oneshot::Sender<Arc<Connection<Exe>>>),
@@ -26,7 +38,6 @@ pub enum EngineMessage<Exe: Executor> {
 pub struct MessageData {
     pub id: MessageIdData,
     pub batch_size: Option<i32>,
-    pub(crate) redelivery_count: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -57,21 +68,24 @@ mod tests {
 
     #[test]
     fn test_nack_engine_message_with_count() {
-        let message =
-            EngineMessage::<crate::executor::TokioExecutor>::Nack(message_id(), Some(42u32));
+        let message = InternalEngineMessage::<crate::executor::TokioExecutor>::Nack(
+            message_id(),
+            Some(42u32),
+        );
 
         match message {
-            EngineMessage::Nack(_, count) => assert_eq!(count, Some(42u32)),
+            InternalEngineMessage::Nack(_, count) => assert_eq!(count, Some(42u32)),
             _ => panic!("expected nack engine message"),
         }
     }
 
     #[test]
     fn test_nack_engine_message_id_only_carries_none() {
-        let message = EngineMessage::<crate::executor::TokioExecutor>::Nack(message_id(), None);
+        let message =
+            InternalEngineMessage::<crate::executor::TokioExecutor>::Nack(message_id(), None);
 
         match message {
-            EngineMessage::Nack(_, count) => assert_eq!(count, None),
+            InternalEngineMessage::Nack(_, count) => assert_eq!(count, None),
             _ => panic!("expected nack engine message"),
         }
     }

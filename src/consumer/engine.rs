@@ -14,7 +14,7 @@ use crate::{
     connection::Connection,
     consumer::{
         batched_message_iterator::BatchedMessageIterator,
-        data::{DeadLetterPolicy, EngineEvent, EngineMessage},
+        data::{DeadLetterPolicy, InternalEngineEvent, InternalEngineMessage},
         options::ConsumerOptions,
     },
     error::{ConnectionError, ConsumerError},
@@ -42,9 +42,9 @@ pub struct ConsumerEngine<Exe: Executor> {
     name: Option<String>,
     tx: mpsc::Sender<Result<(MessageIdData, Payload, u32), Error>>,
     messages_rx: Option<mpsc::UnboundedReceiver<RawMessage>>,
-    engine_rx: Option<mpsc::UnboundedReceiver<EngineMessage<Exe>>>,
-    event_rx: mpsc::UnboundedReceiver<EngineEvent<Exe>>,
-    event_tx: UnboundedSender<EngineEvent<Exe>>,
+    engine_rx: Option<mpsc::UnboundedReceiver<InternalEngineMessage<Exe>>>,
+    event_rx: mpsc::UnboundedReceiver<InternalEngineEvent<Exe>>,
+    event_tx: UnboundedSender<InternalEngineEvent<Exe>>,
     batch_size: u32,
     remaining_messages: i64,
     unacked_message_redelivery_delay: Option<Duration>,
@@ -65,7 +65,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         name: Option<String>,
         tx: mpsc::Sender<Result<(MessageIdData, Payload, u32), Error>>,
         messages_rx: mpsc::UnboundedReceiver<RawMessage>,
-        engine_rx: mpsc::UnboundedReceiver<EngineMessage<Exe>>,
+        engine_rx: mpsc::UnboundedReceiver<InternalEngineMessage<Exe>>,
         batch_size: u32,
         unacked_message_redelivery_delay: Option<Duration>,
         dead_letter_policy: Option<DeadLetterPolicy>,
@@ -97,7 +97,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
     fn register_source<E, M>(&self, mut rx: mpsc::UnboundedReceiver<E>, mapper: M) -> Result<(), ()>
     where
         E: Send + 'static,
-        M: Fn(Option<E>) -> EngineEvent<Exe> + Send + Sync + 'static,
+        M: Fn(Option<E>) -> InternalEngineEvent<Exe> + Send + Sync + 'static,
     {
         let mut event_tx = self.event_tx.clone();
 
@@ -138,14 +138,14 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             }
 
             if let Some(messages_rx) = self.messages_rx.take() {
-                self.register_source(messages_rx, |msg| EngineEvent::Message(msg))
+                self.register_source(messages_rx, |msg| InternalEngineEvent::Message(msg))
                     .map_err(|_| {
                         Error::Custom(String::from("Error registering messages_rx source"))
                     })?;
             }
 
             if let Some(engine_rx) = self.engine_rx.take() {
-                self.register_source(engine_rx, |msg| EngineEvent::EngineMessage(msg))
+                self.register_source(engine_rx, |msg| InternalEngineEvent::EngineMessage(msg))
                     .map_err(|_| {
                         Error::Custom(String::from("Error registering engine_rx source"))
                     })?;
@@ -214,14 +214,14 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                     // ```
                     debug!("consumer engine: timeout (1s)");
                 }
-                Ok(Some(EngineEvent::Message(msg))) => {
+                Ok(Some(InternalEngineEvent::Message(msg))) => {
                     debug!("consumer engine: received message, {:?}", msg);
                     let out = self.handle_message_opt(msg).await;
                     if let Some(res) = out {
                         return res;
                     }
                 }
-                Ok(Some(EngineEvent::EngineMessage(msg))) => {
+                Ok(Some(InternalEngineEvent::EngineMessage(msg))) => {
                     debug!("consumer engine: received engine message");
                     let continue_loop = self.handle_ack_opt(msg).await;
                     if !continue_loop {
@@ -276,17 +276,17 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         }
     }
 
-    async fn handle_ack_opt(&mut self, ack_opt: Option<EngineMessage<Exe>>) -> bool {
+    async fn handle_ack_opt(&mut self, ack_opt: Option<InternalEngineMessage<Exe>>) -> bool {
         match ack_opt {
             None => {
                 trace!("ack channel was closed");
                 false
             }
-            Some(EngineMessage::Ack(message_id, cumulative)) => {
+            Some(InternalEngineMessage::Ack(message_id, cumulative)) => {
                 self.ack(message_id, cumulative).await;
                 true
             }
-            Some(EngineMessage::Nack(message_id, _count)) => {
+            Some(InternalEngineMessage::Nack(message_id, _count)) => {
                 if let Err(e) = self
                     .connection
                     .sender()
@@ -300,7 +300,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 }
                 true
             }
-            Some(EngineMessage::UnackedRedelivery) => {
+            Some(InternalEngineMessage::UnackedRedelivery) => {
                 let mut h = HashSet::new();
                 let now = Instant::now();
                 // info!("unacked messages length: {}", self.unacked_messages.len());
@@ -328,7 +328,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 }
                 true
             }
-            Some(EngineMessage::GetConnection(sender)) => {
+            Some(InternalEngineMessage::GetConnection(sender)) => {
                 let _ = sender.send(self.connection.clone()).map_err(|_| {
                     error!(
                         "consumer requested the engine's connection but dropped the \

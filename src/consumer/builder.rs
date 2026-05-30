@@ -189,8 +189,11 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
         self
     }
 
-    /// Sets the fixed negative-ack redelivery delay. Messages that are negatively acknowledged
-    /// will be redelivered after this duration.
+    /// Sets the fixed negative-ack redelivery delay.
+    ///
+    /// This value is stored in the consumer configuration, but Phase 3 does not apply it at
+    /// runtime yet. Negative acknowledgments still use immediate redelivery until the engine
+    /// scheduling integration lands in Phase 4.
     ///
     /// `Duration::ZERO` is valid and means immediate redelivery; use this to preserve the
     /// previous Rust-client default behavior. Repeated calls are last-call-wins.
@@ -200,9 +203,12 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
         self
     }
 
-    /// Configures an optional negative-ack backoff policy. When set, message-based nack uses the
-    /// policy for delay calculation. Compatible with with_nack_redelivery_delay; Phase 4 resolves
-    /// precedence at runtime.
+    /// Configures an optional negative-ack backoff policy.
+    ///
+    /// This value is stored in the consumer configuration, but Phase 3 does not apply it at
+    /// runtime yet. Message-based nacks continue to redeliver immediately until the engine
+    /// scheduling integration lands in Phase 4. Compatible with with_nack_redelivery_delay; Phase 4
+    /// resolves precedence at runtime.
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_negative_ack_backoff<B>(mut self, backoff: B) -> Self
     where
