@@ -40,7 +40,7 @@ pub struct ConsumerEngine<Exe: Executor> {
     sub_type: SubType,
     id: u64,
     name: Option<String>,
-    tx: mpsc::Sender<Result<(MessageIdData, Payload), Error>>,
+    tx: mpsc::Sender<Result<(MessageIdData, Payload, u32), Error>>,
     messages_rx: Option<mpsc::UnboundedReceiver<RawMessage>>,
     engine_rx: Option<mpsc::UnboundedReceiver<EngineMessage<Exe>>>,
     event_rx: mpsc::UnboundedReceiver<EngineEvent<Exe>>,
@@ -63,7 +63,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         sub_type: SubType,
         id: u64,
         name: Option<String>,
-        tx: mpsc::Sender<Result<(MessageIdData, Payload), Error>>,
+        tx: mpsc::Sender<Result<(MessageIdData, Payload, u32), Error>>,
         messages_rx: mpsc::UnboundedReceiver<RawMessage>,
         engine_rx: mpsc::UnboundedReceiver<EngineMessage<Exe>>,
         batch_size: u32,
@@ -286,7 +286,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 self.ack(message_id, cumulative).await;
                 true
             }
-            Some(EngineMessage::Nack(message_id)) => {
+            Some(EngineMessage::Nack(message_id, _count)) => {
                 if let Err(e) = self
                     .connection
                     .sender()
@@ -540,6 +540,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         } else {
             vec![(message.message_id, payload)]
         };
+        let redelivery_count = message.redelivery_count.unwrap_or(0);
         for (message_id, payload) in payloads {
             match (message.redelivery_count, &self.dead_letter_policy) {
                 (Some(redelivery_count), Some(dead_letter_policy))
@@ -594,7 +595,10 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
 
                     self.ack(message_id, false).await;
                 }
-                _ => self.send_to_consumer(message_id, payload).await?,
+                _ => {
+                    self.send_to_consumer(message_id, payload, redelivery_count)
+                        .await?
+                }
             }
         }
         Ok(())
@@ -605,10 +609,11 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         &mut self,
         message_id: MessageIdData,
         payload: Payload,
+        redelivery_count: u32,
     ) -> Result<(), Error> {
         let now = Instant::now();
         self.tx
-            .send(Ok((message_id.clone(), payload)))
+            .send(Ok((message_id.clone(), payload, redelivery_count)))
             .await
             .map_err(|e| {
                 error!("tx returned {:?}", e);

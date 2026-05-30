@@ -8,7 +8,7 @@ use crate::{
     Error, Executor, Payload,
 };
 
-pub type MessageIdDataReceiver = mpsc::Receiver<Result<(MessageIdData, Payload), Error>>;
+pub type MessageIdDataReceiver = mpsc::Receiver<Result<(MessageIdData, Payload, u32), Error>>;
 
 pub enum EngineEvent<Exe: Executor> {
     Message(Option<RawMessage>),
@@ -17,7 +17,7 @@ pub enum EngineEvent<Exe: Executor> {
 
 pub enum EngineMessage<Exe: Executor> {
     Ack(MessageIdData, bool),
-    Nack(MessageIdData),
+    Nack(MessageIdData, Option<u32>),
     UnackedRedelivery,
     GetConnection(oneshot::Sender<Arc<Connection<Exe>>>),
 }
@@ -26,6 +26,7 @@ pub enum EngineMessage<Exe: Executor> {
 pub struct MessageData {
     pub id: MessageIdData,
     pub batch_size: Option<i32>,
+    pub(crate) redelivery_count: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -35,4 +36,43 @@ pub struct DeadLetterPolicy {
     pub max_redeliver_count: usize,
     /// Name of the dead topic where the failing messages will be sent.
     pub dead_letter_topic: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::message::proto;
+
+    fn message_id() -> proto::MessageIdData {
+        proto::MessageIdData {
+            ledger_id: 1,
+            entry_id: 1,
+            partition: None,
+            batch_index: None,
+            ack_set: vec![],
+            batch_size: None,
+            first_chunk_message_id: None,
+        }
+    }
+
+    #[test]
+    fn test_nack_engine_message_with_count() {
+        let message =
+            EngineMessage::<crate::executor::TokioExecutor>::Nack(message_id(), Some(42u32));
+
+        match message {
+            EngineMessage::Nack(_, count) => assert_eq!(count, Some(42u32)),
+            _ => panic!("expected nack engine message"),
+        }
+    }
+
+    #[test]
+    fn test_nack_engine_message_id_only_carries_none() {
+        let message = EngineMessage::<crate::executor::TokioExecutor>::Nack(message_id(), None);
+
+        match message {
+            EngineMessage::Nack(_, count) => assert_eq!(count, None),
+            _ => panic!("expected nack engine message"),
+        }
+    }
 }

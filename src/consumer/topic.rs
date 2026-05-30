@@ -225,14 +225,19 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn nack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         self.engine_tx
-            .send(EngineMessage::Nack(msg.message_id().clone()))
+            .send(EngineMessage::Nack(
+                msg.message_id().clone(),
+                Some(msg.redelivery_count()),
+            ))
             .await?;
         Ok(())
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn nack_with_id(&mut self, msg_id: MessageIdData) -> Result<(), ConsumerError> {
-        self.engine_tx.send(EngineMessage::Nack(msg_id)).await?;
+        self.engine_tx
+            .send(EngineMessage::Nack(msg_id, None))
+            .await?;
         Ok(())
     }
 
@@ -297,10 +302,16 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    fn create_message(&self, message_id: MessageIdData, payload: Payload) -> Message<T> {
+    fn create_message(
+        &self,
+        message_id: MessageIdData,
+        payload: Payload,
+        redelivery_count: u32,
+    ) -> Message<T> {
         let message_id = MessageData {
             id: message_id,
             batch_size: payload.metadata.num_messages_in_batch,
+            redelivery_count,
         };
         Message::new(&self.topic, message_id, payload)
     }
@@ -324,10 +335,10 @@ impl<T: DeserializeMessage, Exe: Executor> Stream for TopicConsumer<T, Exe> {
         match self.messages.as_mut().poll_next(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(None) => Poll::Ready(None),
-            Poll::Ready(Some(Ok((id, payload)))) => {
+            Poll::Ready(Some(Ok((id, payload, redelivery_count)))) => {
                 self.last_message_received = Some(Utc::now());
                 self.messages_received += 1;
-                Poll::Ready(Some(Ok(self.create_message(id, payload))))
+                Poll::Ready(Some(Ok(self.create_message(id, payload, redelivery_count))))
             }
             Poll::Ready(Some(Err(e))) => {
                 error!("we are using in the single-consumer and we got an error, {e}");

@@ -42,10 +42,66 @@ impl<T> Message<T> {
         &self.message_id.id
     }
 
+    /// Returns the broker-provided redelivery count for this message. Returns `0` when the broker
+    /// did not supply a redelivery count (first delivery or broker omitted the field).
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn redelivery_count(&self) -> u32 {
+        self.message_id.redelivery_count
+    }
+
     /// Get message key (partition key)
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn key(&self) -> Option<String> {
         self.payload.metadata.partition_key.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::message::proto;
+
+    fn message_id() -> proto::MessageIdData {
+        proto::MessageIdData {
+            ledger_id: 1,
+            entry_id: 1,
+            partition: None,
+            batch_index: None,
+            ack_set: vec![],
+            batch_size: None,
+            first_chunk_message_id: None,
+        }
+    }
+
+    fn payload() -> Payload {
+        Payload {
+            metadata: proto::MessageMetadata::default(),
+            data: vec![],
+        }
+    }
+
+    #[test]
+    fn test_redelivery_count_returns_broker_value() {
+        let message_id = MessageData {
+            id: message_id(),
+            batch_size: None,
+            redelivery_count: 7,
+        };
+        let msg = Message::<()>::new("test-topic", message_id, payload());
+
+        assert_eq!(msg.redelivery_count(), 7);
+    }
+
+    #[test]
+    fn test_redelivery_count_defaults_to_zero() {
+        let message_id = MessageData {
+            id: message_id(),
+            batch_size: None,
+            redelivery_count: 0,
+        };
+        let msg = Message::<()>::new("test-topic", message_id, payload());
+
+        assert_eq!(msg.redelivery_count(), 0);
     }
 }
 
