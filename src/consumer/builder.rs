@@ -37,6 +37,14 @@ pub struct ConsumerBuilder<Exe: Executor> {
     topic_refresh: Option<Duration>,
 }
 
+fn check_nack_delay_duration(delay: Duration) -> Result<(), Error> {
+    if delay.as_millis() > u64::MAX as u128 {
+        return Err(Error::Custom("delay duration is too large".to_string()));
+    }
+
+    Ok(())
+}
+
 impl<Exe: Executor> ConsumerBuilder<Exe> {
     /// Creates a new [ConsumerBuilder] from an existing client instance
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
@@ -345,5 +353,26 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
             consumer,
             state: Some(State::PollingConsumer),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn test_nack_delay_validation_oversized() {
+        let result = check_nack_delay_duration(Duration::MAX);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_nack_delay_validation_zero_is_valid() {
+        let result = check_nack_delay_duration(Duration::ZERO);
+
+        assert!(result.is_ok());
     }
 }
