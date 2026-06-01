@@ -41,6 +41,21 @@ pub struct MultiTopicConsumer<T: DeserializeMessage, Exe: Executor> {
 }
 
 impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
+    fn topic_consumer_configs_for_refresh<I>(
+        consumer_config: &ConsumerConfig,
+        topics: I,
+        existing_topics: &VecDeque<String>,
+    ) -> Vec<(String, crate::BrokerAddress, ConsumerConfig)>
+    where
+        I: IntoIterator<Item = (String, crate::BrokerAddress)>,
+    {
+        topics
+            .into_iter()
+            .filter(|(topic, _)| !existing_topics.contains(topic))
+            .map(|(topic, addr)| (topic, addr, consumer_config.clone_for_topic_consumer()))
+            .collect()
+    }
+
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn topics(&self) -> Vec<String> {
         self.topics.iter().map(|s| s.to_string()).collect()
@@ -184,20 +199,18 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
             .into_iter()
             .flatten();
 
+            let topic_consumer_specs = Self::topic_consumer_configs_for_refresh(
+                &consumer_config,
+                topics,
+                &existing_topics,
+            );
+
             // 3. create consumers
-            let consumers = try_join_all(
-                topics
-                    .into_iter()
-                    .filter(|(t, _)| !existing_topics.contains(t))
-                    .map(|(topic, addr)| {
-                        TopicConsumer::new(
-                            pulsar.clone(),
-                            topic,
-                            addr,
-                            consumer_config.clone_for_topic_consumer(),
-                        )
-                    }),
-            )
+            let consumers = try_join_all(topic_consumer_specs.into_iter().map(
+                |(topic, addr, topic_consumer_config)| {
+                    TopicConsumer::new(pulsar.clone(), topic, addr, topic_consumer_config)
+                },
+            ))
             .await?;
             if !consumers.is_empty() {
                 let topics: Vec<String> = consumers.iter().map(|c| c.topic()).collect();
@@ -407,5 +420,70 @@ impl<T: 'static + DeserializeMessage, Exe: Executor> Stream for MultiTopicConsum
         }
 
         Poll::Pending
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::VecDeque, sync::Arc, time::Duration};
+
+    use super::*;
+    use crate::{
+        consumer::negative_ack_backoff::MultiplierRedeliveryBackoff, BrokerAddress, TokioExecutor,
+    };
+
+    fn broker_addr(port: u16) -> BrokerAddress {
+        BrokerAddress {
+            url: format!("pulsar://127.0.0.1:{port}").parse().unwrap(),
+            broker_url: format!("127.0.0.1:{port}"),
+            proxy: false,
+        }
+    }
+
+    fn nack_config_with_delay_and_backoff() -> ConsumerConfig {
+        ConsumerConfig {
+            nack_redelivery_delay: Some(Duration::from_secs(30)),
+            negative_ack_backoff: Some(Arc::new(MultiplierRedeliveryBackoff::default())),
+            ..ConsumerConfig::default()
+        }
+    }
+
+    #[test]
+    fn regex_refresh_config_carries_nack_delay_to_each_new_consumer() {
+        let config = nack_config_with_delay_and_backoff();
+        let existing_topics = VecDeque::from(["persistent://public/default/existing".to_string()]);
+        let topics = vec![
+            (
+                "persistent://public/default/existing".to_string(),
+                broker_addr(6650),
+            ),
+            (
+                "persistent://public/default/new-1".to_string(),
+                broker_addr(6651),
+            ),
+            (
+                "persistent://public/default/new-2".to_string(),
+                broker_addr(6652),
+            ),
+        ];
+
+        let topic_consumer_specs =
+            MultiTopicConsumer::<String, TokioExecutor>::topic_consumer_configs_for_refresh(
+                &config,
+                topics,
+                &existing_topics,
+            );
+
+        assert_eq!(topic_consumer_specs.len(), 2);
+        for (_, _, topic_consumer_config) in &topic_consumer_specs {
+            assert_eq!(
+                topic_consumer_config.nack_redelivery_delay,
+                Some(Duration::from_secs(30))
+            );
+            assert!(topic_consumer_config.negative_ack_backoff.is_some());
+        }
+        assert!(topic_consumer_specs
+            .iter()
+            .all(|(topic, _, _)| topic != "persistent://public/default/existing"));
     }
 }

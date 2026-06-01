@@ -54,6 +54,20 @@ fn check_nack_delay_duration(delay: Duration) -> Result<(), Error> {
 }
 
 impl<Exe: Executor> ConsumerBuilder<Exe> {
+    fn topic_consumer_configs_for_joined_topics(
+        config: &ConsumerConfig,
+        joined_topics: &[(String, BrokerAddress)],
+    ) -> Vec<ConsumerConfig> {
+        joined_topics
+            .iter()
+            .map(|_| config.clone_for_topic_consumer())
+            .collect()
+    }
+
+    fn topic_consumer_config_for_reader(config: &ConsumerConfig) -> ConsumerConfig {
+        config.clone_for_topic_consumer()
+    }
+
     /// Creates a new [ConsumerBuilder] from an existing client instance
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn new(pulsar: &Pulsar<Exe>) -> Self {
@@ -341,14 +355,13 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
         // would this clone() consume too much memory?
         let (config, joined_topics) = self.clone().validate().await?;
 
-        let consumers = try_join_all(joined_topics.into_iter().map(|(topic, addr)| {
-            TopicConsumer::new(
-                self.pulsar.clone(),
-                topic,
-                addr,
-                config.clone_for_topic_consumer(),
-            )
-        }))
+        let topic_consumer_configs =
+            Self::topic_consumer_configs_for_joined_topics(&config, &joined_topics);
+        let consumers = try_join_all(joined_topics.into_iter().zip(topic_consumer_configs).map(
+            |((topic, addr), topic_consumer_config)| {
+                TopicConsumer::new(self.pulsar.clone(), topic, addr, topic_consumer_config)
+            },
+        ))
         .await?;
 
         let consumer = if consumers.len() == 1 {
@@ -418,13 +431,9 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
         }
 
         let (topic, addr) = joined_topics.pop().expect("len checked above");
-        let consumer = TopicConsumer::new(
-            self.pulsar.clone(),
-            topic,
-            addr,
-            config.clone_for_topic_consumer(),
-        )
-        .await?;
+        let topic_consumer_config = Self::topic_consumer_config_for_reader(&config);
+        let consumer =
+            TopicConsumer::new(self.pulsar.clone(), topic, addr, topic_consumer_config).await?;
 
         Ok(Reader {
             consumer,
@@ -438,6 +447,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::TokioExecutor;
 
     #[test]
     fn test_nack_delay_validation_oversized() {
@@ -541,9 +551,28 @@ mod tests {
         }
     }
 
-    fn assert_topic_consumer_receives_negative_ack_config(config: &ConsumerConfig) {
-        let passed_to_topic_consumer = config.clone_for_topic_consumer();
+    fn broker_addr(port: u16) -> BrokerAddress {
+        BrokerAddress {
+            url: format!("pulsar://127.0.0.1:{port}").parse().unwrap(),
+            broker_url: format!("127.0.0.1:{port}"),
+            proxy: false,
+        }
+    }
 
+    fn joined_topics(count: usize) -> Vec<(String, BrokerAddress)> {
+        (0..count)
+            .map(|idx| {
+                (
+                    format!("persistent://public/default/topic-{idx}"),
+                    broker_addr(6650 + idx as u16),
+                )
+            })
+            .collect()
+    }
+
+    fn assert_topic_consumer_receives_negative_ack_config(
+        passed_to_topic_consumer: &ConsumerConfig,
+    ) {
         assert_eq!(
             passed_to_topic_consumer.nack_redelivery_delay,
             Some(Duration::from_secs(30))
@@ -553,48 +582,75 @@ mod tests {
 
     #[test]
     fn single_topic_consumer_config_carries_nack_delay_to_engine() {
-        // Single-topic path: TopicConsumer::new() receives ConsumerConfig directly; no broker needed.
         let config = nack_config_with_delay_and_backoff();
+        let topic_consumer_configs =
+            ConsumerBuilder::<TokioExecutor>::topic_consumer_configs_for_joined_topics(
+                &config,
+                &joined_topics(1),
+            );
 
-        assert_topic_consumer_receives_negative_ack_config(&config);
+        assert_eq!(topic_consumer_configs.len(), 1);
+        assert_topic_consumer_receives_negative_ack_config(&topic_consumer_configs[0]);
     }
 
     #[test]
     fn partitioned_consumer_config_carries_nack_delay_to_each_engine() {
-        // Partitioned path clones ConsumerConfig once per partition.
         let config = nack_config_with_delay_and_backoff();
-        assert_topic_consumer_receives_negative_ack_config(&config);
+        let topic_consumer_configs =
+            ConsumerBuilder::<TokioExecutor>::topic_consumer_configs_for_joined_topics(
+                &config,
+                &joined_topics(3),
+            );
+
+        assert_eq!(topic_consumer_configs.len(), 3);
+        for topic_consumer_config in &topic_consumer_configs {
+            assert_topic_consumer_receives_negative_ack_config(topic_consumer_config);
+        }
     }
 
     #[test]
     fn multi_topic_consumer_config_carries_nack_delay_to_each_engine() {
-        // Multi-topic path uses the same ConsumerConfig clone per TopicConsumer.
         let config = nack_config_with_delay_and_backoff();
-        assert_topic_consumer_receives_negative_ack_config(&config);
-    }
+        let topic_consumer_configs =
+            ConsumerBuilder::<TokioExecutor>::topic_consumer_configs_for_joined_topics(
+                &config,
+                &joined_topics(2),
+            );
 
-    #[test]
-    fn regex_consumer_config_carries_nack_delay_to_each_engine() {
-        // Regex path carries ConsumerConfig through topic refresh into each TopicConsumer.
-        let config = nack_config_with_delay_and_backoff();
-        assert_topic_consumer_receives_negative_ack_config(&config);
+        assert_eq!(topic_consumer_configs.len(), 2);
+        for topic_consumer_config in &topic_consumer_configs {
+            assert_topic_consumer_receives_negative_ack_config(topic_consumer_config);
+        }
     }
 
     #[test]
     fn reader_consumer_config_carries_nack_delay_to_engine() {
-        // Reader path uses the same ConsumerConfig spine; Reader does not expose nack() API (D-03).
-        let mut config = nack_config_with_delay_and_backoff();
-        config.options.durable = Some(false);
-        config.sub_type = SubType::Exclusive;
+        let config = nack_config_with_delay_and_backoff();
+        let mut reader_config = config;
+        reader_config.options.durable = Some(false);
+        reader_config.sub_type = SubType::Exclusive;
 
-        assert_topic_consumer_receives_negative_ack_config(&config);
-        assert_eq!(
-            config.clone_for_topic_consumer().options.durable,
-            Some(false)
-        );
-        assert_eq!(
-            config.clone_for_topic_consumer().sub_type,
-            SubType::Exclusive
-        );
+        let topic_consumer_config =
+            ConsumerBuilder::<TokioExecutor>::topic_consumer_config_for_reader(&reader_config);
+
+        assert_topic_consumer_receives_negative_ack_config(&topic_consumer_config);
+        assert_eq!(topic_consumer_config.options.durable, Some(false));
+        assert_eq!(topic_consumer_config.sub_type, SubType::Exclusive);
+    }
+
+    #[test]
+    fn build_path_config_helpers_clone_for_each_topic_consumer() {
+        let mut config = nack_config_with_delay_and_backoff();
+        config.consumer_id = Some(7);
+        let topic_consumer_configs =
+            ConsumerBuilder::<TokioExecutor>::topic_consumer_configs_for_joined_topics(
+                &config,
+                &joined_topics(2),
+            );
+
+        assert_eq!(topic_consumer_configs.len(), 2);
+        assert!(topic_consumer_configs
+            .iter()
+            .all(|topic_consumer_config| topic_consumer_config.consumer_id == Some(7)));
     }
 }
