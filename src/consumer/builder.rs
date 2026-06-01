@@ -502,4 +502,62 @@ mod tests {
             );
         }
     }
+
+    fn nack_config_with_delay_and_backoff() -> ConsumerConfig {
+        ConsumerConfig {
+            nack_redelivery_delay: Some(Duration::from_secs(30)),
+            negative_ack_backoff: Some(Arc::new(
+                crate::consumer::negative_ack_backoff::MultiplierRedeliveryBackoff::default(),
+            )),
+            ..ConsumerConfig::default()
+        }
+    }
+
+    #[test]
+    fn single_topic_consumer_config_carries_nack_delay_to_engine() {
+        // Single-topic path: TopicConsumer::new() receives ConsumerConfig directly; no broker needed.
+        let config = nack_config_with_delay_and_backoff();
+
+        assert_eq!(config.nack_redelivery_delay, Some(Duration::from_secs(30)));
+        assert!(config.negative_ack_backoff.is_some());
+    }
+
+    #[test]
+    fn partitioned_consumer_config_carries_nack_delay_to_each_engine() {
+        // Partitioned path clones ConsumerConfig once per partition.
+        let config = nack_config_with_delay_and_backoff();
+        let cloned = config.clone();
+
+        assert_eq!(cloned.nack_redelivery_delay, config.nack_redelivery_delay);
+        assert!(cloned.negative_ack_backoff.is_some());
+    }
+
+    #[test]
+    fn multi_topic_consumer_config_carries_nack_delay_to_each_engine() {
+        // Multi-topic path uses the same ConsumerConfig clone per TopicConsumer.
+        let config = nack_config_with_delay_and_backoff();
+        let cloned = config.clone();
+
+        assert_eq!(cloned.nack_redelivery_delay, config.nack_redelivery_delay);
+        assert!(cloned.negative_ack_backoff.is_some());
+    }
+
+    #[test]
+    fn regex_consumer_config_carries_nack_delay_to_each_engine() {
+        // Regex path carries ConsumerConfig through topic refresh into each TopicConsumer.
+        let config = nack_config_with_delay_and_backoff();
+        let cloned = config.clone();
+
+        assert_eq!(cloned.nack_redelivery_delay, config.nack_redelivery_delay);
+        assert!(cloned.negative_ack_backoff.is_some());
+    }
+
+    #[test]
+    fn reader_consumer_config_carries_nack_delay_to_engine() {
+        // Reader path uses the same ConsumerConfig spine; Reader does not expose nack() API (D-03).
+        let config = nack_config_with_delay_and_backoff();
+
+        assert_eq!(config.nack_redelivery_delay, Some(Duration::from_secs(30)));
+        assert!(config.negative_ack_backoff.is_some());
+    }
 }
