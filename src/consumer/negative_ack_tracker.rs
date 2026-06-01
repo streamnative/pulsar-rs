@@ -141,6 +141,10 @@ impl NegativeAckTracker {
         NormalizedMessageId::from_message_id(message_id).into_redelivery_message_id()
     }
 
+    pub(crate) fn is_same_redelivery_entry(left: &MessageIdData, right: &MessageIdData) -> bool {
+        NormalizedMessageId::from_message_id(left) == NormalizedMessageId::from_message_id(right)
+    }
+
     pub(crate) fn schedule(
         &mut self,
         message_id: MessageIdData,
@@ -413,6 +417,26 @@ mod tests {
         assert!(redelivery_id.ack_set.is_empty());
         assert_eq!(redelivery_id.batch_size, None);
         assert_eq!(redelivery_id.first_chunk_message_id, None);
+    }
+
+    #[test]
+    fn same_redelivery_entry_ignores_batch_specific_fields() {
+        let mut original = message_id(1, 2, Some(0), Some(1));
+        original.ack_set = vec![1];
+        original.batch_size = Some(3);
+
+        assert!(NegativeAckTracker::is_same_redelivery_entry(
+            &original,
+            &message_id(1, 2, Some(0), Some(2))
+        ));
+        assert!(!NegativeAckTracker::is_same_redelivery_entry(
+            &original,
+            &message_id(1, 2, Some(1), Some(1))
+        ));
+        assert!(!NegativeAckTracker::is_same_redelivery_entry(
+            &original,
+            &message_id(1, 3, Some(0), Some(1))
+        ));
     }
 
     #[test]

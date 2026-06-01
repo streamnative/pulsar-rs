@@ -473,6 +473,8 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         message_id: MessageIdData,
         redelivery_count: Option<u32>,
     ) {
+        self.remove_negative_ack_from_unacked(&message_id);
+
         let schedule = self.ensure_negative_ack_tracker().schedule(
             message_id.clone(),
             redelivery_count,
@@ -514,6 +516,11 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             }
             NegativeAckSchedule::RetryPending => {}
         }
+    }
+
+    fn remove_negative_ack_from_unacked(&mut self, message_id: &MessageIdData) {
+        self.unacked_messages
+            .retain(|id, _| !NegativeAckTracker::is_same_redelivery_entry(id, message_id));
     }
 
     async fn handle_negative_ack_redelivery(&mut self) {
@@ -962,6 +969,14 @@ mod tests {
         assert!(source_contains(&[
             "ensure_negative_ack_tracker().",
             "schedule("
+        ]));
+        assert!(source_contains(&[
+            "remove_",
+            "negative_ack_from_unacked(&message_id)"
+        ]));
+        assert!(source_contains(&[
+            "NegativeAckTracker::",
+            "is_same_redelivery_entry(id, message_id)",
         ]));
         assert!(source_contains(&["redelivery_", "count,"]));
         assert!(source_contains(&["Instant::", "now(),"]));
