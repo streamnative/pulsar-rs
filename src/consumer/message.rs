@@ -17,20 +17,20 @@ pub struct Message<T> {
     pub payload: Payload,
     /// contains the message's id and batch size data
     pub message_id: MessageData,
-    redelivery_count: u32,
+    redelivery_count: Option<u32>,
     pub(super) _phantom: PhantomData<T>,
 }
 
 impl<T> Message<T> {
     pub fn new(topic: &str, message_id: MessageData, payload: Payload) -> Self {
-        Self::new_with_redelivery_count(topic, message_id, payload, 0)
+        Self::new_with_redelivery_count(topic, message_id, payload, None)
     }
 
     pub(crate) fn new_with_redelivery_count(
         topic: &str,
         message_id: MessageData,
         payload: Payload,
-        redelivery_count: u32,
+        redelivery_count: Option<u32>,
     ) -> Self {
         Message {
             topic: topic.to_string(),
@@ -58,6 +58,10 @@ impl<T> Message<T> {
     /// message was constructed directly with [`Message::new`].
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn redelivery_count(&self) -> u32 {
+        self.redelivery_count.unwrap_or_default()
+    }
+
+    pub(crate) fn broker_redelivery_count(&self) -> Option<u32> {
         self.redelivery_count
     }
 
@@ -106,13 +110,15 @@ mod tests {
             id: message_id(),
             batch_size: None,
         };
-        let msg = Message::<()>::new_with_redelivery_count("test-topic", message_id, payload(), 7);
+        let msg =
+            Message::<()>::new_with_redelivery_count("test-topic", message_id, payload(), Some(7));
 
         assert_eq!(msg.redelivery_count(), 7);
+        assert_eq!(msg.broker_redelivery_count(), Some(7));
     }
 
     #[test]
-    fn test_redelivery_count_defaults_to_zero() {
+    fn test_missing_redelivery_count_defaults_public_value_to_zero() {
         let message_id = MessageData {
             id: message_id(),
             batch_size: None,
@@ -120,5 +126,19 @@ mod tests {
         let msg = Message::<()>::new("test-topic", message_id, payload());
 
         assert_eq!(msg.redelivery_count(), 0);
+        assert_eq!(msg.broker_redelivery_count(), None);
+    }
+
+    #[test]
+    fn test_explicit_zero_redelivery_count_remains_available_internally() {
+        let message_id = MessageData {
+            id: message_id(),
+            batch_size: None,
+        };
+        let msg =
+            Message::<()>::new_with_redelivery_count("test-topic", message_id, payload(), Some(0));
+
+        assert_eq!(msg.redelivery_count(), 0);
+        assert_eq!(msg.broker_redelivery_count(), Some(0));
     }
 }

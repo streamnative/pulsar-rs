@@ -17,7 +17,7 @@ use crate::{
     connection::Connection,
     consumer::{
         batched_message_iterator::BatchedMessageIterator,
-        data::{DeadLetterPolicy, InternalEngineEvent, InternalEngineMessage},
+        data::{DeadLetterPolicy, InternalEngineEvent, InternalEngineMessage, MessageIdDataSender},
         negative_ack_backoff::NegativeAckBackoff,
         negative_ack_tracker::{
             NegativeAckSchedule, NegativeAckTracker, NEGATIVE_ACK_REDELIVERY_TICK_INTERVAL,
@@ -47,7 +47,7 @@ pub struct ConsumerEngine<Exe: Executor> {
     sub_type: SubType,
     id: u64,
     name: Option<String>,
-    tx: mpsc::Sender<Result<(MessageIdData, Payload, u32), Error>>,
+    tx: MessageIdDataSender,
     messages_rx: Option<mpsc::UnboundedReceiver<RawMessage>>,
     engine_rx: Option<mpsc::UnboundedReceiver<InternalEngineMessage<Exe>>>,
     event_rx: mpsc::UnboundedReceiver<InternalEngineEvent<Exe>>,
@@ -76,7 +76,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         sub_type: SubType,
         id: u64,
         name: Option<String>,
-        tx: mpsc::Sender<Result<(MessageIdData, Payload, u32), Error>>,
+        tx: MessageIdDataSender,
         messages_rx: mpsc::UnboundedReceiver<RawMessage>,
         engine_rx: mpsc::UnboundedReceiver<InternalEngineMessage<Exe>>,
         batch_size: u32,
@@ -497,6 +497,15 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                             "could not ask for immediate negative ack redelivery: {:?}",
                             e
                         );
+                        if let Some(tracker) = self.negative_ack_tracker.as_mut() {
+                            tracker.mark_retry_pending(
+                                std::slice::from_ref(&message_id),
+                                Instant::now() + NEGATIVE_ACK_REDELIVERY_TICK_INTERVAL,
+                            );
+                        }
+                        if self.start_negative_ack_ticker().is_err() {
+                            error!("could not start negative ack redelivery ticker after immediate redelivery failure");
+                        }
                     }
                 }
             }
@@ -777,7 +786,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         } else {
             vec![(message.message_id, payload)]
         };
-        let redelivery_count = message.redelivery_count.unwrap_or(0);
+        let redelivery_count = message.redelivery_count;
         for (message_id, payload) in payloads {
             match (message.redelivery_count, &self.dead_letter_policy) {
                 (Some(redelivery_count), Some(dead_letter_policy))
@@ -846,7 +855,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         &mut self,
         message_id: MessageIdData,
         payload: Payload,
-        redelivery_count: u32,
+        redelivery_count: Option<u32>,
     ) -> Result<(), Error> {
         let now = Instant::now();
         self.tx
@@ -1013,6 +1022,33 @@ mod tests {
         assert!(source_contains(&[
             "now + NEGATIVE_ACK_",
             "REDELIVERY_TICK_INTERVAL"
+        ]));
+    }
+
+    #[test]
+    fn immediate_nack_failure_keeps_entry_retryable() {
+        let immediate_source = include_str!("engine.rs")
+            .split("NegativeAckSchedule::Immediate =>")
+            .nth(1)
+            .and_then(|tail| tail.split("NegativeAckSchedule::Scheduled").next())
+            .expect("immediate nack handling source section exists");
+
+        assert!(immediate_source.contains("mark_retry_pending("));
+        assert!(immediate_source.contains("start_negative_ack_ticker().is_err()"));
+        assert!(immediate_source.contains("NEGATIVE_ACK_REDELIVERY_TICK_INTERVAL"));
+    }
+
+    #[test]
+    fn consumer_delivery_preserves_missing_broker_redelivery_count() {
+        assert!(source_contains(&["tx:", " MessageIdDataSender"]));
+        assert!(include_str!("data.rs")
+            .contains("MessageIdDataResult = Result<(MessageIdData, Payload, Option<u32>)"));
+        assert!(source_contains(&[
+            "let redelivery_count = message.",
+            "redelivery_count;"
+        ]));
+        assert!(source_contains(&[
+            ".send(Ok((message_id.clone(), payload, redelivery_count)))"
         ]));
     }
 

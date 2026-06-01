@@ -8,7 +8,9 @@ use crate::{
     Error, Executor, Payload,
 };
 
-pub type MessageIdDataReceiver = mpsc::Receiver<Result<(MessageIdData, Payload, u32), Error>>;
+pub type MessageIdDataResult = Result<(MessageIdData, Payload, Option<u32>), Error>;
+pub(crate) type MessageIdDataSender = mpsc::Sender<MessageIdDataResult>;
+pub type MessageIdDataReceiver = mpsc::Receiver<MessageIdDataResult>;
 
 pub enum EngineEvent<Exe: Executor> {
     Message(Option<RawMessage>),

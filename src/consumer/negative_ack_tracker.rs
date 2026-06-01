@@ -152,12 +152,34 @@ impl NegativeAckTracker {
         now: Instant,
     ) -> NegativeAckSchedule {
         let delay = self.select_delay(redelivery_count);
-        if delay == Duration::ZERO {
-            return NegativeAckSchedule::Immediate;
-        }
-
         let key = NormalizedMessageId::from_message_id(&message_id);
         let incoming_scope = PendingBatchScope::from_message_id(&message_id);
+
+        if delay == Duration::ZERO {
+            match self.entries.get_mut(&key) {
+                None => {
+                    self.entries.insert(
+                        key,
+                        PendingNegativeAck {
+                            due_at: now,
+                            state: NegativeAckDispatchState::InFlight,
+                            scope: incoming_scope,
+                        },
+                    );
+                    return NegativeAckSchedule::Immediate;
+                }
+                Some(existing) if existing.state == NegativeAckDispatchState::InFlight => {
+                    return NegativeAckSchedule::RetryPending;
+                }
+                Some(existing) => {
+                    existing.scope.merge(incoming_scope);
+                    existing.due_at = now;
+                    existing.state = NegativeAckDispatchState::InFlight;
+                    return NegativeAckSchedule::Immediate;
+                }
+            }
+        }
+
         let due_at = self.due_at(now, delay);
 
         match self.entries.get_mut(&key) {
@@ -256,12 +278,8 @@ impl NegativeAckTracker {
 
     pub(crate) fn cancel_ack(&mut self, message_id: &MessageIdData) {
         let key = NormalizedMessageId::from_message_id(message_id);
-        if message_id.batch_index.is_none() || !message_id.ack_set.is_empty() {
-            self.entries.remove(&key);
-            return;
-        }
-
         let Some(batch_index) = message_id.batch_index else {
+            self.entries.remove(&key);
             return;
         };
         if self
@@ -292,12 +310,8 @@ impl NegativeAckTracker {
             self.entries.remove(&key);
         }
 
-        if message_id.batch_index.is_none() || !message_id.ack_set.is_empty() {
-            self.entries.remove(&ack_key);
-            return;
-        }
-
         let Some(batch_index) = message_id.batch_index else {
+            self.entries.remove(&ack_key);
             return;
         };
         if self
@@ -386,6 +400,33 @@ mod tests {
             NegativeAckTracker::new(Some(Duration::from_secs(5)), Some(backoff(Duration::ZERO)));
 
         assert_eq!(tracker.select_delay(Some(7)), Duration::ZERO);
+    }
+
+    #[test]
+    fn immediate_schedule_is_in_flight_until_dispatch_result() {
+        let now = Instant::now();
+        let mut tracker = NegativeAckTracker::new(Some(Duration::ZERO), None);
+
+        assert_eq!(
+            tracker.schedule(message_id(1, 2, None, None), None, now),
+            NegativeAckSchedule::Immediate
+        );
+        assert_eq!(tracker.pending_len(), 0);
+        assert_eq!(tracker.in_flight_len(), 1);
+
+        tracker.mark_retry_pending(
+            &[message_id(1, 2, None, None)],
+            now + NEGATIVE_ACK_REDELIVERY_TICK_INTERVAL,
+        );
+        assert_eq!(tracker.pending_len(), 1);
+        assert_eq!(tracker.in_flight_len(), 0);
+        assert!(tracker
+            .collect_due(now + Duration::from_millis(499))
+            .is_empty());
+
+        let due = tracker.collect_due(now + NEGATIVE_ACK_REDELIVERY_TICK_INTERVAL);
+        tracker.mark_dispatched(&due);
+        assert!(tracker.is_empty());
     }
 
     #[test]
@@ -495,9 +536,25 @@ mod tests {
     }
 
     #[test]
-    fn ack_set_ack_cancels_the_whole_pending_entry() {
+    fn ack_set_ack_with_batch_index_preserves_sibling_pending_indexes() {
         let now = Instant::now();
         let mut ack = message_id(1, 2, None, Some(1));
+        ack.ack_set = vec![0];
+        let mut tracker = NegativeAckTracker::new(Some(Duration::from_secs(10)), None);
+
+        tracker.schedule(message_id(1, 2, None, Some(1)), None, now);
+        tracker.schedule(message_id(1, 2, None, Some(2)), None, now);
+        tracker.cancel_ack(&ack);
+
+        assert_eq!(tracker.pending_len(), 1);
+        tracker.cancel_ack(&message_id(1, 2, None, Some(2)));
+        assert!(tracker.is_empty());
+    }
+
+    #[test]
+    fn ack_set_without_batch_index_cancels_the_whole_pending_entry() {
+        let now = Instant::now();
+        let mut ack = message_id(1, 2, None, None);
         ack.ack_set = vec![0];
         let mut tracker = NegativeAckTracker::new(Some(Duration::from_secs(10)), None);
 
@@ -526,6 +583,26 @@ mod tests {
         assert_eq!(tracker.pending_len(), 2);
         tracker.cancel_ack(&message_id(1, 3, Some(0), Some(1)));
         tracker.cancel_ack(&message_id(1, 1, Some(1), Some(1)));
+        assert!(tracker.is_empty());
+    }
+
+    #[test]
+    fn cumulative_ack_set_with_batch_index_preserves_later_sibling_indexes() {
+        let now = Instant::now();
+        let mut ack = message_id(1, 2, Some(0), Some(1));
+        ack.ack_set = vec![0];
+        let mut tracker = NegativeAckTracker::new(Some(Duration::from_secs(10)), None);
+
+        tracker.schedule(message_id(1, 1, Some(0), Some(1)), None, now);
+        tracker.schedule(message_id(1, 2, Some(0), Some(1)), None, now);
+        tracker.schedule(message_id(1, 2, Some(0), Some(2)), None, now);
+        tracker.schedule(message_id(1, 3, Some(0), Some(1)), None, now);
+
+        tracker.cancel_cumulative_ack(&ack);
+
+        assert_eq!(tracker.pending_len(), 2);
+        tracker.cancel_ack(&message_id(1, 2, Some(0), Some(2)));
+        tracker.cancel_ack(&message_id(1, 3, Some(0), Some(1)));
         assert!(tracker.is_empty());
     }
 

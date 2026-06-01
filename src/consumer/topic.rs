@@ -2,7 +2,7 @@ use std::{
     marker::PhantomData,
     pin::Pin,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     task::{Context, Poll},
@@ -37,6 +37,7 @@ pub struct TopicConsumer<T: DeserializeMessage, Exe: Executor> {
     topic: String,
     messages: Pin<Box<MessageIdDataReceiver>>,
     engine_tx: mpsc::UnboundedSender<InternalEngineMessage<Exe>>,
+    unacked_redelivery_ticker_running: Option<Arc<AtomicBool>>,
     data_type: PhantomData<fn(Payload) -> T::Output>,
     pub(crate) dead_letter_policy: Option<DeadLetterPolicy>,
     pub(super) last_message_received: Option<DateTime<Utc>>,
@@ -86,11 +87,14 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
 
         let (engine_tx, engine_rx) = mpsc::unbounded();
 
-        if unacked_message_redelivery_delay.is_some() {
+        let unacked_redelivery_ticker_running = if unacked_message_redelivery_delay.is_some() {
+            let ticker_running = Arc::new(AtomicBool::new(true));
+            let ticker_running_task = ticker_running.clone();
             let mut redelivery_tx = engine_tx.clone();
             let mut interval = client.executor.interval(Duration::from_millis(500));
             let res = client.executor.spawn(Box::pin(async move {
-                while interval.next().await.is_some() {
+                while ticker_running_task.load(Ordering::SeqCst) && interval.next().await.is_some()
+                {
                     if redelivery_tx
                         .send(InternalEngineMessage::UnackedRedelivery)
                         .await
@@ -104,7 +108,10 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
             if res.is_err() {
                 return Err(Error::Executor);
             }
-        }
+            Some(ticker_running)
+        } else {
+            None
+        };
         let receiver_queue_size = options.receiver_queue_size.unwrap_or(1000);
         let (tx, rx) = mpsc::channel(receiver_queue_size as usize);
         let mut c = ConsumerEngine::new(
@@ -142,6 +149,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
             topic,
             messages: Box::pin(rx),
             engine_tx,
+            unacked_redelivery_ticker_running,
             data_type: PhantomData,
             dead_letter_policy,
             last_message_received: None,
@@ -229,7 +237,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         self.engine_tx
             .send(InternalEngineMessage::Nack(
                 msg.message_id().clone(),
-                Some(msg.redelivery_count()),
+                msg.broker_redelivery_count(),
             ))
             .await?;
         Ok(())
@@ -272,6 +280,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn close(&mut self) -> Result<(), Error> {
         let (resolver, response) = oneshot::channel();
+        self.stop_unacked_redelivery_ticker();
         self.engine_tx
             .send(InternalEngineMessage::Close(resolver))
             .await
@@ -279,6 +288,13 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
 
         response.await.map_err(|_| ConsumerError::Closed)??;
         Ok(())
+    }
+
+    fn stop_unacked_redelivery_ticker(&mut self) {
+        if let Some(ticker_running) = &self.unacked_redelivery_ticker_running {
+            ticker_running.store(false, Ordering::SeqCst);
+        }
+        self.unacked_redelivery_ticker_running = None;
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
@@ -309,7 +325,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         &self,
         message_id: MessageIdData,
         payload: Payload,
-        redelivery_count: u32,
+        redelivery_count: Option<u32>,
     ) -> Message<T> {
         let message_id = MessageData {
             id: message_id,
@@ -326,6 +342,12 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         let conn = self.connection().await?;
         let schema_response = conn.sender().get_schema(&self.topic, version).await?;
         Ok(schema_response.schema)
+    }
+}
+
+impl<T: DeserializeMessage, Exe: Executor> Drop for TopicConsumer<T, Exe> {
+    fn drop(&mut self) {
+        self.stop_unacked_redelivery_ticker();
     }
 }
 
@@ -347,5 +369,41 @@ impl<T: DeserializeMessage, Exe: Executor> Stream for TopicConsumer<T, Exe> {
                 Poll::Ready(Some(Err(e)))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    fn source_contains(parts: &[&str]) -> bool {
+        let pattern = parts.concat();
+        include_str!("topic.rs").contains(&pattern)
+    }
+
+    #[test]
+    fn nack_uses_internal_broker_redelivery_count_presence() {
+        assert!(include_str!("topic.rs").contains("InternalEngineMessage::Nack("));
+        assert!(source_contains(&["msg.", "message_id().clone()"]));
+        assert!(source_contains(&["msg.", "broker_redelivery_count()"]));
+        assert!(!source_contains(&["Some(msg.", "redelivery_count())"]));
+    }
+
+    #[test]
+    fn drop_stops_unacked_redelivery_ticker_sender() {
+        assert!(source_contains(&[
+            "unacked_redelivery_ticker_running:",
+            " Option<Arc<AtomicBool>>"
+        ]));
+        assert!(source_contains(&[
+            "ticker_running_task.",
+            "load(Ordering::SeqCst)"
+        ]));
+        assert!(source_contains(&[
+            "impl<T: DeserializeMessage, Exe: Executor> Drop",
+            " for TopicConsumer<T, Exe>"
+        ]));
+        assert!(source_contains(&[
+            "self.",
+            "stop_unacked_redelivery_ticker()"
+        ]));
     }
 }
