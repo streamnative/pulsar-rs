@@ -690,22 +690,31 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn ack(&mut self, message_id: MessageIdData, cumulative: bool) {
-        Self::remove_ack_from_unacked_messages(&mut self.unacked_messages, &message_id, cumulative);
-        if let Some(tracker) = self.negative_ack_tracker.as_mut() {
-            if cumulative {
-                tracker.cancel_cumulative_ack(&message_id);
-            } else {
-                tracker.cancel_ack(&message_id);
-            }
-        }
-        self.stop_negative_ack_ticker_if_idle();
         let res = self
             .connection
             .sender()
-            .send_ack(self.id, vec![message_id], cumulative)
+            .send_ack(self.id, vec![message_id.clone()], cumulative)
             .await;
-        if res.is_err() {
-            error!("ack error: {:?}", res);
+
+        match res {
+            Ok(()) => {
+                Self::remove_ack_from_unacked_messages(
+                    &mut self.unacked_messages,
+                    &message_id,
+                    cumulative,
+                );
+                if let Some(tracker) = self.negative_ack_tracker.as_mut() {
+                    if cumulative {
+                        tracker.cancel_cumulative_ack(&message_id);
+                    } else {
+                        tracker.cancel_ack(&message_id);
+                    }
+                }
+                self.stop_negative_ack_ticker_if_idle();
+            }
+            Err(e) => {
+                error!("ack error: {:?}", e);
+            }
         }
     }
 
@@ -1242,6 +1251,29 @@ mod tests {
         assert!(source_contains(&["cancel_", "cumulative_ack(&message_id)"]));
         assert!(source_contains(&["tracker.", "clear()"]));
         assert!(source_contains(&["ticker_running.", "store(false"]));
+    }
+
+    #[test]
+    fn ack_cleans_local_state_only_after_broker_ack_succeeds() {
+        let source = include_str!("engine.rs");
+        let ack_source = source
+            .split("async fn ack")
+            .nth(1)
+            .and_then(|tail| tail.split("fn remove_ack_from_unacked_messages").next())
+            .expect("ack source section exists");
+
+        let send_ack_pos = ack_source.find("send_ack").expect("ack sends broker ack");
+        let ok_pos = ack_source.find("Ok(()) =>").expect("ack handles success");
+        let cleanup_pos = ack_source
+            .find("Self::remove_ack_from_unacked_messages")
+            .expect("ack cleans unacked messages");
+        let cancel_pos = ack_source
+            .find("tracker.cancel_")
+            .expect("ack cancels negative ack tracker state");
+
+        assert!(send_ack_pos < ok_pos);
+        assert!(ok_pos < cleanup_pos);
+        assert!(ok_pos < cancel_pos);
     }
 
     #[test]
