@@ -664,4 +664,53 @@ mod tests {
 
         assert!(tracker.is_empty());
     }
+
+    #[test]
+    fn scheduled_nack_is_not_due_before_delay_elapses() {
+        let delay = Duration::from_secs(10);
+        let now = Instant::now();
+        let mut tracker = NegativeAckTracker::new(Some(delay), None);
+
+        tracker.schedule(message_id(1, 2, None, None), None, now);
+
+        assert!(tracker
+            .collect_due(now + delay - Duration::from_millis(1))
+            .is_empty());
+    }
+
+    #[test]
+    fn scheduled_nack_is_due_at_or_after_delay_elapses() {
+        let delay = Duration::from_secs(10);
+        let now = Instant::now();
+        let mut tracker = NegativeAckTracker::new(Some(delay), None);
+
+        tracker.schedule(message_id(1, 3, None, None), None, now);
+
+        let due = tracker.collect_due(now + delay);
+        assert_eq!(due.len(), 1);
+    }
+
+    #[test]
+    fn nack_with_id_fixed_delay_fallback_when_backoff_configured() {
+        let tracker = NegativeAckTracker::new(
+            Some(Duration::from_secs(5)),
+            Some(backoff(Duration::from_secs(42))),
+        );
+
+        assert_eq!(tracker.select_delay(None), Duration::from_secs(5));
+        assert_eq!(tracker.select_delay(Some(1)), Duration::from_secs(42));
+    }
+
+    #[test]
+    fn dlq_regression_batch_normalization_no_duplicate_scheduling() {
+        let now = Instant::now();
+        let mut tracker = NegativeAckTracker::new(Some(Duration::from_millis(1)), None);
+
+        tracker.schedule(message_id(1, 2, None, Some(0)), None, now);
+        tracker.schedule(message_id(1, 2, None, Some(1)), None, now);
+
+        assert_eq!(tracker.pending_len(), 1);
+        let due = tracker.collect_due(now + Duration::from_millis(1));
+        assert_eq!(due.len(), 1);
+    }
 }
