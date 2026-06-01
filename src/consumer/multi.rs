@@ -190,7 +190,12 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
                     .into_iter()
                     .filter(|(t, _)| !existing_topics.contains(t))
                     .map(|(topic, addr)| {
-                        TopicConsumer::new(pulsar.clone(), topic, addr, consumer_config.clone())
+                        TopicConsumer::new(
+                            pulsar.clone(),
+                            topic,
+                            addr,
+                            consumer_config.clone_for_topic_consumer(),
+                        )
                     }),
             )
             .await?;
