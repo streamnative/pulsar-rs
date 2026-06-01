@@ -480,7 +480,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 if self.start_negative_ack_ticker().is_err() {
                     error!("could not start negative ack redelivery ticker");
                     self.ensure_negative_ack_tracker()
-                        .mark_dispatched(&[message_id.clone()]);
+                        .mark_dispatched(std::slice::from_ref(&message_id));
                     if let Err(e) = self.send_negative_ack_redelivery(vec![message_id]).await {
                         error!(
                             "could not ask for immediate negative ack redelivery after ticker failure: {:?}",

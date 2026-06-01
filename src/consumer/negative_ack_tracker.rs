@@ -88,9 +88,11 @@ impl PendingBatchScope {
                 true
             }
             (Self::BatchIndexes(existing), Self::BatchIndexes(incoming)) => {
-                incoming.into_iter().fold(false, |changed, batch_index| {
-                    existing.insert(batch_index) || changed
-                })
+                let mut changed = false;
+                for batch_index in incoming {
+                    changed |= existing.insert(batch_index);
+                }
+                changed
             }
         }
     }

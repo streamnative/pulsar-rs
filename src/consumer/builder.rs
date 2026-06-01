@@ -221,7 +221,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
     ///
     /// Negative-ack tracking is separate from unacked-message resend tracking and preserves the
     /// existing Rust DLQ behavior. This option adds no retry-letter/DLQ redesign, no
-    /// `ReconsumeLater` behavior, and no ack-timeout backoff behavior.
+    /// delayed-reconsume behavior, and no acknowledgement-timeout backoff behavior.
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_negative_ack_backoff<B>(mut self, backoff: B) -> Self
     where
