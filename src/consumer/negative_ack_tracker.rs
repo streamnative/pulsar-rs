@@ -3,9 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{
-    consumer::negative_ack_backoff::NegativeAckBackoff, message::proto::MessageIdData,
-};
+use crate::{consumer::negative_ack_backoff::NegativeAckBackoff, message::proto::MessageIdData};
 
 pub(crate) const DEFAULT_NACK_REDELIVERY_DELAY: Duration = Duration::from_secs(60);
 pub(crate) const NEGATIVE_ACK_REDELIVERY_TICK_INTERVAL: Duration = Duration::from_millis(500);
@@ -36,13 +34,16 @@ impl NegativeAckTracker {
         backoff: Option<Arc<dyn NegativeAckBackoff + Send + Sync>>,
     ) -> Self {
         Self {
-            fixed_delay: fixed_delay.unwrap_or(Duration::ZERO),
+            fixed_delay: fixed_delay.unwrap_or(DEFAULT_NACK_REDELIVERY_DELAY),
             backoff,
         }
     }
 
-    pub(crate) fn select_delay(&self, _redelivery_count: Option<u32>) -> Duration {
-        Duration::ZERO
+    pub(crate) fn select_delay(&self, redelivery_count: Option<u32>) -> Duration {
+        match (redelivery_count, &self.backoff) {
+            (Some(count), Some(backoff)) => backoff.next(count),
+            _ => self.fixed_delay,
+        }
     }
 
     pub(crate) fn schedule(
@@ -51,7 +52,10 @@ impl NegativeAckTracker {
         _redelivery_count: Option<u32>,
         _now: Instant,
     ) -> NegativeAckSchedule {
-        NegativeAckSchedule::Immediate
+        match self.select_delay(_redelivery_count) {
+            Duration::ZERO => NegativeAckSchedule::Immediate,
+            _ => NegativeAckSchedule::Scheduled,
+        }
     }
 }
 
@@ -76,10 +80,7 @@ mod tests {
     fn missing_fixed_delay_defaults_to_sixty_seconds() {
         let tracker = NegativeAckTracker::new(None, None);
 
-        assert_eq!(
-            tracker.select_delay(None),
-            DEFAULT_NACK_REDELIVERY_DELAY
-        );
+        assert_eq!(tracker.select_delay(None), DEFAULT_NACK_REDELIVERY_DELAY);
         assert_eq!(tracker.select_delay(None), Duration::from_secs(60));
     }
 
@@ -109,10 +110,8 @@ mod tests {
 
     #[test]
     fn zero_backoff_delay_selects_immediate_redelivery() {
-        let tracker = NegativeAckTracker::new(
-            Some(Duration::from_secs(5)),
-            Some(backoff(Duration::ZERO)),
-        );
+        let tracker =
+            NegativeAckTracker::new(Some(Duration::from_secs(5)), Some(backoff(Duration::ZERO)));
 
         assert_eq!(tracker.select_delay(Some(7)), Duration::ZERO);
     }

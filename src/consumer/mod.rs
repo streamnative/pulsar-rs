@@ -8,8 +8,8 @@ mod engine;
 pub(crate) mod initial_position;
 pub mod message;
 mod multi;
-mod negative_ack_tracker;
 pub mod negative_ack_backoff;
+mod negative_ack_tracker;
 pub mod options;
 pub mod topic;
 
