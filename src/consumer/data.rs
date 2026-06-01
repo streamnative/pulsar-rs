@@ -30,6 +30,7 @@ pub(crate) enum InternalEngineEvent<Exe: Executor> {
 pub(crate) enum InternalEngineMessage<Exe: Executor> {
     Ack(MessageIdData, bool),
     Nack(MessageIdData, Option<u32>),
+    NegativeAckRedelivery,
     UnackedRedelivery,
     GetConnection(oneshot::Sender<Arc<Connection<Exe>>>),
 }
@@ -102,7 +103,8 @@ mod tests {
 
     #[test]
     fn internal_engine_message_supports_private_negative_ack_due_event() {
-        let message = InternalEngineMessage::<crate::executor::TokioExecutor>::NegativeAckRedelivery;
+        let message =
+            InternalEngineMessage::<crate::executor::TokioExecutor>::NegativeAckRedelivery;
 
         match message {
             InternalEngineMessage::NegativeAckRedelivery => {}
@@ -123,10 +125,13 @@ mod tests {
 
     #[test]
     fn reader_and_multi_topic_consumers_keep_topic_consumer_construction_path() {
-        let reader_source = include_str!("../reader.rs");
+        let client_source = include_str!("../client.rs");
+        let builder_source = include_str!("builder.rs");
         let multi_source = include_str!("multi.rs");
 
-        assert!(reader_source.contains("TopicConsumer::new"));
+        assert!(client_source.contains("pub fn reader(&self) -> ConsumerBuilder<Exe>"));
+        assert!(client_source.contains("ConsumerBuilder::new(self)"));
+        assert!(builder_source.contains("TopicConsumer::new"));
         assert!(multi_source.contains("TopicConsumer::new"));
     }
 }

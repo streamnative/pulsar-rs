@@ -1,7 +1,10 @@
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -15,6 +18,8 @@ use crate::{
     consumer::{
         batched_message_iterator::BatchedMessageIterator,
         data::{DeadLetterPolicy, InternalEngineEvent, InternalEngineMessage},
+        negative_ack_backoff::NegativeAckBackoff,
+        negative_ack_tracker::{NegativeAckTracker, NEGATIVE_ACK_REDELIVERY_TICK_INTERVAL},
         options::ConsumerOptions,
     },
     error::{ConnectionError, ConsumerError},
@@ -49,6 +54,11 @@ pub struct ConsumerEngine<Exe: Executor> {
     remaining_messages: i64,
     unacked_message_redelivery_delay: Option<Duration>,
     unacked_messages: HashMap<MessageIdData, Instant>,
+    nack_redelivery_delay: Option<Duration>,
+    negative_ack_backoff: Option<Arc<dyn NegativeAckBackoff + Send + Sync>>,
+    negative_ack_tracker: Option<NegativeAckTracker>,
+    negative_ack_ticker_running: Option<Arc<AtomicBool>>,
+    negative_ack_due_event_pending: Arc<AtomicBool>,
     dead_letter_policy: Option<DeadLetterPolicy>,
     options: ConsumerOptions,
 }
@@ -68,6 +78,8 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         engine_rx: mpsc::UnboundedReceiver<InternalEngineMessage<Exe>>,
         batch_size: u32,
         unacked_message_redelivery_delay: Option<Duration>,
+        nack_redelivery_delay: Option<Duration>,
+        negative_ack_backoff: Option<Arc<dyn NegativeAckBackoff + Send + Sync>>,
         dead_letter_policy: Option<DeadLetterPolicy>,
         options: ConsumerOptions,
     ) -> ConsumerEngine<Exe> {
@@ -89,6 +101,11 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             remaining_messages: batch_size as i64,
             unacked_message_redelivery_delay,
             unacked_messages: HashMap::new(),
+            nack_redelivery_delay,
+            negative_ack_backoff,
+            negative_ack_tracker: None,
+            negative_ack_ticker_running: None,
+            negative_ack_due_event_pending: Arc::new(AtomicBool::new(false)),
             dead_letter_policy,
             options,
         }
@@ -298,6 +315,11 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                         message_id, e
                     );
                 }
+                true
+            }
+            Some(InternalEngineMessage::NegativeAckRedelivery) => {
+                self.negative_ack_due_event_pending
+                    .store(false, Ordering::SeqCst);
                 true
             }
             Some(InternalEngineMessage::UnackedRedelivery) => {
