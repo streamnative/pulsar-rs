@@ -463,4 +463,30 @@ mod tests {
         assert!(config.nack_redelivery_delay.is_none());
         assert!(config.negative_ack_backoff.is_some());
     }
+
+    #[test]
+    fn negative_ack_runtime_docs_cover_phase4_semantics() {
+        let source = include_str!("builder.rs");
+        let docs_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("builder source contains test module marker");
+
+        for expected in [
+            "60 seconds",
+            "zero delay",
+            "immediate redelivery",
+            "message redelivery count",
+            "ID-only",
+            "fixed fallback",
+            "batch-entry normalization",
+            "best-effort in-memory timer",
+            "no retry-letter/DLQ redesign",
+        ] {
+            assert!(
+                docs_source.contains(expected),
+                "missing negative-ack docs phrase: {expected}"
+            );
+        }
+    }
 }

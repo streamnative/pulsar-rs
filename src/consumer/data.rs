@@ -102,6 +102,17 @@ mod tests {
     }
 
     #[test]
+    fn public_nack_engine_message_accepts_default_message_id_with_one_field() {
+        let message =
+            EngineMessage::<crate::executor::TokioExecutor>::Nack(MessageIdData::default());
+
+        match message {
+            EngineMessage::Nack(_) => {}
+            _ => panic!("expected public nack engine message"),
+        }
+    }
+
+    #[test]
     fn internal_engine_message_supports_private_negative_ack_due_event() {
         let message =
             InternalEngineMessage::<crate::executor::TokioExecutor>::NegativeAckRedelivery;
