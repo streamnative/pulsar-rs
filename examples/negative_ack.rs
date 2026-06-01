@@ -42,6 +42,54 @@ impl NegativeAckBackoff for LinearBackoff {
     }
 }
 
+#[allow(dead_code)]
+async fn build_zero_delay_consumer(
+    pulsar: &Pulsar<TokioExecutor>,
+    topic: String,
+) -> Result<Consumer<TestData, TokioExecutor>, pulsar::Error> {
+    pulsar
+        .consumer()
+        .with_topic(topic)
+        .with_consumer_name("negative_ack_zero_delay")
+        .with_subscription_type(SubType::Exclusive)
+        .with_subscription("negative_ack_subscription")
+        .with_nack_redelivery_delay(Duration::ZERO)
+        .build()
+        .await
+}
+
+#[allow(dead_code)]
+async fn build_multiplier_backoff_consumer(
+    pulsar: &Pulsar<TokioExecutor>,
+    topic: String,
+) -> Result<Consumer<TestData, TokioExecutor>, pulsar::Error> {
+    pulsar
+        .consumer()
+        .with_topic(topic)
+        .with_consumer_name("negative_ack_multiplier_backoff")
+        .with_subscription_type(SubType::Exclusive)
+        .with_subscription("negative_ack_subscription")
+        .with_negative_ack_backoff(MultiplierRedeliveryBackoff::default())
+        .build()
+        .await
+}
+
+#[allow(dead_code)]
+async fn build_linear_backoff_consumer(
+    pulsar: &Pulsar<TokioExecutor>,
+    topic: String,
+) -> Result<Consumer<TestData, TokioExecutor>, pulsar::Error> {
+    pulsar
+        .consumer()
+        .with_topic(topic)
+        .with_consumer_name("negative_ack_linear_backoff")
+        .with_subscription_type(SubType::Exclusive)
+        .with_subscription("negative_ack_subscription")
+        .with_negative_ack_backoff(LinearBackoff(Duration::from_secs(10)))
+        .build()
+        .await
+}
+
 #[tokio::main]
 async fn main() -> Result<(), pulsar::Error> {
     env_logger::init();
@@ -54,14 +102,12 @@ async fn main() -> Result<(), pulsar::Error> {
         .unwrap_or_else(|| "non-persistent://public/default/test".to_string());
 
     let pulsar: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await?;
-    let _built_in_backoff_example = MultiplierRedeliveryBackoff::default();
-    let _custom_backoff_example = LinearBackoff(Duration::from_secs(10));
 
     // HOW TO USE THIS EXAMPLE
     // Section 1 (default delay) is the active configuration and runs by default.
     // To try a different configuration:
     //   1. Comment out the Section 1 consumer builder block below.
-    //   2. Uncomment exactly ONE of Sections 2-4.
+    //   2. Replace it with exactly ONE of the compiled helper calls shown in Sections 2-4.
     // Running multiple sections simultaneously is not supported; each section
     // creates its own consumer on the same subscription.
 
@@ -84,41 +130,17 @@ async fn main() -> Result<(), pulsar::Error> {
     // 60s delay.
     // Duration::ZERO is the pre-v* immediate-redelivery equivalent.
     //
-    // let mut consumer: Consumer<TestData, _> = pulsar
-    //     .consumer()
-    //     .with_topic(topic)
-    //     .with_consumer_name("negative_ack_zero_delay")
-    //     .with_subscription_type(SubType::Exclusive)
-    //     .with_subscription("negative_ack_subscription")
-    //     .with_nack_redelivery_delay(Duration::ZERO)
-    //     .build()
-    //     .await?;
+    // let mut consumer = build_zero_delay_consumer(&pulsar, topic).await?;
 
     // Section 3: Built-in MultiplierRedeliveryBackoff.
     // The default policy uses broker redelivery count with a 1s minimum and 10min maximum delay.
     //
-    // let mut consumer: Consumer<TestData, _> = pulsar
-    //     .consumer()
-    //     .with_topic(topic)
-    //     .with_consumer_name("negative_ack_multiplier_backoff")
-    //     .with_subscription_type(SubType::Exclusive)
-    //     .with_subscription("negative_ack_subscription")
-    //     .with_negative_ack_backoff(MultiplierRedeliveryBackoff::default())
-    //     .build()
-    //     .await?;
+    // let mut consumer = build_multiplier_backoff_consumer(&pulsar, topic).await?;
 
     // Section 4: Custom NegativeAckBackoff policy.
     // Implement the trait when you need application-specific redelivery spacing.
     //
-    // let mut consumer: Consumer<TestData, _> = pulsar
-    //     .consumer()
-    //     .with_topic(topic)
-    //     .with_consumer_name("negative_ack_linear_backoff")
-    //     .with_subscription_type(SubType::Exclusive)
-    //     .with_subscription("negative_ack_subscription")
-    //     .with_negative_ack_backoff(LinearBackoff(Duration::from_secs(10)))
-    //     .build()
-    //     .await?;
+    // let mut consumer = build_linear_backoff_consumer(&pulsar, topic).await?;
 
     let mut counter = 0usize;
     while let Some(msg) = consumer.try_next().await? {
