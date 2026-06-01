@@ -137,6 +137,10 @@ impl NegativeAckTracker {
         }
     }
 
+    pub(crate) fn redelivery_message_id(message_id: &MessageIdData) -> MessageIdData {
+        NormalizedMessageId::from_message_id(message_id).into_redelivery_message_id()
+    }
+
     pub(crate) fn schedule(
         &mut self,
         message_id: MessageIdData,
@@ -150,7 +154,7 @@ impl NegativeAckTracker {
 
         let key = NormalizedMessageId::from_message_id(&message_id);
         let incoming_scope = PendingBatchScope::from_message_id(&message_id);
-        let due_at = now + delay;
+        let due_at = self.due_at(now, delay);
 
         match self.entries.get_mut(&key) {
             None => {
@@ -179,6 +183,12 @@ impl NegativeAckTracker {
                 }
             }
         }
+    }
+
+    fn due_at(&self, now: Instant, delay: Duration) -> Instant {
+        now.checked_add(delay)
+            .or_else(|| now.checked_add(self.fixed_delay))
+            .unwrap_or_else(|| now + DEFAULT_NACK_REDELIVERY_DELAY)
     }
 
     #[cfg(test)]
@@ -372,6 +382,37 @@ mod tests {
             NegativeAckTracker::new(Some(Duration::from_secs(5)), Some(backoff(Duration::ZERO)));
 
         assert_eq!(tracker.select_delay(Some(7)), Duration::ZERO);
+    }
+
+    #[test]
+    fn oversized_backoff_delay_falls_back_without_panicking() {
+        let now = Instant::now();
+        let mut tracker =
+            NegativeAckTracker::new(Some(Duration::from_secs(5)), Some(backoff(Duration::MAX)));
+
+        assert_eq!(
+            tracker.schedule(message_id(1, 2, None, None), Some(7), now),
+            NegativeAckSchedule::Scheduled
+        );
+        assert_eq!(tracker.next_due_time(), Some(now + Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn redelivery_message_id_normalizes_batch_specific_fields() {
+        let mut original = message_id(1, 2, Some(0), Some(1));
+        original.ack_set = vec![1];
+        original.batch_size = Some(3);
+        original.first_chunk_message_id = Some(Box::new(message_id(1, 1, Some(0), None)));
+
+        let redelivery_id = NegativeAckTracker::redelivery_message_id(&original);
+
+        assert_eq!(redelivery_id.ledger_id, 1);
+        assert_eq!(redelivery_id.entry_id, 2);
+        assert_eq!(redelivery_id.partition, Some(0));
+        assert_eq!(redelivery_id.batch_index, None);
+        assert!(redelivery_id.ack_set.is_empty());
+        assert_eq!(redelivery_id.batch_size, None);
+        assert_eq!(redelivery_id.first_chunk_message_id, None);
     }
 
     #[test]

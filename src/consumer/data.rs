@@ -33,6 +33,7 @@ pub(crate) enum InternalEngineMessage<Exe: Executor> {
     NegativeAckRedelivery,
     UnackedRedelivery,
     GetConnection(oneshot::Sender<Arc<Connection<Exe>>>),
+    Close(oneshot::Sender<Result<(), crate::error::ConnectionError>>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

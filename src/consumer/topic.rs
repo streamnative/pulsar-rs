@@ -271,12 +271,13 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn close(&mut self) -> Result<(), Error> {
-        let consumer_id = self.consumer_id;
-        self.connection()
-            .await?
-            .sender()
-            .close_consumer(consumer_id)
-            .await?;
+        let (resolver, response) = oneshot::channel();
+        self.engine_tx
+            .send(InternalEngineMessage::Close(resolver))
+            .await
+            .map_err(ConsumerError::from)?;
+
+        response.await.map_err(|_| ConsumerError::Closed)??;
         Ok(())
     }
 
