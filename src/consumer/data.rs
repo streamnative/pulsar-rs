@@ -8,9 +8,11 @@ use crate::{
     Error, Executor, Payload,
 };
 
-pub type MessageIdDataResult = Result<(MessageIdData, Payload, Option<u32>), Error>;
-pub(crate) type MessageIdDataSender = mpsc::Sender<MessageIdDataResult>;
+pub type MessageIdDataResult = Result<(MessageIdData, Payload, u32), Error>;
 pub type MessageIdDataReceiver = mpsc::Receiver<MessageIdDataResult>;
+pub(crate) type InternalMessageIdDataResult = Result<(MessageIdData, Payload, Option<u32>), Error>;
+pub(crate) type InternalMessageIdDataSender = mpsc::Sender<InternalMessageIdDataResult>;
+pub(crate) type InternalMessageIdDataReceiver = mpsc::Receiver<InternalMessageIdDataResult>;
 
 pub enum EngineEvent<Exe: Executor> {
     Message(Option<RawMessage>),
@@ -124,6 +126,20 @@ mod tests {
             InternalEngineMessage::NegativeAckRedelivery => {}
             _ => panic!("expected private negative ack redelivery event"),
         }
+    }
+
+    #[test]
+    fn public_receiver_alias_preserves_u32_redelivery_count_shape() {
+        type ExpectedPublicReceiver = mpsc::Receiver<Result<(MessageIdData, Payload, u32), Error>>;
+
+        let _: Option<ExpectedPublicReceiver> = None::<MessageIdDataReceiver>;
+        let _: Option<Result<(MessageIdData, Payload, u32), Error>> = None::<MessageIdDataResult>;
+    }
+
+    #[test]
+    fn internal_receiver_alias_preserves_optional_redelivery_count_shape() {
+        let _: Option<InternalMessageIdDataReceiver> =
+            None::<mpsc::Receiver<InternalMessageIdDataResult>>;
     }
 
     #[test]

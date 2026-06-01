@@ -17,7 +17,10 @@ use crate::{
     connection::Connection,
     consumer::{
         batched_message_iterator::BatchedMessageIterator,
-        data::{DeadLetterPolicy, InternalEngineEvent, InternalEngineMessage, MessageIdDataSender},
+        data::{
+            DeadLetterPolicy, InternalEngineEvent, InternalEngineMessage,
+            InternalMessageIdDataSender,
+        },
         negative_ack_backoff::NegativeAckBackoff,
         negative_ack_tracker::{
             NegativeAckSchedule, NegativeAckTracker, NEGATIVE_ACK_REDELIVERY_TICK_INTERVAL,
@@ -47,7 +50,7 @@ pub struct ConsumerEngine<Exe: Executor> {
     sub_type: SubType,
     id: u64,
     name: Option<String>,
-    tx: MessageIdDataSender,
+    tx: InternalMessageIdDataSender,
     messages_rx: Option<mpsc::UnboundedReceiver<RawMessage>>,
     engine_rx: Option<mpsc::UnboundedReceiver<InternalEngineMessage<Exe>>>,
     event_rx: mpsc::UnboundedReceiver<InternalEngineEvent<Exe>>,
@@ -76,7 +79,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         sub_type: SubType,
         id: u64,
         name: Option<String>,
-        tx: MessageIdDataSender,
+        tx: InternalMessageIdDataSender,
         messages_rx: mpsc::UnboundedReceiver<RawMessage>,
         engine_rx: mpsc::UnboundedReceiver<InternalEngineMessage<Exe>>,
         batch_size: u32,
@@ -505,6 +508,19 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                         }
                         if self.start_negative_ack_ticker().is_err() {
                             error!("could not start negative ack redelivery ticker after immediate redelivery failure");
+                            if let Err(e) = self
+                                .send_negative_ack_redelivery(vec![message_id.clone()])
+                                .await
+                            {
+                                error!(
+                                    "could not ask for fallback immediate negative ack redelivery after ticker failure: {:?}",
+                                    e
+                                );
+                            } else {
+                                self.ensure_negative_ack_tracker()
+                                    .mark_dispatched(std::slice::from_ref(&message_id));
+                            }
+                            self.stop_negative_ack_ticker_if_idle();
                         }
                     }
                 }
@@ -1036,13 +1052,17 @@ mod tests {
         assert!(immediate_source.contains("mark_retry_pending("));
         assert!(immediate_source.contains("start_negative_ack_ticker().is_err()"));
         assert!(immediate_source.contains("NEGATIVE_ACK_REDELIVERY_TICK_INTERVAL"));
+        assert!(immediate_source
+            .contains("fallback immediate negative ack redelivery after ticker failure"));
+        assert!(immediate_source.contains("mark_dispatched(std::slice::from_ref(&message_id))"));
     }
 
     #[test]
     fn consumer_delivery_preserves_missing_broker_redelivery_count() {
-        assert!(source_contains(&["tx:", " MessageIdDataSender"]));
-        assert!(include_str!("data.rs")
-            .contains("MessageIdDataResult = Result<(MessageIdData, Payload, Option<u32>)"));
+        assert!(source_contains(&["tx:", " InternalMessageIdDataSender"]));
+        assert!(include_str!("data.rs").contains(
+            "InternalMessageIdDataResult = Result<(MessageIdData, Payload, Option<u32>)"
+        ));
         assert!(source_contains(&[
             "let redelivery_count = message.",
             "redelivery_count;"

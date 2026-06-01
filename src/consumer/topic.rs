@@ -19,7 +19,9 @@ use crate::{
     connection::Connection,
     consumer::{
         config::ConsumerConfig,
-        data::{DeadLetterPolicy, InternalEngineMessage, MessageData, MessageIdDataReceiver},
+        data::{
+            DeadLetterPolicy, InternalEngineMessage, InternalMessageIdDataReceiver, MessageData,
+        },
         engine::ConsumerEngine,
         message::Message,
     },
@@ -35,7 +37,7 @@ pub struct TopicConsumer<T: DeserializeMessage, Exe: Executor> {
     pub(crate) consumer_id: u64,
     pub(crate) config: ConsumerConfig,
     topic: String,
-    messages: Pin<Box<MessageIdDataReceiver>>,
+    messages: Pin<Box<InternalMessageIdDataReceiver>>,
     engine_tx: mpsc::UnboundedSender<InternalEngineMessage<Exe>>,
     unacked_redelivery_ticker_running: Option<Arc<AtomicBool>>,
     data_type: PhantomData<fn(Payload) -> T::Output>,
@@ -93,8 +95,11 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
             let mut redelivery_tx = engine_tx.clone();
             let mut interval = client.executor.interval(Duration::from_millis(500));
             let res = client.executor.spawn(Box::pin(async move {
-                while ticker_running_task.load(Ordering::SeqCst) && interval.next().await.is_some()
-                {
+                while interval.next().await.is_some() {
+                    if !ticker_running_task.load(Ordering::SeqCst) {
+                        break;
+                    }
+
                     if redelivery_tx
                         .send(InternalEngineMessage::UnackedRedelivery)
                         .await
@@ -393,9 +398,12 @@ mod tests {
             "unacked_redelivery_ticker_running:",
             " Option<Arc<AtomicBool>>"
         ]));
-        assert!(source_contains(&[
-            "ticker_running_task.",
-            "load(Ordering::SeqCst)"
+        let source = include_str!("topic.rs");
+        assert!(source.contains("while interval.next().await.is_some()"));
+        assert!(source.contains("if !ticker_running_task.load(Ordering::SeqCst)"));
+        assert!(!source_contains(&[
+            "while ticker_running_task.",
+            "load(Ordering::SeqCst) && interval.next().await.is_some()"
         ]));
         assert!(source_contains(&[
             "impl<T: DeserializeMessage, Exe: Executor> Drop",
