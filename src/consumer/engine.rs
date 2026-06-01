@@ -690,8 +690,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn ack(&mut self, message_id: MessageIdData, cumulative: bool) {
-        // FIXME: this does not handle cumulative acks
-        self.unacked_messages.remove(&message_id);
+        Self::remove_ack_from_unacked_messages(&mut self.unacked_messages, &message_id, cumulative);
         if let Some(tracker) = self.negative_ack_tracker.as_mut() {
             if cumulative {
                 tracker.cancel_cumulative_ack(&message_id);
@@ -708,6 +707,38 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         if res.is_err() {
             error!("ack error: {:?}", res);
         }
+    }
+
+    fn remove_ack_from_unacked_messages(
+        unacked_messages: &mut HashMap<MessageIdData, Instant>,
+        message_id: &MessageIdData,
+        cumulative: bool,
+    ) {
+        if !cumulative {
+            unacked_messages.remove(message_id);
+            return;
+        }
+
+        unacked_messages.retain(|id, _| {
+            if id.partition != message_id.partition {
+                return true;
+            }
+
+            if id.ledger_id < message_id.ledger_id
+                || (id.ledger_id == message_id.ledger_id && id.entry_id < message_id.entry_id)
+            {
+                return false;
+            }
+
+            if id.ledger_id == message_id.ledger_id && id.entry_id == message_id.entry_id {
+                return match message_id.batch_index {
+                    Some(ack_idx) => id.batch_index.map_or(true, |idx| idx > ack_idx),
+                    None => false,
+                };
+            }
+
+            true
+        });
     }
 
     /// Process the message. Returns `true` if there are more messages to process
@@ -1075,7 +1106,10 @@ impl<Exe: Executor> std::ops::Drop for ConsumerEngine<Exe> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
+    use std::{
+        collections::{HashMap, HashSet},
+        time::{Duration, Instant},
+    };
 
     use futures::executor::block_on;
 
@@ -1211,6 +1245,43 @@ mod tests {
     }
 
     #[test]
+    fn cumulative_ack_clears_prior_unacked_redelivery_entries() {
+        let due_at = Instant::now() - Duration::from_secs(1);
+        let mut unacked_messages = HashMap::from([
+            (message_id(1, 1, None), due_at),
+            (message_id(1, 2, Some(0)), due_at),
+            (message_id(1, 2, Some(1)), due_at),
+            (message_id(1, 2, Some(2)), due_at),
+            (message_id(1, 2, None), due_at),
+            (message_id(1, 3, None), due_at),
+            (message_id_for_partition(1, 1, Some(1), None), due_at),
+        ]);
+
+        ConsumerEngine::<crate::executor::TokioExecutor>::remove_ack_from_unacked_messages(
+            &mut unacked_messages,
+            &message_id(1, 2, Some(1)),
+            true,
+        );
+
+        assert!(!unacked_messages.contains_key(&message_id(1, 1, None)));
+        assert!(!unacked_messages.contains_key(&message_id(1, 2, Some(0))));
+        assert!(!unacked_messages.contains_key(&message_id(1, 2, Some(1))));
+        assert!(unacked_messages.contains_key(&message_id(1, 2, Some(2))));
+        assert!(unacked_messages.contains_key(&message_id(1, 2, None)));
+        assert!(unacked_messages.contains_key(&message_id(1, 3, None)));
+        assert!(unacked_messages.contains_key(&message_id_for_partition(1, 1, Some(1), None)));
+
+        let now = Instant::now();
+        let due_for_redelivery: HashSet<_> = unacked_messages
+            .iter()
+            .filter_map(|(id, redeliver_at)| (*redeliver_at < now).then_some(id.clone()))
+            .collect();
+        assert!(!due_for_redelivery.contains(&message_id(1, 1, None)));
+        assert!(!due_for_redelivery.contains(&message_id(1, 2, Some(0))));
+        assert!(!due_for_redelivery.contains(&message_id(1, 2, Some(1))));
+    }
+
+    #[test]
     fn reconnect_preserves_negative_ack_tracker_state() {
         let source = include_str!("engine.rs");
         let reconnect_source = source
@@ -1256,10 +1327,19 @@ mod tests {
     }
 
     fn message_id(ledger_id: u64, entry_id: u64, batch_index: Option<i32>) -> MessageIdData {
+        message_id_for_partition(ledger_id, entry_id, Some(0), batch_index)
+    }
+
+    fn message_id_for_partition(
+        ledger_id: u64,
+        entry_id: u64,
+        partition: Option<i32>,
+        batch_index: Option<i32>,
+    ) -> MessageIdData {
         MessageIdData {
             ledger_id,
             entry_id,
-            partition: Some(0),
+            partition,
             batch_index,
             ack_set: vec![],
             batch_size: None,
