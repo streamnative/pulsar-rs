@@ -42,6 +42,65 @@ use crate::{
 const SYSTEM_PROPERTY_REAL_TOPIC: &str = "REAL_TOPIC";
 const SYSTEM_PROPERTY_ORIGIN_MESSAGE_ID: &str = "ORIGIN_MESSAGE_ID";
 
+#[async_trait::async_trait]
+trait ConsumerEngineEffects {
+    async fn request_negative_ack_redelivery(
+        &mut self,
+        consumer_id: u64,
+        ids: Vec<MessageIdData>,
+    ) -> Result<(), ConnectionError>;
+
+    async fn send_dead_letter(&mut self, topic: &str, message: Message) -> Result<(), Error>;
+}
+
+struct BrokerConsumerEngineEffects<Exe: Executor> {
+    client: Pulsar<Exe>,
+    connection: Arc<Connection<Exe>>,
+}
+
+#[async_trait::async_trait]
+impl<Exe: Executor> ConsumerEngineEffects for BrokerConsumerEngineEffects<Exe> {
+    async fn request_negative_ack_redelivery(
+        &mut self,
+        consumer_id: u64,
+        ids: Vec<MessageIdData>,
+    ) -> Result<(), ConnectionError> {
+        self.connection
+            .sender()
+            .send_redeliver_unacknowleged_messages(consumer_id, ids)
+            .await
+    }
+
+    async fn send_dead_letter(&mut self, topic: &str, message: Message) -> Result<(), Error> {
+        self.client
+            .send(topic, message)
+            .await?
+            .await
+            .map(|_| ())
+            .map_err(|e| {
+                error!("One shot cancelled {:?}", e);
+                Error::Custom("DLQ send error".to_string())
+            })
+    }
+}
+
+async fn send_negative_ack_redelivery_with_effects<E>(
+    effects: &mut E,
+    consumer_id: u64,
+    ids: Vec<MessageIdData>,
+) -> Result<(), ConnectionError>
+where
+    E: ConsumerEngineEffects + ?Sized,
+{
+    let ids = ids
+        .into_iter()
+        .map(|id| NegativeAckTracker::redelivery_message_id(&id))
+        .collect();
+    effects
+        .request_negative_ack_redelivery(consumer_id, ids)
+        .await
+}
+
 pub struct ConsumerEngine<Exe: Executor> {
     client: Pulsar<Exe>,
     connection: Arc<Connection<Exe>>,
@@ -584,14 +643,11 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         &self,
         ids: Vec<MessageIdData>,
     ) -> Result<(), ConnectionError> {
-        let ids = ids
-            .into_iter()
-            .map(|id| NegativeAckTracker::redelivery_message_id(&id))
-            .collect();
-        self.connection
-            .sender()
-            .send_redeliver_unacknowleged_messages(self.id, ids)
-            .await
+        let mut effects = BrokerConsumerEngineEffects {
+            client: self.client.clone(),
+            connection: self.connection.clone(),
+        };
+        send_negative_ack_redelivery_with_effects(&mut effects, self.id, ids).await
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
@@ -846,14 +902,13 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                         event_time: metadata.event_time,
                         ..Default::default()
                     };
-                    self.client
-                        .send(&dead_letter_policy.dead_letter_topic, message)
-                        .await?
-                        .await
-                        .map_err(|e| {
-                            error!("One shot cancelled {:?}", e);
-                            Error::Custom("DLQ send error".to_string())
-                        })?;
+                    let mut effects = BrokerConsumerEngineEffects {
+                        client: self.client.clone(),
+                        connection: self.connection.clone(),
+                    };
+                    effects
+                        .send_dead_letter(&dead_letter_policy.dead_letter_topic, message)
+                        .await?;
 
                     self.ack(message_id, false).await;
                 }
@@ -984,6 +1039,9 @@ impl<Exe: Executor> std::ops::Drop for ConsumerEngine<Exe> {
 mod tests {
     use std::time::{Duration, Instant};
 
+    use futures::executor::block_on;
+
+    use super::*;
     use crate::{
         consumer::negative_ack_tracker::{NegativeAckSchedule, NegativeAckTracker},
         message::proto::MessageIdData,
@@ -1106,12 +1164,24 @@ mod tests {
         dlq_sends: usize,
     }
 
-    impl FakeNegativeAckEffects {
-        fn request_redelivery(&mut self, ids: Vec<MessageIdData>) {
-            self.redelivery_requests.extend(
-                ids.into_iter()
-                    .map(|id| NegativeAckTracker::redelivery_message_id(&id)),
-            );
+    #[async_trait::async_trait]
+    impl ConsumerEngineEffects for FakeNegativeAckEffects {
+        async fn request_negative_ack_redelivery(
+            &mut self,
+            _consumer_id: u64,
+            ids: Vec<MessageIdData>,
+        ) -> Result<(), ConnectionError> {
+            self.redelivery_requests.extend(ids);
+            Ok(())
+        }
+
+        async fn send_dead_letter(
+            &mut self,
+            _topic: &str,
+            _message: crate::producer::Message,
+        ) -> Result<(), Error> {
+            self.dlq_sends += 1;
+            Ok(())
         }
     }
 
@@ -1138,7 +1208,12 @@ mod tests {
             tracker.schedule(id.clone(), Some(99), now),
             NegativeAckSchedule::Immediate
         );
-        effects.request_redelivery(vec![id.clone()]);
+        block_on(send_negative_ack_redelivery_with_effects(
+            &mut effects,
+            7,
+            vec![id.clone()],
+        ))
+        .unwrap();
 
         assert_eq!(effects.redelivery_requests, vec![id]);
         assert_eq!(effects.dlq_sends, 0);
@@ -1158,7 +1233,12 @@ mod tests {
         assert!(tracker.collect_due(now + Duration::from_secs(4)).is_empty());
 
         let due = tracker.collect_due(now + Duration::from_secs(5));
-        effects.request_redelivery(due);
+        block_on(send_negative_ack_redelivery_with_effects(
+            &mut effects,
+            7,
+            due,
+        ))
+        .unwrap();
 
         assert_eq!(effects.redelivery_requests, vec![message_id(1, 2, None)]);
         assert_eq!(effects.dlq_sends, 0);
@@ -1177,7 +1257,12 @@ mod tests {
         );
 
         let due = tracker.collect_due(now + Duration::from_secs(7));
-        effects.request_redelivery(due);
+        block_on(send_negative_ack_redelivery_with_effects(
+            &mut effects,
+            7,
+            due,
+        ))
+        .unwrap();
 
         assert_eq!(effects.redelivery_requests, vec![id]);
         assert_eq!(effects.dlq_sends, 0);
