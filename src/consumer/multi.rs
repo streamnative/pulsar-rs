@@ -12,7 +12,11 @@ use futures::{future::try_join_all, Stream};
 use regex::Regex;
 
 use crate::{
-    consumer::{config::ConsumerConfig, message::Message, topic::TopicConsumer},
+    consumer::{
+        config::ConsumerConfig,
+        message::Message,
+        topic::{create_topic_consumers_with_factory, TopicConsumer},
+    },
     error::{ConnectionError, ConsumerError},
     message::proto::{MessageIdData, Schema},
     proto,
@@ -206,11 +210,11 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
             );
 
             // 3. create consumers
-            let consumers = try_join_all(topic_consumer_specs.into_iter().map(
-                |(topic, addr, topic_consumer_config)| {
-                    TopicConsumer::new(pulsar.clone(), topic, addr, topic_consumer_config)
-                },
-            ))
+            let consumers = create_topic_consumers_with_factory(
+                pulsar,
+                topic_consumer_specs,
+                TopicConsumer::new,
+            )
             .await?;
             if !consumers.is_empty() {
                 let topics: Vec<String> = consumers.iter().map(|c| c.topic()).collect();
@@ -425,7 +429,13 @@ impl<T: 'static + DeserializeMessage, Exe: Executor> Stream for MultiTopicConsum
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::VecDeque, sync::Arc, time::Duration};
+    use std::{
+        collections::VecDeque,
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
+
+    use futures::executor::block_on;
 
     use super::*;
     use crate::{
@@ -446,6 +456,31 @@ mod tests {
             negative_ack_backoff: Some(Arc::new(MultiplierRedeliveryBackoff::default())),
             ..ConsumerConfig::default()
         }
+    }
+
+    fn configs_received_by_topic_consumer_factory(
+        specs: Vec<(String, BrokerAddress, ConsumerConfig)>,
+    ) -> Vec<(String, ConsumerConfig)> {
+        let captured_configs = Arc::new(Mutex::new(Vec::new()));
+        let factory_configs = Arc::clone(&captured_configs);
+
+        block_on(create_topic_consumers_with_factory(
+            (),
+            specs,
+            move |(), topic, _addr, config| {
+                let factory_configs = Arc::clone(&factory_configs);
+                async move {
+                    factory_configs.lock().unwrap().push((topic, config));
+                    Ok::<(), Error>(())
+                }
+            },
+        ))
+        .expect("test factory should not fail");
+
+        Arc::try_unwrap(captured_configs)
+            .expect("factory closure dropped")
+            .into_inner()
+            .unwrap()
     }
 
     #[test]
@@ -475,15 +510,17 @@ mod tests {
             );
 
         assert_eq!(topic_consumer_specs.len(), 2);
-        for (_, _, topic_consumer_config) in &topic_consumer_specs {
+        let topic_consumer_configs =
+            configs_received_by_topic_consumer_factory(topic_consumer_specs);
+        for (_, topic_consumer_config) in &topic_consumer_configs {
             assert_eq!(
                 topic_consumer_config.nack_redelivery_delay,
                 Some(Duration::from_secs(30))
             );
             assert!(topic_consumer_config.negative_ack_backoff.is_some());
         }
-        assert!(topic_consumer_specs
+        assert!(topic_consumer_configs
             .iter()
-            .all(|(topic, _, _)| topic != "persistent://public/default/existing"));
+            .all(|(topic, _)| topic != "persistent://public/default/existing"));
     }
 }

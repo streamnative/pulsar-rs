@@ -12,6 +12,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use futures::{
     channel::{mpsc, oneshot},
+    future::try_join_all,
     FutureExt, SinkExt, Stream, StreamExt,
 };
 
@@ -31,6 +32,24 @@ use crate::{
     retry_op::retry_subscribe_consumer,
     BrokerAddress, DeserializeMessage, Error, Executor, Payload, Pulsar,
 };
+
+pub(crate) async fn create_topic_consumers_with_factory<Client, C, F, Fut>(
+    client: Client,
+    specs: Vec<(String, BrokerAddress, ConsumerConfig)>,
+    mut factory: F,
+) -> Result<Vec<C>, Error>
+where
+    Client: Clone,
+    F: FnMut(Client, String, BrokerAddress, ConsumerConfig) -> Fut,
+    Fut: std::future::Future<Output = Result<C, Error>>,
+{
+    try_join_all(
+        specs
+            .into_iter()
+            .map(|(topic, addr, config)| factory(client.clone(), topic, addr, config)),
+    )
+    .await
+}
 
 // this is entirely public for use in reader.rs
 pub struct TopicConsumer<T: DeserializeMessage, Exe: Executor> {

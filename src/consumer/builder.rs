@@ -10,8 +10,12 @@ use regex::Regex;
 
 use crate::{
     consumer::{
-        config::ConsumerConfig, data::DeadLetterPolicy, multi::MultiTopicConsumer,
-        negative_ack_backoff::NegativeAckBackoff, options::ConsumerOptions, topic::TopicConsumer,
+        config::ConsumerConfig,
+        data::DeadLetterPolicy,
+        multi::MultiTopicConsumer,
+        negative_ack_backoff::NegativeAckBackoff,
+        options::ConsumerOptions,
+        topic::{create_topic_consumers_with_factory, TopicConsumer},
         InnerConsumer,
     },
     message::proto::command_subscribe::SubType,
@@ -54,18 +58,22 @@ fn check_nack_delay_duration(delay: Duration) -> Result<(), Error> {
 }
 
 impl<Exe: Executor> ConsumerBuilder<Exe> {
-    fn topic_consumer_configs_for_joined_topics(
+    fn topic_consumer_specs_for_joined_topics(
         config: &ConsumerConfig,
-        joined_topics: &[(String, BrokerAddress)],
-    ) -> Vec<ConsumerConfig> {
+        joined_topics: Vec<(String, BrokerAddress)>,
+    ) -> Vec<(String, BrokerAddress, ConsumerConfig)> {
         joined_topics
-            .iter()
-            .map(|_| config.clone_for_topic_consumer())
+            .into_iter()
+            .map(|(topic, addr)| (topic, addr, config.clone_for_topic_consumer()))
             .collect()
     }
 
-    fn topic_consumer_config_for_reader(config: &ConsumerConfig) -> ConsumerConfig {
-        config.clone_for_topic_consumer()
+    fn topic_consumer_spec_for_reader(
+        config: &ConsumerConfig,
+        topic: String,
+        addr: BrokerAddress,
+    ) -> (String, BrokerAddress, ConsumerConfig) {
+        (topic, addr, config.clone_for_topic_consumer())
     }
 
     /// Creates a new [ConsumerBuilder] from an existing client instance
@@ -355,14 +363,10 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
         // would this clone() consume too much memory?
         let (config, joined_topics) = self.clone().validate().await?;
 
-        let topic_consumer_configs =
-            Self::topic_consumer_configs_for_joined_topics(&config, &joined_topics);
-        let consumers = try_join_all(joined_topics.into_iter().zip(topic_consumer_configs).map(
-            |((topic, addr), topic_consumer_config)| {
-                TopicConsumer::new(self.pulsar.clone(), topic, addr, topic_consumer_config)
-            },
-        ))
-        .await?;
+        let specs = Self::topic_consumer_specs_for_joined_topics(&config, joined_topics);
+        let consumers =
+            create_topic_consumers_with_factory(self.pulsar.clone(), specs, TopicConsumer::new)
+                .await?;
 
         let consumer = if consumers.len() == 1 {
             let consumer = consumers.into_iter().next().unwrap();
@@ -431,9 +435,11 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
         }
 
         let (topic, addr) = joined_topics.pop().expect("len checked above");
-        let topic_consumer_config = Self::topic_consumer_config_for_reader(&config);
-        let consumer =
-            TopicConsumer::new(self.pulsar.clone(), topic, addr, topic_consumer_config).await?;
+        let specs = vec![Self::topic_consumer_spec_for_reader(&config, topic, addr)];
+        let mut consumers =
+            create_topic_consumers_with_factory(self.pulsar.clone(), specs, TopicConsumer::new)
+                .await?;
+        let consumer = consumers.pop().expect("single reader topic checked above");
 
         Ok(Reader {
             consumer,
@@ -444,7 +450,12 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
+
+    use futures::executor::block_on;
 
     use super::*;
     use crate::TokioExecutor;
@@ -580,14 +591,39 @@ mod tests {
         assert!(passed_to_topic_consumer.negative_ack_backoff.is_some());
     }
 
+    fn configs_received_by_topic_consumer_factory(
+        specs: Vec<(String, BrokerAddress, ConsumerConfig)>,
+    ) -> Vec<ConsumerConfig> {
+        let captured_configs = Arc::new(Mutex::new(Vec::new()));
+        let factory_configs = Arc::clone(&captured_configs);
+
+        block_on(create_topic_consumers_with_factory(
+            (),
+            specs,
+            move |(), _topic, _addr, config| {
+                let factory_configs = Arc::clone(&factory_configs);
+                async move {
+                    factory_configs.lock().unwrap().push(config);
+                    Ok::<(), Error>(())
+                }
+            },
+        ))
+        .expect("test factory should not fail");
+
+        Arc::try_unwrap(captured_configs)
+            .expect("factory closure dropped")
+            .into_inner()
+            .unwrap()
+    }
+
     #[test]
     fn single_topic_consumer_config_carries_nack_delay_to_engine() {
         let config = nack_config_with_delay_and_backoff();
-        let topic_consumer_configs =
-            ConsumerBuilder::<TokioExecutor>::topic_consumer_configs_for_joined_topics(
-                &config,
-                &joined_topics(1),
-            );
+        let specs = ConsumerBuilder::<TokioExecutor>::topic_consumer_specs_for_joined_topics(
+            &config,
+            joined_topics(1),
+        );
+        let topic_consumer_configs = configs_received_by_topic_consumer_factory(specs);
 
         assert_eq!(topic_consumer_configs.len(), 1);
         assert_topic_consumer_receives_negative_ack_config(&topic_consumer_configs[0]);
@@ -596,11 +632,11 @@ mod tests {
     #[test]
     fn partitioned_consumer_config_carries_nack_delay_to_each_engine() {
         let config = nack_config_with_delay_and_backoff();
-        let topic_consumer_configs =
-            ConsumerBuilder::<TokioExecutor>::topic_consumer_configs_for_joined_topics(
-                &config,
-                &joined_topics(3),
-            );
+        let specs = ConsumerBuilder::<TokioExecutor>::topic_consumer_specs_for_joined_topics(
+            &config,
+            joined_topics(3),
+        );
+        let topic_consumer_configs = configs_received_by_topic_consumer_factory(specs);
 
         assert_eq!(topic_consumer_configs.len(), 3);
         for topic_consumer_config in &topic_consumer_configs {
@@ -611,11 +647,11 @@ mod tests {
     #[test]
     fn multi_topic_consumer_config_carries_nack_delay_to_each_engine() {
         let config = nack_config_with_delay_and_backoff();
-        let topic_consumer_configs =
-            ConsumerBuilder::<TokioExecutor>::topic_consumer_configs_for_joined_topics(
-                &config,
-                &joined_topics(2),
-            );
+        let specs = ConsumerBuilder::<TokioExecutor>::topic_consumer_specs_for_joined_topics(
+            &config,
+            joined_topics(2),
+        );
+        let topic_consumer_configs = configs_received_by_topic_consumer_factory(specs);
 
         assert_eq!(topic_consumer_configs.len(), 2);
         for topic_consumer_config in &topic_consumer_configs {
@@ -630,8 +666,14 @@ mod tests {
         reader_config.options.durable = Some(false);
         reader_config.sub_type = SubType::Exclusive;
 
-        let topic_consumer_config =
-            ConsumerBuilder::<TokioExecutor>::topic_consumer_config_for_reader(&reader_config);
+        let (topic, addr) = joined_topics(1).pop().unwrap();
+        let spec = ConsumerBuilder::<TokioExecutor>::topic_consumer_spec_for_reader(
+            &reader_config,
+            topic,
+            addr,
+        );
+        let mut topic_consumer_configs = configs_received_by_topic_consumer_factory(vec![spec]);
+        let topic_consumer_config = topic_consumer_configs.pop().unwrap();
 
         assert_topic_consumer_receives_negative_ack_config(&topic_consumer_config);
         assert_eq!(topic_consumer_config.options.durable, Some(false));
@@ -642,11 +684,11 @@ mod tests {
     fn build_path_config_helpers_clone_for_each_topic_consumer() {
         let mut config = nack_config_with_delay_and_backoff();
         config.consumer_id = Some(7);
-        let topic_consumer_configs =
-            ConsumerBuilder::<TokioExecutor>::topic_consumer_configs_for_joined_topics(
-                &config,
-                &joined_topics(2),
-            );
+        let specs = ConsumerBuilder::<TokioExecutor>::topic_consumer_specs_for_joined_topics(
+            &config,
+            joined_topics(2),
+        );
+        let topic_consumer_configs = configs_received_by_topic_consumer_factory(specs);
 
         assert_eq!(topic_consumer_configs.len(), 2);
         assert!(topic_consumer_configs
