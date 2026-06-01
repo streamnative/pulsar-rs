@@ -478,11 +478,21 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             .select_delay(redelivery_count)
             == Duration::ZERO
         {
-            if let Err(e) = self.send_negative_ack_redelivery(vec![message_id]).await {
-                error!(
-                    "could not ask for immediate negative ack redelivery: {:?}",
-                    e
-                );
+            match self
+                .send_negative_ack_redelivery(vec![message_id.clone()])
+                .await
+            {
+                Ok(()) => {
+                    self.ensure_negative_ack_tracker()
+                        .mark_dispatched(std::slice::from_ref(&message_id));
+                    self.stop_negative_ack_ticker_if_idle();
+                }
+                Err(e) => {
+                    error!(
+                        "could not ask for immediate negative ack redelivery: {:?}",
+                        e
+                    );
+                }
             }
             return;
         }
@@ -495,11 +505,21 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
 
         match schedule {
             NegativeAckSchedule::Immediate => {
-                if let Err(e) = self.send_negative_ack_redelivery(vec![message_id]).await {
-                    error!(
-                        "could not ask for immediate negative ack redelivery: {:?}",
-                        e
-                    );
+                match self
+                    .send_negative_ack_redelivery(vec![message_id.clone()])
+                    .await
+                {
+                    Ok(()) => {
+                        self.ensure_negative_ack_tracker()
+                            .mark_dispatched(std::slice::from_ref(&message_id));
+                        self.stop_negative_ack_ticker_if_idle();
+                    }
+                    Err(e) => {
+                        error!(
+                            "could not ask for immediate negative ack redelivery: {:?}",
+                            e
+                        );
+                    }
                 }
             }
             NegativeAckSchedule::Scheduled | NegativeAckSchedule::DuplicateEarlier => {
@@ -971,8 +991,15 @@ mod tests {
         assert!(source_contains(&["Instant::", "now(),"]));
         assert!(source_contains(&[
             "send_negative_ack_",
-            "redelivery(vec![message_id]",
+            "redelivery(vec![message_id.clone()]",
         ]));
+        assert!(source_contains(&[
+            "mark_",
+            "dispatched(std::slice::from_ref(&message_id))",
+        ]));
+        assert!(source_contains(
+            &["stop_", "negative_ack_ticker_if_idle()",]
+        ));
     }
 
     #[test]
