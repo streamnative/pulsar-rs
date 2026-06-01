@@ -1,4 +1,5 @@
 use std::{
+    collections::{BTreeSet, HashMap},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -26,6 +27,93 @@ pub(crate) enum NegativeAckDispatchState {
 pub(crate) struct NegativeAckTracker {
     fixed_delay: Duration,
     backoff: Option<Arc<dyn NegativeAckBackoff + Send + Sync>>,
+    entries: HashMap<NormalizedMessageId, PendingNegativeAck>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct NormalizedMessageId {
+    ledger_id: u64,
+    entry_id: u64,
+    partition: Option<i32>,
+}
+
+#[derive(Debug)]
+struct PendingNegativeAck {
+    due_at: Instant,
+    state: NegativeAckDispatchState,
+    scope: PendingBatchScope,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PendingBatchScope {
+    FullEntry,
+    BatchIndexes(BTreeSet<i32>),
+}
+
+impl NormalizedMessageId {
+    fn from_message_id(message_id: &MessageIdData) -> Self {
+        Self {
+            ledger_id: message_id.ledger_id,
+            entry_id: message_id.entry_id,
+            partition: message_id.partition,
+        }
+    }
+
+    fn into_redelivery_message_id(self) -> MessageIdData {
+        MessageIdData {
+            ledger_id: self.ledger_id,
+            entry_id: self.entry_id,
+            partition: self.partition,
+            batch_index: None,
+            ack_set: vec![],
+            batch_size: None,
+            first_chunk_message_id: None,
+        }
+    }
+}
+
+impl PendingBatchScope {
+    fn from_message_id(message_id: &MessageIdData) -> Self {
+        match message_id.batch_index {
+            Some(batch_index) => Self::BatchIndexes(BTreeSet::from([batch_index])),
+            None => Self::FullEntry,
+        }
+    }
+
+    fn merge(&mut self, incoming: PendingBatchScope) -> bool {
+        match (&mut *self, incoming) {
+            (Self::FullEntry, _) => false,
+            (scope @ Self::BatchIndexes(_), Self::FullEntry) => {
+                *scope = Self::FullEntry;
+                true
+            }
+            (Self::BatchIndexes(existing), Self::BatchIndexes(incoming)) => {
+                incoming.into_iter().fold(false, |changed, batch_index| {
+                    existing.insert(batch_index) || changed
+                })
+            }
+        }
+    }
+
+    fn cancel_batch_index(&mut self, batch_index: i32) -> bool {
+        match self {
+            Self::FullEntry => false,
+            Self::BatchIndexes(indexes) => {
+                indexes.remove(&batch_index);
+                indexes.is_empty()
+            }
+        }
+    }
+
+    fn cancel_batch_indexes_through(&mut self, batch_index: i32) -> bool {
+        match self {
+            Self::FullEntry => false,
+            Self::BatchIndexes(indexes) => {
+                indexes.retain(|pending| *pending > batch_index);
+                indexes.is_empty()
+            }
+        }
+    }
 }
 
 impl NegativeAckTracker {
@@ -36,6 +124,7 @@ impl NegativeAckTracker {
         Self {
             fixed_delay: fixed_delay.unwrap_or(DEFAULT_NACK_REDELIVERY_DELAY),
             backoff,
+            entries: HashMap::new(),
         }
     }
 
@@ -48,14 +137,161 @@ impl NegativeAckTracker {
 
     pub(crate) fn schedule(
         &mut self,
-        _message_id: MessageIdData,
-        _redelivery_count: Option<u32>,
-        _now: Instant,
+        message_id: MessageIdData,
+        redelivery_count: Option<u32>,
+        now: Instant,
     ) -> NegativeAckSchedule {
-        match self.select_delay(_redelivery_count) {
-            Duration::ZERO => NegativeAckSchedule::Immediate,
-            _ => NegativeAckSchedule::Scheduled,
+        let delay = self.select_delay(redelivery_count);
+        if delay == Duration::ZERO {
+            return NegativeAckSchedule::Immediate;
         }
+
+        let key = NormalizedMessageId::from_message_id(&message_id);
+        let incoming_scope = PendingBatchScope::from_message_id(&message_id);
+        let due_at = now + delay;
+
+        match self.entries.get_mut(&key) {
+            None => {
+                self.entries.insert(
+                    key,
+                    PendingNegativeAck {
+                        due_at,
+                        state: NegativeAckDispatchState::Pending,
+                        scope: incoming_scope,
+                    },
+                );
+                NegativeAckSchedule::Scheduled
+            }
+            Some(existing) if existing.state == NegativeAckDispatchState::InFlight => {
+                NegativeAckSchedule::RetryPending
+            }
+            Some(existing) => {
+                let scope_changed = existing.scope.merge(incoming_scope);
+                if due_at < existing.due_at {
+                    existing.due_at = due_at;
+                    NegativeAckSchedule::Scheduled
+                } else if scope_changed {
+                    NegativeAckSchedule::Scheduled
+                } else {
+                    NegativeAckSchedule::DuplicateEarlier
+                }
+            }
+        }
+    }
+
+    pub(crate) fn pending_len(&self) -> usize {
+        self.entries
+            .values()
+            .filter(|entry| entry.state == NegativeAckDispatchState::Pending)
+            .count()
+    }
+
+    pub(crate) fn in_flight_len(&self) -> usize {
+        self.entries
+            .values()
+            .filter(|entry| entry.state == NegativeAckDispatchState::InFlight)
+            .count()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub(crate) fn next_due_time(&self) -> Option<Instant> {
+        self.entries
+            .values()
+            .filter(|entry| entry.state == NegativeAckDispatchState::Pending)
+            .map(|entry| entry.due_at)
+            .min()
+    }
+
+    pub(crate) fn collect_due(&mut self, now: Instant) -> Vec<MessageIdData> {
+        let mut due = Vec::new();
+        for (key, entry) in &mut self.entries {
+            if entry.state == NegativeAckDispatchState::Pending && entry.due_at <= now {
+                entry.state = NegativeAckDispatchState::InFlight;
+                due.push((*key).into_redelivery_message_id());
+            }
+        }
+        due
+    }
+
+    pub(crate) fn mark_dispatched(&mut self, message_ids: &[MessageIdData]) {
+        for message_id in message_ids {
+            self.entries
+                .remove(&NormalizedMessageId::from_message_id(message_id));
+        }
+    }
+
+    pub(crate) fn mark_retry_pending(&mut self, message_ids: &[MessageIdData], retry_at: Instant) {
+        for message_id in message_ids {
+            if let Some(entry) = self
+                .entries
+                .get_mut(&NormalizedMessageId::from_message_id(message_id))
+            {
+                entry.state = NegativeAckDispatchState::Pending;
+                entry.due_at = retry_at;
+            }
+        }
+    }
+
+    pub(crate) fn cancel_ack(&mut self, message_id: &MessageIdData) {
+        let key = NormalizedMessageId::from_message_id(message_id);
+        if message_id.batch_index.is_none() || !message_id.ack_set.is_empty() {
+            self.entries.remove(&key);
+            return;
+        }
+
+        let Some(batch_index) = message_id.batch_index else {
+            return;
+        };
+        if self
+            .entries
+            .get_mut(&key)
+            .is_some_and(|entry| entry.scope.cancel_batch_index(batch_index))
+        {
+            self.entries.remove(&key);
+        }
+    }
+
+    pub(crate) fn cancel_cumulative_ack(&mut self, message_id: &MessageIdData) {
+        let ack_key = NormalizedMessageId::from_message_id(message_id);
+        let mut remove_keys = Vec::new();
+
+        for key in self.entries.keys() {
+            if key.partition != ack_key.partition {
+                continue;
+            }
+            if key.ledger_id < ack_key.ledger_id
+                || (key.ledger_id == ack_key.ledger_id && key.entry_id < ack_key.entry_id)
+            {
+                remove_keys.push(*key);
+            }
+        }
+
+        for key in remove_keys {
+            self.entries.remove(&key);
+        }
+
+        if message_id.batch_index.is_none() || !message_id.ack_set.is_empty() {
+            self.entries.remove(&ack_key);
+            return;
+        }
+
+        let Some(batch_index) = message_id.batch_index else {
+            return;
+        };
+        if self
+            .entries
+            .get_mut(&ack_key)
+            .is_some_and(|entry| entry.scope.cancel_batch_indexes_through(batch_index))
+        {
+            self.entries.remove(&ack_key);
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.entries.clear();
     }
 }
 
@@ -173,10 +409,7 @@ mod tests {
         );
 
         assert_eq!(tracker.pending_len(), 1);
-        assert_eq!(
-            tracker.next_due_time(),
-            Some(now + Duration::from_secs(10))
-        );
+        assert_eq!(tracker.next_due_time(), Some(now + Duration::from_secs(10)));
     }
 
     #[test]
@@ -249,7 +482,9 @@ mod tests {
         assert_eq!(due[0].first_chunk_message_id, None);
         assert_eq!(tracker.pending_len(), 0);
         assert_eq!(tracker.in_flight_len(), 1);
-        assert!(tracker.collect_due(now + Duration::from_secs(11)).is_empty());
+        assert!(tracker
+            .collect_due(now + Duration::from_secs(11))
+            .is_empty());
     }
 
     #[test]
@@ -262,7 +497,9 @@ mod tests {
         tracker.mark_retry_pending(&due, now + NEGATIVE_ACK_REDELIVERY_TICK_INTERVAL);
         assert_eq!(tracker.pending_len(), 1);
         assert_eq!(tracker.in_flight_len(), 0);
-        assert!(tracker.collect_due(now + Duration::from_millis(499)).is_empty());
+        assert!(tracker
+            .collect_due(now + Duration::from_millis(499))
+            .is_empty());
         let retried = tracker.collect_due(now + NEGATIVE_ACK_REDELIVERY_TICK_INTERVAL);
         tracker.mark_dispatched(&retried);
         assert!(tracker.is_empty());
