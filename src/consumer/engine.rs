@@ -473,30 +473,6 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         message_id: MessageIdData,
         redelivery_count: Option<u32>,
     ) {
-        if self
-            .make_negative_ack_tracker()
-            .select_delay(redelivery_count)
-            == Duration::ZERO
-        {
-            match self
-                .send_negative_ack_redelivery(vec![message_id.clone()])
-                .await
-            {
-                Ok(()) => {
-                    self.ensure_negative_ack_tracker()
-                        .mark_dispatched(std::slice::from_ref(&message_id));
-                    self.stop_negative_ack_ticker_if_idle();
-                }
-                Err(e) => {
-                    error!(
-                        "could not ask for immediate negative ack redelivery: {:?}",
-                        e
-                    );
-                }
-            }
-            return;
-        }
-
         let schedule = self.ensure_negative_ack_tracker().schedule(
             message_id.clone(),
             redelivery_count,
