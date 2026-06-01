@@ -393,6 +393,12 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
     /// creates a [Reader] from this builder
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn into_reader<T: DeserializeMessage>(self) -> Result<Reader<T, Exe>, Error> {
+        if self.topic_regex.is_some() {
+            return Err(Error::Custom(
+                "Unable to create a reader - topic regex is not supported".to_string(),
+            ));
+        }
+
         // would this clone() consume too much memory?
         let (mut config, mut joined_topics) = self.clone().validate().await?;
 
@@ -405,13 +411,13 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
         warn!("Subscription Type for a reader is `Exclusive`. Resetting.");
         config.sub_type = SubType::Exclusive;
 
-        if joined_topics.len() > 1 {
+        if joined_topics.len() != 1 {
             return Err(Error::Custom(
-                "Unable to create a reader - one topic partition max".to_string(),
+                "Unable to create a reader - exactly one topic is required".to_string(),
             ));
         }
 
-        let (topic, addr) = joined_topics.pop().unwrap();
+        let (topic, addr) = joined_topics.pop().expect("len checked above");
         let consumer = TopicConsumer::new(
             self.pulsar.clone(),
             topic,
