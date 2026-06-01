@@ -1092,4 +1092,60 @@ mod tests {
         assert!(!reconnect_source.contains("negative_ack_tracker"));
         assert!(!reconnect_source.contains("tracker.clear()"));
     }
+
+    fn payload_processing_source() -> &'static str {
+        include_str!("engine.rs")
+            .split("async fn process_payload")
+            .nth(1)
+            .and_then(|tail| tail.split("async fn send_to_consumer").next())
+            .expect("process_payload source section exists")
+    }
+
+    fn negative_ack_source() -> &'static str {
+        include_str!("engine.rs")
+            .split("async fn handle_negative_ack")
+            .nth(1)
+            .and_then(|tail| tail.split("fn remove_negative_ack_from_unacked").next())
+            .expect("handle_negative_ack source section exists")
+    }
+
+    #[test]
+    fn dlq_routing_is_in_handle_payload_not_handle_negative_ack() {
+        let payload_section = payload_processing_source();
+        assert!(
+            payload_section.contains("dead_letter_topic"),
+            "DLQ identifier 'dead_letter_topic' not found in process_payload section. If you renamed or moved this function, update the source-inspection split boundary in this test."
+        );
+        assert!(
+            payload_section.contains("max_redeliver_count"),
+            "DLQ identifier 'max_redeliver_count' not found in process_payload section. If you renamed or moved this function, update the source-inspection split boundary in this test."
+        );
+
+        let nack_section = negative_ack_source();
+        assert!(
+            !nack_section.contains("dead_letter_topic"),
+            "DLQ routing leaked into handle_negative_ack — 'dead_letter_topic' must only appear in payload handling. Check if DLQ logic was accidentally added to the nack handler."
+        );
+        assert!(
+            !nack_section.contains("max_redeliver_count"),
+            "DLQ routing leaked into handle_negative_ack — 'max_redeliver_count' must only appear in payload handling. Check if DLQ logic was accidentally added to the nack handler."
+        );
+    }
+
+    #[test]
+    fn negative_ack_tracker_does_not_call_dlq_functions() {
+        let nack_section = negative_ack_source();
+        assert!(
+            !nack_section.contains("dead_letter"),
+            "handle_negative_ack must not contain DLQ routing logic — 'dead_letter' found in nack handler source. If you refactored handle_negative_ack, verify DLQ separation is preserved and update split boundaries if needed."
+        );
+    }
+
+    #[test]
+    fn nack_with_id_source_sends_none_redelivery_count() {
+        assert!(
+            include_str!("topic.rs").contains("InternalEngineMessage::Nack(msg_id, None)"),
+            "nack_with_id must send InternalEngineMessage::Nack(msg_id, None) so ID-only nacks use fixed-delay fallback rather than count-based backoff."
+        );
+    }
 }
