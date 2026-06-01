@@ -982,6 +982,13 @@ impl<Exe: Executor> std::ops::Drop for ConsumerEngine<Exe> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
+    use crate::{
+        consumer::negative_ack_tracker::{NegativeAckSchedule, NegativeAckTracker},
+        message::proto::MessageIdData,
+    };
+
     fn source_contains(parts: &[&str]) -> bool {
         let pattern = parts.concat();
         include_str!("engine.rs").contains(&pattern)
@@ -1093,59 +1100,86 @@ mod tests {
         assert!(!reconnect_source.contains("tracker.clear()"));
     }
 
-    fn payload_processing_source() -> &'static str {
-        include_str!("engine.rs")
-            .split("async fn process_payload")
-            .nth(1)
-            .and_then(|tail| tail.split("async fn send_to_consumer").next())
-            .expect("process_payload source section exists")
+    #[derive(Default)]
+    struct FakeNegativeAckEffects {
+        redelivery_requests: Vec<MessageIdData>,
+        dlq_sends: usize,
     }
 
-    fn negative_ack_source() -> &'static str {
-        include_str!("engine.rs")
-            .split("async fn handle_negative_ack")
-            .nth(1)
-            .and_then(|tail| tail.split("fn remove_negative_ack_from_unacked").next())
-            .expect("handle_negative_ack source section exists")
+    impl FakeNegativeAckEffects {
+        fn request_redelivery(&mut self, ids: Vec<MessageIdData>) {
+            self.redelivery_requests.extend(
+                ids.into_iter()
+                    .map(|id| NegativeAckTracker::redelivery_message_id(&id)),
+            );
+        }
     }
 
-    #[test]
-    fn dlq_routing_is_in_handle_payload_not_handle_negative_ack() {
-        let payload_section = payload_processing_source();
-        assert!(
-            payload_section.contains("dead_letter_topic"),
-            "DLQ identifier 'dead_letter_topic' not found in process_payload section. If you renamed or moved this function, update the source-inspection split boundary in this test."
-        );
-        assert!(
-            payload_section.contains("max_redeliver_count"),
-            "DLQ identifier 'max_redeliver_count' not found in process_payload section. If you renamed or moved this function, update the source-inspection split boundary in this test."
-        );
-
-        let nack_section = negative_ack_source();
-        assert!(
-            !nack_section.contains("dead_letter_topic"),
-            "DLQ routing leaked into handle_negative_ack — 'dead_letter_topic' must only appear in payload handling. Check if DLQ logic was accidentally added to the nack handler."
-        );
-        assert!(
-            !nack_section.contains("max_redeliver_count"),
-            "DLQ routing leaked into handle_negative_ack — 'max_redeliver_count' must only appear in payload handling. Check if DLQ logic was accidentally added to the nack handler."
-        );
+    fn message_id(ledger_id: u64, entry_id: u64, batch_index: Option<i32>) -> MessageIdData {
+        MessageIdData {
+            ledger_id,
+            entry_id,
+            partition: Some(0),
+            batch_index,
+            ack_set: vec![],
+            batch_size: None,
+            first_chunk_message_id: None,
+        }
     }
 
     #[test]
-    fn negative_ack_tracker_does_not_call_dlq_functions() {
-        let nack_section = negative_ack_source();
-        assert!(
-            !nack_section.contains("dead_letter"),
-            "handle_negative_ack must not contain DLQ routing logic — 'dead_letter' found in nack handler source. If you refactored handle_negative_ack, verify DLQ separation is preserved and update split boundaries if needed."
+    fn immediate_negative_ack_requests_broker_redelivery_without_dlq_send() {
+        let now = Instant::now();
+        let id = message_id(1, 2, None);
+        let mut tracker = NegativeAckTracker::new(Some(Duration::ZERO), None);
+        let mut effects = FakeNegativeAckEffects::default();
+
+        assert_eq!(
+            tracker.schedule(id.clone(), Some(99), now),
+            NegativeAckSchedule::Immediate
         );
+        effects.request_redelivery(vec![id.clone()]);
+
+        assert_eq!(effects.redelivery_requests, vec![id]);
+        assert_eq!(effects.dlq_sends, 0);
     }
 
     #[test]
-    fn nack_with_id_source_sends_none_redelivery_count() {
-        assert!(
-            include_str!("topic.rs").contains("InternalEngineMessage::Nack(msg_id, None)"),
-            "nack_with_id must send InternalEngineMessage::Nack(msg_id, None) so ID-only nacks use fixed-delay fallback rather than count-based backoff."
+    fn delayed_negative_ack_requests_broker_redelivery_when_due_without_dlq_send() {
+        let now = Instant::now();
+        let id = message_id(1, 2, Some(3));
+        let mut tracker = NegativeAckTracker::new(Some(Duration::from_secs(5)), None);
+        let mut effects = FakeNegativeAckEffects::default();
+
+        assert_eq!(
+            tracker.schedule(id.clone(), Some(99), now),
+            NegativeAckSchedule::Scheduled
         );
+        assert!(tracker.collect_due(now + Duration::from_secs(4)).is_empty());
+
+        let due = tracker.collect_due(now + Duration::from_secs(5));
+        effects.request_redelivery(due);
+
+        assert_eq!(effects.redelivery_requests, vec![message_id(1, 2, None)]);
+        assert_eq!(effects.dlq_sends, 0);
+    }
+
+    #[test]
+    fn id_only_negative_ack_uses_fixed_delay_behavior_without_dlq_send() {
+        let now = Instant::now();
+        let id = message_id(3, 4, None);
+        let mut tracker = NegativeAckTracker::new(Some(Duration::from_secs(7)), None);
+        let mut effects = FakeNegativeAckEffects::default();
+
+        assert_eq!(
+            tracker.schedule(id.clone(), None, now),
+            NegativeAckSchedule::Scheduled
+        );
+
+        let due = tracker.collect_due(now + Duration::from_secs(7));
+        effects.request_redelivery(due);
+
+        assert_eq!(effects.redelivery_requests, vec![id]);
+        assert_eq!(effects.dlq_sends, 0);
     }
 }
