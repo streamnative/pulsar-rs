@@ -14,7 +14,8 @@ Features:
 - Automatic reconnection with exponential back off;
 - Message batching;
 - Compression with LZ4, zlib, zstd or Snappy (can be deactivated with Cargo features);
-- Telemetry using [tracing](https://github.com/tokio-rs/tracing) crate (can be activated with Cargo features).
+- Telemetry using [tracing](https://github.com/tokio-rs/tracing) crate (can be activated with Cargo features);
+- Configurable negative-acknowledgment redelivery delay with optional exponential backoff;
 
 ## Getting Started
 
@@ -31,6 +32,13 @@ Try out [examples](examples):
 - [producer](examples/producer.rs)
 - [consumer](examples/consumer.rs)
 - [reader](examples/reader.rs)
+- [negative_ack](examples/negative_ack.rs)
+
+## Negative Acknowledgment Delay
+
+The default negative-ack redelivery delay changed from immediate redelivery to 60 seconds, matching Go/Java client behavior. Consumers that relied on immediate redelivery can add `.with_nack_redelivery_delay(Duration::ZERO)` to preserve previous behavior.
+
+See the [negative_ack example](examples/negative_ack.rs) and [`ConsumerBuilder::with_nack_redelivery_delay`](https://docs.rs/pulsar/latest/pulsar/struct.ConsumerBuilder.html#method.with_nack_redelivery_delay) for configuration details.
 
 ## Project Maintainers
 
