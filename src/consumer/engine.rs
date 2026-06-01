@@ -50,6 +50,13 @@ trait ConsumerEngineEffects {
         ids: Vec<MessageIdData>,
     ) -> Result<(), ConnectionError>;
 
+    async fn send_ack(
+        &mut self,
+        consumer_id: u64,
+        ids: Vec<MessageIdData>,
+        cumulative: bool,
+    ) -> Result<(), ConnectionError>;
+
     async fn send_dead_letter(&mut self, topic: &str, message: Message) -> Result<(), Error>;
 }
 
@@ -68,6 +75,18 @@ impl<Exe: Executor> ConsumerEngineEffects for BrokerConsumerEngineEffects<Exe> {
         self.connection
             .sender()
             .send_redeliver_unacknowleged_messages(consumer_id, ids)
+            .await
+    }
+
+    async fn send_ack(
+        &mut self,
+        consumer_id: u64,
+        ids: Vec<MessageIdData>,
+        cumulative: bool,
+    ) -> Result<(), ConnectionError> {
+        self.connection
+            .sender()
+            .send_ack(consumer_id, ids, cumulative)
             .await
     }
 
@@ -690,32 +709,55 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn ack(&mut self, message_id: MessageIdData, cumulative: bool) {
-        let res = self
-            .connection
-            .sender()
-            .send_ack(self.id, vec![message_id.clone()], cumulative)
-            .await;
+        let mut effects = BrokerConsumerEngineEffects {
+            client: self.client.clone(),
+            connection: self.connection.clone(),
+        };
 
-        match res {
+        match Self::send_ack_and_clean_local_state(
+            &mut effects,
+            self.id,
+            &mut self.unacked_messages,
+            self.negative_ack_tracker.as_mut(),
+            message_id,
+            cumulative,
+        )
+        .await
+        {
             Ok(()) => {
-                Self::remove_ack_from_unacked_messages(
-                    &mut self.unacked_messages,
-                    &message_id,
-                    cumulative,
-                );
-                if let Some(tracker) = self.negative_ack_tracker.as_mut() {
-                    if cumulative {
-                        tracker.cancel_cumulative_ack(&message_id);
-                    } else {
-                        tracker.cancel_ack(&message_id);
-                    }
-                }
                 self.stop_negative_ack_ticker_if_idle();
             }
             Err(e) => {
                 error!("ack error: {:?}", e);
             }
         }
+    }
+
+    async fn send_ack_and_clean_local_state<E>(
+        effects: &mut E,
+        consumer_id: u64,
+        unacked_messages: &mut HashMap<MessageIdData, Instant>,
+        negative_ack_tracker: Option<&mut NegativeAckTracker>,
+        message_id: MessageIdData,
+        cumulative: bool,
+    ) -> Result<(), ConnectionError>
+    where
+        E: ConsumerEngineEffects + ?Sized,
+    {
+        effects
+            .send_ack(consumer_id, vec![message_id.clone()], cumulative)
+            .await?;
+
+        Self::remove_ack_from_unacked_messages(unacked_messages, &message_id, cumulative);
+        if let Some(tracker) = negative_ack_tracker {
+            if cumulative {
+                tracker.cancel_cumulative_ack(&message_id);
+            } else {
+                tracker.cancel_ack(&message_id);
+            }
+        }
+
+        Ok(())
     }
 
     fn remove_ack_from_unacked_messages(
@@ -1255,25 +1297,57 @@ mod tests {
 
     #[test]
     fn ack_cleans_local_state_only_after_broker_ack_succeeds() {
-        let source = include_str!("engine.rs");
-        let ack_source = source
-            .split("async fn ack")
-            .nth(1)
-            .and_then(|tail| tail.split("fn remove_ack_from_unacked_messages").next())
-            .expect("ack source section exists");
+        let now = Instant::now();
+        let id = message_id(1, 2, None);
+        let mut unacked_messages = HashMap::from([(id.clone(), now)]);
+        let mut tracker = NegativeAckTracker::new(Some(Duration::from_secs(5)), None);
+        assert_eq!(
+            tracker.schedule(id.clone(), Some(1), now),
+            NegativeAckSchedule::Scheduled
+        );
+        let mut failing_effects = FakeNegativeAckEffects {
+            fail_ack: true,
+            ..FakeNegativeAckEffects::default()
+        };
 
-        let send_ack_pos = ack_source.find("send_ack").expect("ack sends broker ack");
-        let ok_pos = ack_source.find("Ok(()) =>").expect("ack handles success");
-        let cleanup_pos = ack_source
-            .find("Self::remove_ack_from_unacked_messages")
-            .expect("ack cleans unacked messages");
-        let cancel_pos = ack_source
-            .find("tracker.cancel_")
-            .expect("ack cancels negative ack tracker state");
+        let result = block_on(
+            ConsumerEngine::<crate::executor::TokioExecutor>::send_ack_and_clean_local_state(
+                &mut failing_effects,
+                7,
+                &mut unacked_messages,
+                Some(&mut tracker),
+                id.clone(),
+                false,
+            ),
+        );
 
-        assert!(send_ack_pos < ok_pos);
-        assert!(ok_pos < cleanup_pos);
-        assert!(ok_pos < cancel_pos);
+        assert!(matches!(result, Err(ConnectionError::Disconnected)));
+        assert_eq!(
+            failing_effects.ack_requests,
+            vec![(vec![id.clone()], false)]
+        );
+        assert!(unacked_messages.contains_key(&id));
+        assert!(tracker.next_due_time().is_some());
+
+        let mut successful_effects = FakeNegativeAckEffects::default();
+        block_on(
+            ConsumerEngine::<crate::executor::TokioExecutor>::send_ack_and_clean_local_state(
+                &mut successful_effects,
+                7,
+                &mut unacked_messages,
+                Some(&mut tracker),
+                id.clone(),
+                false,
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            successful_effects.ack_requests,
+            vec![(vec![id.clone()], false)]
+        );
+        assert!(!unacked_messages.contains_key(&id));
+        assert!(tracker.next_due_time().is_none());
     }
 
     #[test]
@@ -1329,8 +1403,10 @@ mod tests {
     #[derive(Default)]
     struct FakeNegativeAckEffects {
         redelivery_requests: Vec<MessageIdData>,
+        ack_requests: Vec<(Vec<MessageIdData>, bool)>,
         dlq_sends: usize,
         fail_redelivery: bool,
+        fail_ack: bool,
     }
 
     #[async_trait::async_trait]
@@ -1342,6 +1418,20 @@ mod tests {
         ) -> Result<(), ConnectionError> {
             self.redelivery_requests.extend(ids);
             if self.fail_redelivery {
+                Err(ConnectionError::Disconnected)
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn send_ack(
+            &mut self,
+            _consumer_id: u64,
+            ids: Vec<MessageIdData>,
+            cumulative: bool,
+        ) -> Result<(), ConnectionError> {
+            self.ack_requests.push((ids, cumulative));
+            if self.fail_ack {
                 Err(ConnectionError::Disconnected)
             } else {
                 Ok(())
