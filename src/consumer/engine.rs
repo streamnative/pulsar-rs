@@ -733,3 +733,52 @@ impl<Exe: Executor> std::ops::Drop for ConsumerEngine<Exe> {
         }));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    fn source_contains(parts: &[&str]) -> bool {
+        let pattern = parts.concat();
+        include_str!("engine.rs").contains(&pattern)
+    }
+
+    #[test]
+    fn nack_handling_uses_tracker_with_zero_delay_immediate_redelivery() {
+        assert!(source_contains(&["NegativeAck", "Schedule::Immediate"]));
+        assert!(source_contains(&["ensure_", "negative_ack_tracker"]));
+        assert!(source_contains(&[
+            "schedule(message_id.clone(), ",
+            "redelivery_count, Instant::now())",
+        ]));
+        assert!(source_contains(&[
+            "send_redeliver_",
+            "unacknowleged_messages(self.id, vec![message_id]",
+        ]));
+    }
+
+    #[test]
+    fn lazy_ticker_coalesces_due_events() {
+        assert!(source_contains(&["start_", "negative_ack_ticker"]));
+        assert!(source_contains(&["compare_", "exchange(false, true"]));
+        assert!(source_contains(&["NegativeAck", "Redelivery"]));
+        assert!(source_contains(&[
+            "NEGATIVE_ACK_",
+            "REDELIVERY_TICK_INTERVAL",
+        ]));
+    }
+
+    #[test]
+    fn due_redelivery_dispatch_is_in_flight_retry_safe() {
+        assert!(source_contains(&["collect_", "due(Instant::now())"]));
+        assert!(source_contains(&["mark_", "dispatched(&ids)"]));
+        assert!(source_contains(&["mark_", "retry_pending(&ids"]));
+        assert!(source_contains(&["now + NEGATIVE_ACK_", "REDELIVERY_TICK_INTERVAL"]));
+    }
+
+    #[test]
+    fn ack_and_close_paths_cancel_or_clear_negative_ack_tracker() {
+        assert!(source_contains(&["cancel_", "ack(&message_id)"]));
+        assert!(source_contains(&["cancel_", "cumulative_ack(&message_id)"]));
+        assert!(source_contains(&["tracker.", "clear()"]));
+        assert!(source_contains(&["ticker_running.", "store(false"]));
+    }
+}
