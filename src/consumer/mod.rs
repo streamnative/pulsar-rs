@@ -900,6 +900,7 @@ mod tests {
             .with_subscription("nack")
             .with_subscription_type(SubType::Shared)
             .with_dead_letter_policy(dead_letter_policy)
+            .with_nack_redelivery_delay(Duration::from_millis(1))
             .build()
             .await
             .unwrap();
@@ -1019,6 +1020,7 @@ mod tests {
             .with_subscription("nack")
             .with_subscription_type(SubType::Shared)
             .with_dead_letter_policy(dead_letter_policy)
+            .with_nack_redelivery_delay(Duration::from_millis(1))
             .build()
             .await
             .unwrap();
