@@ -179,6 +179,7 @@ impl NegativeAckTracker {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn pending_len(&self) -> usize {
         self.entries
             .values()
@@ -186,6 +187,7 @@ impl NegativeAckTracker {
             .count()
     }
 
+    #[cfg(test)]
     pub(crate) fn in_flight_len(&self) -> usize {
         self.entries
             .values()
@@ -197,6 +199,7 @@ impl NegativeAckTracker {
         self.entries.is_empty()
     }
 
+    #[cfg(test)]
     pub(crate) fn next_due_time(&self) -> Option<Instant> {
         self.entries
             .values()
