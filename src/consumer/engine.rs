@@ -978,4 +978,17 @@ mod tests {
         assert!(source_contains(&["tracker.", "clear()"]));
         assert!(source_contains(&["ticker_running.", "store(false"]));
     }
+
+    #[test]
+    fn reconnect_preserves_negative_ack_tracker_state() {
+        let source = include_str!("engine.rs");
+        let reconnect_source = source
+            .split("async fn reconnect")
+            .nth(1)
+            .and_then(|tail| tail.split("fn debug_format").next())
+            .expect("reconnect source section exists");
+
+        assert!(!reconnect_source.contains("negative_ack_tracker"));
+        assert!(!reconnect_source.contains("tracker.clear()"));
+    }
 }
