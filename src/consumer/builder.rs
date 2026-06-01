@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use futures::{future::try_join_all, StreamExt};
@@ -42,7 +42,11 @@ pub struct ConsumerBuilder<Exe: Executor> {
 }
 
 fn check_nack_delay_duration(delay: Duration) -> Result<(), Error> {
-    if delay.as_millis() > u64::MAX as u128 {
+    if delay.as_millis() >= u64::MAX as u128 {
+        return Err(Error::Custom("delay duration is too large".to_string()));
+    }
+
+    if Instant::now().checked_add(delay).is_none() {
         return Err(Error::Custom("delay duration is too large".to_string()));
     }
 
@@ -421,6 +425,13 @@ mod tests {
     #[test]
     fn test_nack_delay_validation_oversized() {
         let result = check_nack_delay_duration(Duration::MAX);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_nack_delay_validation_rejects_unrepresentable_instant_delay() {
+        let result = check_nack_delay_duration(Duration::from_millis(u64::MAX));
 
         assert!(result.is_err());
     }
