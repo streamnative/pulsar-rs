@@ -89,4 +89,44 @@ mod tests {
             _ => panic!("expected nack engine message"),
         }
     }
+
+    #[test]
+    fn public_nack_engine_message_shape_stays_id_only() {
+        let message = EngineMessage::<crate::executor::TokioExecutor>::Nack(message_id());
+
+        match message {
+            EngineMessage::Nack(_) => {}
+            _ => panic!("expected public nack engine message"),
+        }
+    }
+
+    #[test]
+    fn internal_engine_message_supports_private_negative_ack_due_event() {
+        let message = InternalEngineMessage::<crate::executor::TokioExecutor>::NegativeAckRedelivery;
+
+        match message {
+            InternalEngineMessage::NegativeAckRedelivery => {}
+            _ => panic!("expected private negative ack redelivery event"),
+        }
+    }
+
+    #[test]
+    fn topic_consumer_passes_nack_config_to_consumer_engine_new() {
+        let source = include_str!("topic.rs");
+
+        assert!(!source.contains("_nack_redelivery_delay"));
+        assert!(!source.contains("_negative_ack_backoff"));
+        assert!(source.contains("nack_redelivery_delay,"));
+        assert!(source.contains("negative_ack_backoff,"));
+        assert!(source.contains("ConsumerEngine::new("));
+    }
+
+    #[test]
+    fn reader_and_multi_topic_consumers_keep_topic_consumer_construction_path() {
+        let reader_source = include_str!("../reader.rs");
+        let multi_source = include_str!("multi.rs");
+
+        assert!(reader_source.contains("TopicConsumer::new"));
+        assert!(multi_source.contains("TopicConsumer::new"));
+    }
 }
