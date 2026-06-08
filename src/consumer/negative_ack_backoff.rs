@@ -9,7 +9,7 @@ const MULTIPLIER_MUST_BE_FINITE: &str = "multiplier must be finite";
 const DELAY_DURATION_TOO_LARGE: &str = "delay duration is too large";
 
 /// Policy for computing a negative-acknowledgment redelivery delay from a redelivery count.
-pub trait NegativeAckBackoff: Send + Sync + std::fmt::Debug {
+pub trait NegativeAckBackoff: Send + Sync {
     /// Returns the delay to use for the provided redelivery count.
     fn next(&self, redelivery_count: u32) -> Duration;
 }
@@ -250,7 +250,6 @@ mod tests {
 
     #[test]
     fn custom_negative_ack_backoff_can_be_implemented_without_engine_dependencies() {
-        #[derive(Debug)]
         struct FixedBackoff(Duration);
 
         impl NegativeAckBackoff for FixedBackoff {

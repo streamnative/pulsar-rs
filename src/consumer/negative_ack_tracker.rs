@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeSet, HashMap},
+    fmt,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -23,11 +24,20 @@ pub(crate) enum NegativeAckDispatchState {
     InFlight,
 }
 
-#[derive(Debug)]
 pub(crate) struct NegativeAckTracker {
     fixed_delay: Duration,
     backoff: Option<Arc<dyn NegativeAckBackoff + Send + Sync>>,
     entries: HashMap<NormalizedMessageId, PendingNegativeAck>,
+}
+
+impl fmt::Debug for NegativeAckTracker {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NegativeAckTracker")
+            .field("fixed_delay", &self.fixed_delay)
+            .field("entries", &self.entries)
+            .field("has_backoff", &self.backoff.is_some())
+            .finish()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -332,7 +342,6 @@ impl NegativeAckTracker {
 mod tests {
     use super::*;
 
-    #[derive(Debug)]
     struct FixedBackoff(Duration);
 
     impl NegativeAckBackoff for FixedBackoff {

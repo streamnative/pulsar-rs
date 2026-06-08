@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{fmt, sync::Arc, time::Duration};
 
 use crate::{
     consumer::{
@@ -8,7 +8,7 @@ use crate::{
 };
 
 /// the complete configuration of a consumer
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct ConsumerConfig {
     /// subscription name
     pub(crate) subscription: String,
@@ -34,4 +34,27 @@ pub struct ConsumerConfig {
     pub(crate) nack_redelivery_delay: Option<Duration>,
     /// negative-ack redelivery backoff policy
     pub(crate) negative_ack_backoff: Option<Arc<dyn NegativeAckBackoff + Send + Sync>>,
+}
+
+impl fmt::Debug for ConsumerConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConsumerConfig")
+            .field("subscription", &self.subscription)
+            .field("sub_type", &self.sub_type)
+            .field("batch_size", &self.batch_size)
+            .field("consumer_name", &self.consumer_name)
+            .field("consumer_id", &self.consumer_id)
+            .field(
+                "unacked_message_redelivery_delay",
+                &self.unacked_message_redelivery_delay,
+            )
+            .field("options", &self.options)
+            .field("dead_letter_policy", &self.dead_letter_policy)
+            .field("nack_redelivery_delay", &self.nack_redelivery_delay)
+            .field(
+                "negative_ack_backoff",
+                &self.negative_ack_backoff.as_ref().map(|_| "configured"),
+            )
+            .finish()
+    }
 }
