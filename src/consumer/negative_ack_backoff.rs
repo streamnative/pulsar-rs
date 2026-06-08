@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::Error;
 
@@ -141,7 +141,7 @@ impl MultiplierRedeliveryBackoffBuilder {
 }
 
 fn validate_delay_duration(delay: Duration) -> Result<(), Error> {
-    if delay.as_millis() > u64::MAX as u128 {
+    if delay.as_millis() >= u64::MAX as u128 || Instant::now().checked_add(delay).is_none() {
         return Err(Error::Custom(DELAY_DURATION_TOO_LARGE.to_string()));
     }
 
@@ -243,6 +243,16 @@ mod tests {
         let result = MultiplierRedeliveryBackoff::builder()
             .min_delay(oversized)
             .max_delay(oversized)
+            .build();
+
+        assert_custom_error(result, DELAY_DURATION_TOO_LARGE);
+    }
+
+    #[test]
+    fn validation_rejects_unschedulable_max_millis_duration() {
+        let result = MultiplierRedeliveryBackoff::builder()
+            .min_delay(Duration::from_millis(u64::MAX))
+            .max_delay(Duration::from_millis(u64::MAX))
             .build();
 
         assert_custom_error(result, DELAY_DURATION_TOO_LARGE);

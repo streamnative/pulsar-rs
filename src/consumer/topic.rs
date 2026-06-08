@@ -231,7 +231,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         self.engine_tx
             .send(InternalEngineMessage::Nack(
                 msg.message_id().clone(),
-                msg.broker_redelivery_count(),
+                Some(msg.redelivery_count()),
             ))
             .await?;
         Ok(())
@@ -327,6 +327,95 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         let conn = self.connection().await?;
         let schema_response = conn.sender().get_schema(&self.topic, version).await?;
         Ok(schema_response.schema)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures::{channel::mpsc, executor::block_on, StreamExt};
+
+    use super::*;
+    use crate::{
+        executor::TokioExecutor,
+        message::{proto::MessageIdData, Metadata},
+    };
+
+    fn message_id() -> MessageIdData {
+        MessageIdData {
+            ledger_id: 1,
+            entry_id: 2,
+            partition: None,
+            batch_index: None,
+            ack_set: vec![],
+            batch_size: None,
+            first_chunk_message_id: None,
+        }
+    }
+
+    fn message(redelivery_count: Option<u32>) -> Message<Vec<u8>> {
+        Message::new_with_redelivery_count(
+            "persistent://public/default/topic",
+            MessageData {
+                id: message_id(),
+                batch_size: None,
+            },
+            Payload {
+                metadata: Metadata::default(),
+                data: vec![],
+            },
+            redelivery_count,
+        )
+    }
+
+    fn topic_consumer() -> (
+        TopicConsumer<Vec<u8>, TokioExecutor>,
+        mpsc::UnboundedReceiver<InternalEngineMessage<TokioExecutor>>,
+    ) {
+        let (_messages_tx, messages_rx) = mpsc::channel(1);
+        let (engine_tx, engine_rx) = mpsc::unbounded();
+
+        (
+            TopicConsumer {
+                consumer_id: 1,
+                config: ConsumerConfig::default(),
+                topic: "persistent://public/default/topic".to_string(),
+                messages: Box::pin(messages_rx),
+                engine_tx,
+                data_type: PhantomData,
+                dead_letter_policy: None,
+                last_message_received: None,
+                messages_received: 0,
+            },
+            engine_rx,
+        )
+    }
+
+    #[test]
+    fn nack_first_delivery_uses_zero_redelivery_count_for_backoff() {
+        let (mut consumer, mut engine_rx) = topic_consumer();
+
+        block_on(consumer.nack(&message(None))).unwrap();
+
+        match block_on(engine_rx.next()).expect("nack event") {
+            InternalEngineMessage::Nack(_, redelivery_count) => {
+                assert_eq!(redelivery_count, Some(0));
+            }
+            _ => panic!("expected nack engine message"),
+        }
+    }
+
+    #[test]
+    fn nack_redelivery_uses_broker_redelivery_count_for_backoff() {
+        let (mut consumer, mut engine_rx) = topic_consumer();
+
+        block_on(consumer.nack(&message(Some(3)))).unwrap();
+
+        match block_on(engine_rx.next()).expect("nack event") {
+            InternalEngineMessage::Nack(_, redelivery_count) => {
+                assert_eq!(redelivery_count, Some(3));
+            }
+            _ => panic!("expected nack engine message"),
+        }
     }
 }
 
