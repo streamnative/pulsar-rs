@@ -23,6 +23,11 @@ use crate::{
     BrokerAddress, Consumer, DeserializeMessage, Error, Executor, Pulsar,
 };
 
+const NACK_REDELIVERY_DELAY_EXCEEDS_MILLISECONDS_RANGE: &str =
+    "negative-ack redelivery delay is too large: it must be less than u64::MAX milliseconds";
+const NACK_REDELIVERY_DELAY_EXCEEDS_INSTANT_RANGE: &str =
+    "negative-ack redelivery delay is too large to schedule from the current instant";
+
 /// Builder structure for consumers
 ///
 /// This is the main way to create a [Consumer] or a [Reader]
@@ -47,11 +52,15 @@ pub struct ConsumerBuilder<Exe: Executor> {
 
 fn check_nack_delay_duration(delay: Duration) -> Result<(), Error> {
     if delay.as_millis() >= u64::MAX as u128 {
-        return Err(Error::Custom("delay duration is too large".to_string()));
+        return Err(Error::Custom(format!(
+            "{NACK_REDELIVERY_DELAY_EXCEEDS_MILLISECONDS_RANGE}: {delay:?}"
+        )));
     }
 
     if Instant::now().checked_add(delay).is_none() {
-        return Err(Error::Custom("delay duration is too large".to_string()));
+        return Err(Error::Custom(format!(
+            "{NACK_REDELIVERY_DELAY_EXCEEDS_INSTANT_RANGE}: {delay:?}"
+        )));
     }
 
     Ok(())
@@ -470,16 +479,42 @@ mod tests {
 
     #[test]
     fn test_nack_delay_validation_oversized() {
-        let result = check_nack_delay_duration(Duration::MAX);
+        let delay = Duration::MAX;
+        let result = check_nack_delay_duration(delay);
 
-        assert!(result.is_err());
+        assert_nack_delay_error(
+            result,
+            NACK_REDELIVERY_DELAY_EXCEEDS_MILLISECONDS_RANGE,
+            delay,
+        );
     }
 
     #[test]
     fn test_nack_delay_validation_rejects_unrepresentable_instant_delay() {
-        let result = check_nack_delay_duration(Duration::from_millis(u64::MAX));
+        let delay = Duration::from_millis(u64::MAX);
+        let result = check_nack_delay_duration(delay);
 
-        assert!(result.is_err());
+        assert_nack_delay_error(
+            result,
+            NACK_REDELIVERY_DELAY_EXCEEDS_MILLISECONDS_RANGE,
+            delay,
+        );
+    }
+
+    fn assert_nack_delay_error(result: Result<(), Error>, expected_prefix: &str, delay: Duration) {
+        match result {
+            Err(Error::Custom(message)) => {
+                assert!(
+                    message.starts_with(expected_prefix),
+                    "expected error to start with {expected_prefix:?}, got {message:?}"
+                );
+                assert!(
+                    message.contains(&format!("{delay:?}")),
+                    "expected error to include the rejected Duration, got {message:?}"
+                );
+            }
+            other => panic!("expected Error::Custom({expected_prefix:?}), got {other:?}"),
+        }
     }
 
     #[test]
