@@ -61,10 +61,6 @@ impl<T> Message<T> {
         self.redelivery_count.unwrap_or_default()
     }
 
-    pub(crate) fn broker_redelivery_count(&self) -> Option<u32> {
-        self.redelivery_count
-    }
-
     /// Get message key (partition key)
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn key(&self) -> Option<String> {
@@ -114,7 +110,7 @@ mod tests {
             Message::<()>::new_with_redelivery_count("test-topic", message_id, payload(), Some(7));
 
         assert_eq!(msg.redelivery_count(), 7);
-        assert_eq!(msg.broker_redelivery_count(), Some(7));
+        assert_eq!(msg.redelivery_count, Some(7));
     }
 
     #[test]
@@ -126,7 +122,7 @@ mod tests {
         let msg = Message::<()>::new("test-topic", message_id, payload());
 
         assert_eq!(msg.redelivery_count(), 0);
-        assert_eq!(msg.broker_redelivery_count(), None);
+        assert_eq!(msg.redelivery_count, None);
     }
 
     #[test]
@@ -139,6 +135,6 @@ mod tests {
             Message::<()>::new_with_redelivery_count("test-topic", message_id, payload(), Some(0));
 
         assert_eq!(msg.redelivery_count(), 0);
-        assert_eq!(msg.broker_redelivery_count(), Some(0));
+        assert_eq!(msg.redelivery_count, Some(0));
     }
 }
