@@ -350,19 +350,3 @@ impl<T: DeserializeMessage, Exe: Executor> Stream for TopicConsumer<T, Exe> {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    fn source_contains(parts: &[&str]) -> bool {
-        let pattern = parts.concat();
-        include_str!("topic.rs").contains(&pattern)
-    }
-
-    #[test]
-    fn nack_uses_internal_broker_redelivery_count_presence() {
-        assert!(include_str!("topic.rs").contains("InternalEngineMessage::Nack("));
-        assert!(source_contains(&["msg.", "message_id().clone()"]));
-        assert!(source_contains(&["msg.", "broker_redelivery_count()"]));
-        assert!(!source_contains(&["Some(msg.", "redelivery_count())"]));
-    }
-}

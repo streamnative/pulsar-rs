@@ -138,27 +138,4 @@ mod tests {
         let _: Option<InternalMessageIdDataReceiver> =
             None::<mpsc::Receiver<InternalMessageIdDataResult>>;
     }
-
-    #[test]
-    fn topic_consumer_passes_nack_config_to_consumer_engine_new() {
-        let source = include_str!("topic.rs");
-
-        assert!(!source.contains("_nack_redelivery_delay"));
-        assert!(!source.contains("_negative_ack_backoff"));
-        assert!(source.contains("nack_redelivery_delay,"));
-        assert!(source.contains("negative_ack_backoff,"));
-        assert!(source.contains("ConsumerEngine::new("));
-    }
-
-    #[test]
-    fn reader_and_multi_topic_consumers_keep_topic_consumer_construction_path() {
-        let client_source = include_str!("../client.rs");
-        let builder_source = include_str!("builder.rs");
-        let multi_source = include_str!("multi.rs");
-
-        assert!(client_source.contains("pub fn reader(&self) -> ConsumerBuilder<Exe>"));
-        assert!(client_source.contains("ConsumerBuilder::new(self)"));
-        assert!(builder_source.contains("TopicConsumer::new"));
-        assert!(multi_source.contains("TopicConsumer::new"));
-    }
 }

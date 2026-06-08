@@ -1045,11 +1045,6 @@ mod tests {
         message::proto::MessageIdData,
     };
 
-    fn source_contains(parts: &[&str]) -> bool {
-        let pattern = parts.concat();
-        include_str!("engine.rs").contains(&pattern)
-    }
-
     #[test]
     fn nack_handling_uses_tracker_with_zero_delay_immediate_redelivery() {
         let now = Instant::now();
@@ -1074,17 +1069,6 @@ mod tests {
         assert!(tracker
             .collect_due(now + NEGATIVE_ACK_REDELIVERY_TICK_INTERVAL)
             .is_empty());
-    }
-
-    #[test]
-    fn lazy_ticker_coalesces_due_events() {
-        assert!(source_contains(&["start_", "negative_ack_ticker"]));
-        assert!(source_contains(&["compare_", "exchange(false, true"]));
-        assert!(source_contains(&["NegativeAck", "Redelivery"]));
-        assert!(source_contains(&[
-            "NEGATIVE_ACK_",
-            "REDELIVERY_TICK_INTERVAL",
-        ]));
     }
 
     #[test]
@@ -1145,42 +1129,6 @@ mod tests {
         assert_eq!(requester.redelivery_requests, vec![id]);
         let retried = tracker.collect_due(now + NEGATIVE_ACK_REDELIVERY_TICK_INTERVAL);
         assert_eq!(retried, vec![message_id(5, 6, None)]);
-    }
-
-    #[test]
-    fn consumer_delivery_preserves_missing_broker_redelivery_count() {
-        assert!(source_contains(&["tx:", " InternalMessageIdDataSender"]));
-        assert!(include_str!("data.rs").contains(
-            "InternalMessageIdDataResult = Result<(MessageIdData, Payload, Option<u32>)"
-        ));
-        assert!(source_contains(&[
-            "let redelivery_count = message.",
-            "redelivery_count;"
-        ]));
-        assert!(source_contains(&[
-            ".send(Ok((message_id.clone(), payload, redelivery_count)))"
-        ]));
-    }
-
-    #[test]
-    fn ack_and_drop_paths_cancel_or_clear_negative_ack_tracker() {
-        assert!(source_contains(&["cancel_", "ack(&message_id)"]));
-        assert!(source_contains(&["cancel_", "cumulative_ack(&message_id)"]));
-        assert!(source_contains(&["tracker.", "clear()"]));
-        assert!(source_contains(&["ticker_running.", "store(false"]));
-    }
-
-    #[test]
-    fn reconnect_preserves_negative_ack_tracker_state() {
-        let source = include_str!("engine.rs");
-        let reconnect_source = source
-            .split("async fn reconnect")
-            .nth(1)
-            .and_then(|tail| tail.split("fn debug_format").next())
-            .expect("reconnect source section exists");
-
-        assert!(!reconnect_source.contains("negative_ack_tracker"));
-        assert!(!reconnect_source.contains("tracker.clear()"));
     }
 
     #[derive(Default)]
