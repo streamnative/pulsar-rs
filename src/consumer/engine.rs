@@ -166,7 +166,6 @@ pub struct ConsumerEngine<Exe: Executor> {
     negative_ack_due_event_pending: Arc<AtomicBool>,
     dead_letter_policy: Option<DeadLetterPolicy>,
     options: ConsumerOptions,
-    closed: bool,
 }
 
 impl<Exe: Executor> ConsumerEngine<Exe> {
@@ -214,7 +213,6 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             negative_ack_due_event_pending: Arc::new(AtomicBool::new(false)),
             dead_letter_policy,
             options,
-            closed: false,
         }
     }
 
@@ -454,18 +452,6 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                     );
                 });
                 true
-            }
-            Some(InternalEngineMessage::Close(sender)) => {
-                self.clear_negative_ack_state();
-                let res = self
-                    .connection
-                    .sender()
-                    .close_consumer(self.id)
-                    .await
-                    .map(|_| ());
-                self.closed = true;
-                let _ = sender.send(res);
-                false
             }
         }
     }
@@ -1135,10 +1121,6 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
 impl<Exe: Executor> std::ops::Drop for ConsumerEngine<Exe> {
     fn drop(&mut self) {
         self.clear_negative_ack_state();
-
-        if self.closed {
-            return;
-        }
 
         let conn = self.connection.clone();
         let id = self.id;

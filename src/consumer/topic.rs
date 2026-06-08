@@ -2,7 +2,7 @@ use std::{
     marker::PhantomData,
     pin::Pin,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
         Arc,
     },
     task::{Context, Poll},
@@ -39,7 +39,6 @@ pub struct TopicConsumer<T: DeserializeMessage, Exe: Executor> {
     topic: String,
     messages: Pin<Box<InternalMessageIdDataReceiver>>,
     engine_tx: mpsc::UnboundedSender<InternalEngineMessage<Exe>>,
-    unacked_redelivery_ticker_running: Option<Arc<AtomicBool>>,
     data_type: PhantomData<fn(Payload) -> T::Output>,
     pub(crate) dead_letter_policy: Option<DeadLetterPolicy>,
     pub(super) last_message_received: Option<DateTime<Utc>>,
@@ -89,17 +88,11 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
 
         let (engine_tx, engine_rx) = mpsc::unbounded();
 
-        let unacked_redelivery_ticker_running = if unacked_message_redelivery_delay.is_some() {
-            let ticker_running = Arc::new(AtomicBool::new(true));
-            let ticker_running_task = ticker_running.clone();
+        if unacked_message_redelivery_delay.is_some() {
             let mut redelivery_tx = engine_tx.clone();
             let mut interval = client.executor.interval(Duration::from_millis(500));
             let res = client.executor.spawn(Box::pin(async move {
                 while interval.next().await.is_some() {
-                    if !ticker_running_task.load(Ordering::SeqCst) {
-                        break;
-                    }
-
                     if redelivery_tx
                         .send(InternalEngineMessage::UnackedRedelivery)
                         .await
@@ -113,10 +106,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
             if res.is_err() {
                 return Err(Error::Executor);
             }
-            Some(ticker_running)
-        } else {
-            None
-        };
+        }
         let receiver_queue_size = options.receiver_queue_size.unwrap_or(1000);
         let (tx, rx) = mpsc::channel(receiver_queue_size as usize);
         let mut c = ConsumerEngine::new(
@@ -154,7 +144,6 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
             topic,
             messages: Box::pin(rx),
             engine_tx,
-            unacked_redelivery_ticker_running,
             data_type: PhantomData,
             dead_letter_policy,
             last_message_received: None,
@@ -284,22 +273,13 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn close(&mut self) -> Result<(), Error> {
-        let (resolver, response) = oneshot::channel();
-        self.stop_unacked_redelivery_ticker();
-        self.engine_tx
-            .send(InternalEngineMessage::Close(resolver))
-            .await
-            .map_err(ConsumerError::from)?;
-
-        response.await.map_err(|_| ConsumerError::Closed)??;
+        let consumer_id = self.consumer_id;
+        self.connection()
+            .await?
+            .sender()
+            .close_consumer(consumer_id)
+            .await?;
         Ok(())
-    }
-
-    fn stop_unacked_redelivery_ticker(&mut self) {
-        if let Some(ticker_running) = &self.unacked_redelivery_ticker_running {
-            ticker_running.store(false, Ordering::SeqCst);
-        }
-        self.unacked_redelivery_ticker_running = None;
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
@@ -350,12 +330,6 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
     }
 }
 
-impl<T: DeserializeMessage, Exe: Executor> Drop for TopicConsumer<T, Exe> {
-    fn drop(&mut self) {
-        self.stop_unacked_redelivery_ticker();
-    }
-}
-
 impl<T: DeserializeMessage, Exe: Executor> Stream for TopicConsumer<T, Exe> {
     type Item = Result<Message<T>, Error>;
 
@@ -390,28 +364,5 @@ mod tests {
         assert!(source_contains(&["msg.", "message_id().clone()"]));
         assert!(source_contains(&["msg.", "broker_redelivery_count()"]));
         assert!(!source_contains(&["Some(msg.", "redelivery_count())"]));
-    }
-
-    #[test]
-    fn drop_stops_unacked_redelivery_ticker_sender() {
-        assert!(source_contains(&[
-            "unacked_redelivery_ticker_running:",
-            " Option<Arc<AtomicBool>>"
-        ]));
-        let source = include_str!("topic.rs");
-        assert!(source.contains("while interval.next().await.is_some()"));
-        assert!(source.contains("if !ticker_running_task.load(Ordering::SeqCst)"));
-        assert!(!source_contains(&[
-            "while ticker_running_task.",
-            "load(Ordering::SeqCst) && interval.next().await.is_some()"
-        ]));
-        assert!(source_contains(&[
-            "impl<T: DeserializeMessage, Exe: Executor> Drop",
-            " for TopicConsumer<T, Exe>"
-        ]));
-        assert!(source_contains(&[
-            "self.",
-            "stop_unacked_redelivery_ticker()"
-        ]));
     }
 }
