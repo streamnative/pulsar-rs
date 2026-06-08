@@ -449,7 +449,7 @@ mod tests {
     ))]
     use tokio::time::timeout;
 
-    use super::{negative_ack_tracker::DEFAULT_NACK_REDELIVERY_DELAY, *};
+    use super::*;
     #[cfg(any(
         feature = "tokio-runtime",
         feature = "tokio-rustls-runtime-aws-lc-rs",
@@ -494,10 +494,6 @@ mod tests {
     }
 
     const DEFAULT_RECV_TIMEOUT: Duration = Duration::from_secs(5);
-
-    fn default_nack_redelivery_recv_timeout() -> Duration {
-        DEFAULT_NACK_REDELIVERY_DELAY + DEFAULT_RECV_TIMEOUT
-    }
 
     async fn recv_within<T>(
         c: &mut Consumer<T, TokioExecutor>,
@@ -895,6 +891,7 @@ mod tests {
             .with_subscription("nack")
             .with_subscription_type(SubType::Shared)
             .with_dead_letter_policy(dead_letter_policy)
+            .with_nack_redelivery_delay(Duration::from_millis(1))
             .build()
             .await
             .unwrap();
@@ -930,7 +927,7 @@ mod tests {
         // Nacking message to send it to DLQ
         consumer.nack(&msg).await.unwrap();
 
-        let dlq_msg = recv_within(&mut dlq_consumer, default_nack_redelivery_recv_timeout())
+        let dlq_msg = recv_within(&mut dlq_consumer, DEFAULT_RECV_TIMEOUT)
             .await
             .unwrap();
 
@@ -1014,6 +1011,7 @@ mod tests {
             .with_subscription("nack")
             .with_subscription_type(SubType::Shared)
             .with_dead_letter_policy(dead_letter_policy)
+            .with_nack_redelivery_delay(Duration::from_millis(1))
             .build()
             .await
             .unwrap();
@@ -1105,7 +1103,7 @@ mod tests {
             // Nacking message to send it to DLQ
             consumer.nack(&msg).await.unwrap();
 
-            let dlq_msg = recv_within(&mut dlq_consumer, default_nack_redelivery_recv_timeout())
+            let dlq_msg = recv_within(&mut dlq_consumer, DEFAULT_RECV_TIMEOUT)
                 .await
                 .unwrap();
             println!("got message: {:?}", dlq_msg.payload);
