@@ -8,8 +8,7 @@ use crate::{
     Error, Executor, Payload,
 };
 
-pub type MessageIdDataResult = Result<(MessageIdData, Payload, u32), Error>;
-pub type MessageIdDataReceiver = mpsc::Receiver<MessageIdDataResult>;
+pub type MessageIdDataReceiver = mpsc::Receiver<Result<(MessageIdData, Payload), Error>>;
 pub(crate) type InternalMessageIdDataResult = Result<(MessageIdData, Payload, Option<u32>), Error>;
 pub(crate) type InternalMessageIdDataSender = mpsc::Sender<InternalMessageIdDataResult>;
 pub(crate) type InternalMessageIdDataReceiver = mpsc::Receiver<InternalMessageIdDataResult>;
@@ -129,11 +128,10 @@ mod tests {
     }
 
     #[test]
-    fn public_receiver_alias_preserves_u32_redelivery_count_shape() {
-        type ExpectedPublicReceiver = mpsc::Receiver<Result<(MessageIdData, Payload, u32), Error>>;
+    fn public_receiver_alias_preserves_upstream_two_tuple_shape() {
+        type ExpectedPublicReceiver = mpsc::Receiver<Result<(MessageIdData, Payload), Error>>;
 
         let _: Option<ExpectedPublicReceiver> = None::<MessageIdDataReceiver>;
-        let _: Option<Result<(MessageIdData, Payload, u32), Error>> = None::<MessageIdDataResult>;
     }
 
     #[test]
