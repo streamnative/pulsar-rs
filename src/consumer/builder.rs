@@ -85,13 +85,6 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
         (topic, addr, config.clone_for_topic_consumer())
     }
 
-    fn should_use_single_topic_consumer(
-        consumer_count: usize,
-        topic_regex: &Option<Regex>,
-    ) -> bool {
-        consumer_count == 1 && topic_regex.is_none()
-    }
-
     /// Creates a new [ConsumerBuilder] from an existing client instance
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn new(pulsar: &Pulsar<Exe>) -> Self {
@@ -384,8 +377,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
             create_topic_consumers_with_factory(self.pulsar.clone(), specs, TopicConsumer::new)
                 .await?;
 
-        let consumer = if Self::should_use_single_topic_consumer(consumers.len(), &self.topic_regex)
-        {
+        let consumer = if consumers.len() == 1 {
             let consumer = consumers.into_iter().next().unwrap();
             InnerConsumer::Single(consumer)
         } else {
@@ -427,12 +419,6 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
     /// creates a [Reader] from this builder
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn into_reader<T: DeserializeMessage>(self) -> Result<Reader<T, Exe>, Error> {
-        if self.topic_regex.is_some() {
-            return Err(Error::Custom(
-                "Unable to create a reader - topic regex is not supported".to_string(),
-            ));
-        }
-
         // would this clone() consume too much memory?
         let (mut config, mut joined_topics) = self.clone().validate().await?;
 
@@ -445,18 +431,14 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
         warn!("Subscription Type for a reader is `Exclusive`. Resetting.");
         config.sub_type = SubType::Exclusive;
 
-        if joined_topics.len() != 1 {
+        if joined_topics.len() > 1 {
             return Err(Error::Custom(
-                "Unable to create a reader - exactly one topic is required".to_string(),
+                "Unable to create a reader - one topic partition max".to_string(),
             ));
         }
 
-        let (topic, addr) = joined_topics.pop().expect("len checked above");
-        let specs = vec![Self::topic_consumer_spec_for_reader(&config, topic, addr)];
-        let mut consumers =
-            create_topic_consumers_with_factory(self.pulsar.clone(), specs, TopicConsumer::new)
-                .await?;
-        let consumer = consumers.pop().expect("single reader topic checked above");
+        let (topic, addr) = joined_topics.pop().unwrap();
+        let consumer = TopicConsumer::new(self.pulsar.clone(), topic, addr, config.clone()).await?;
 
         Ok(Reader {
             consumer,
@@ -739,12 +721,4 @@ mod tests {
             .all(|topic_consumer_config| topic_consumer_config.consumer_id == Some(7)));
     }
 
-    #[test]
-    fn explicit_single_topic_with_topic_regex_uses_multi_topic_build_path() {
-        let topic_regex = Some(Regex::new("persistent://public/default/regex-.*").unwrap());
-
-        assert!(
-            !ConsumerBuilder::<TokioExecutor>::should_use_single_topic_consumer(1, &topic_regex)
-        );
-    }
 }
