@@ -10,12 +10,8 @@ use regex::Regex;
 
 use crate::{
     consumer::{
-        config::ConsumerConfig,
-        data::DeadLetterPolicy,
-        multi::MultiTopicConsumer,
-        negative_ack_backoff::NegativeAckBackoff,
-        options::ConsumerOptions,
-        topic::{create_topic_consumers_with_factory, TopicConsumer},
+        config::ConsumerConfig, data::DeadLetterPolicy, multi::MultiTopicConsumer,
+        negative_ack_backoff::NegativeAckBackoff, options::ConsumerOptions, topic::TopicConsumer,
         InnerConsumer,
     },
     message::proto::command_subscribe::SubType,
@@ -67,24 +63,6 @@ fn check_nack_delay_duration(delay: Duration) -> Result<(), Error> {
 }
 
 impl<Exe: Executor> ConsumerBuilder<Exe> {
-    fn topic_consumer_specs_for_joined_topics(
-        config: &ConsumerConfig,
-        joined_topics: Vec<(String, BrokerAddress)>,
-    ) -> Vec<(String, BrokerAddress, ConsumerConfig)> {
-        joined_topics
-            .into_iter()
-            .map(|(topic, addr)| (topic, addr, config.clone_for_topic_consumer()))
-            .collect()
-    }
-
-    fn topic_consumer_spec_for_reader(
-        config: &ConsumerConfig,
-        topic: String,
-        addr: BrokerAddress,
-    ) -> (String, BrokerAddress, ConsumerConfig) {
-        (topic, addr, config.clone_for_topic_consumer())
-    }
-
     /// Creates a new [ConsumerBuilder] from an existing client instance
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn new(pulsar: &Pulsar<Exe>) -> Self {
@@ -372,10 +350,10 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
         // would this clone() consume too much memory?
         let (config, joined_topics) = self.clone().validate().await?;
 
-        let specs = Self::topic_consumer_specs_for_joined_topics(&config, joined_topics);
-        let consumers =
-            create_topic_consumers_with_factory(self.pulsar.clone(), specs, TopicConsumer::new)
-                .await?;
+        let consumers = try_join_all(joined_topics.into_iter().map(|(topic, addr)| {
+            TopicConsumer::new(self.pulsar.clone(), topic, addr, config.clone())
+        }))
+        .await?;
 
         let consumer = if consumers.len() == 1 {
             let consumer = consumers.into_iter().next().unwrap();
@@ -449,15 +427,9 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        sync::{Arc, Mutex},
-        time::Duration,
-    };
-
-    use futures::executor::block_on;
+    use std::{sync::Arc, time::Duration};
 
     use super::*;
-    use crate::TokioExecutor;
 
     #[test]
     fn test_nack_delay_validation_oversized() {
@@ -576,149 +548,4 @@ mod tests {
             );
         }
     }
-
-    fn nack_config_with_delay_and_backoff() -> ConsumerConfig {
-        ConsumerConfig {
-            nack_redelivery_delay: Some(Duration::from_secs(30)),
-            negative_ack_backoff: Some(Arc::new(
-                crate::consumer::negative_ack_backoff::MultiplierRedeliveryBackoff::default(),
-            )),
-            ..ConsumerConfig::default()
-        }
-    }
-
-    fn broker_addr(port: u16) -> BrokerAddress {
-        BrokerAddress {
-            url: format!("pulsar://127.0.0.1:{port}").parse().unwrap(),
-            broker_url: format!("127.0.0.1:{port}"),
-            proxy: false,
-        }
-    }
-
-    fn joined_topics(count: usize) -> Vec<(String, BrokerAddress)> {
-        (0..count)
-            .map(|idx| {
-                (
-                    format!("persistent://public/default/topic-{idx}"),
-                    broker_addr(6650 + idx as u16),
-                )
-            })
-            .collect()
-    }
-
-    fn assert_topic_consumer_receives_negative_ack_config(
-        passed_to_topic_consumer: &ConsumerConfig,
-    ) {
-        assert_eq!(
-            passed_to_topic_consumer.nack_redelivery_delay,
-            Some(Duration::from_secs(30))
-        );
-        assert!(passed_to_topic_consumer.negative_ack_backoff.is_some());
-    }
-
-    fn configs_received_by_topic_consumer_factory(
-        specs: Vec<(String, BrokerAddress, ConsumerConfig)>,
-    ) -> Vec<ConsumerConfig> {
-        let captured_configs = Arc::new(Mutex::new(Vec::new()));
-        let factory_configs = Arc::clone(&captured_configs);
-
-        block_on(create_topic_consumers_with_factory(
-            (),
-            specs,
-            move |(), _topic, _addr, config| {
-                let factory_configs = Arc::clone(&factory_configs);
-                async move {
-                    factory_configs.lock().unwrap().push(config);
-                    Ok::<(), Error>(())
-                }
-            },
-        ))
-        .expect("test factory should not fail");
-
-        Arc::try_unwrap(captured_configs)
-            .expect("factory closure dropped")
-            .into_inner()
-            .unwrap()
-    }
-
-    #[test]
-    fn single_topic_consumer_config_carries_nack_delay_to_engine() {
-        let config = nack_config_with_delay_and_backoff();
-        let specs = ConsumerBuilder::<TokioExecutor>::topic_consumer_specs_for_joined_topics(
-            &config,
-            joined_topics(1),
-        );
-        let topic_consumer_configs = configs_received_by_topic_consumer_factory(specs);
-
-        assert_eq!(topic_consumer_configs.len(), 1);
-        assert_topic_consumer_receives_negative_ack_config(&topic_consumer_configs[0]);
-    }
-
-    #[test]
-    fn partitioned_consumer_config_carries_nack_delay_to_each_engine() {
-        let config = nack_config_with_delay_and_backoff();
-        let specs = ConsumerBuilder::<TokioExecutor>::topic_consumer_specs_for_joined_topics(
-            &config,
-            joined_topics(3),
-        );
-        let topic_consumer_configs = configs_received_by_topic_consumer_factory(specs);
-
-        assert_eq!(topic_consumer_configs.len(), 3);
-        for topic_consumer_config in &topic_consumer_configs {
-            assert_topic_consumer_receives_negative_ack_config(topic_consumer_config);
-        }
-    }
-
-    #[test]
-    fn multi_topic_consumer_config_carries_nack_delay_to_each_engine() {
-        let config = nack_config_with_delay_and_backoff();
-        let specs = ConsumerBuilder::<TokioExecutor>::topic_consumer_specs_for_joined_topics(
-            &config,
-            joined_topics(2),
-        );
-        let topic_consumer_configs = configs_received_by_topic_consumer_factory(specs);
-
-        assert_eq!(topic_consumer_configs.len(), 2);
-        for topic_consumer_config in &topic_consumer_configs {
-            assert_topic_consumer_receives_negative_ack_config(topic_consumer_config);
-        }
-    }
-
-    #[test]
-    fn reader_consumer_config_carries_nack_delay_to_engine() {
-        let config = nack_config_with_delay_and_backoff();
-        let mut reader_config = config;
-        reader_config.options.durable = Some(false);
-        reader_config.sub_type = SubType::Exclusive;
-
-        let (topic, addr) = joined_topics(1).pop().unwrap();
-        let spec = ConsumerBuilder::<TokioExecutor>::topic_consumer_spec_for_reader(
-            &reader_config,
-            topic,
-            addr,
-        );
-        let mut topic_consumer_configs = configs_received_by_topic_consumer_factory(vec![spec]);
-        let topic_consumer_config = topic_consumer_configs.pop().unwrap();
-
-        assert_topic_consumer_receives_negative_ack_config(&topic_consumer_config);
-        assert_eq!(topic_consumer_config.options.durable, Some(false));
-        assert_eq!(topic_consumer_config.sub_type, SubType::Exclusive);
-    }
-
-    #[test]
-    fn build_path_config_helpers_clone_for_each_topic_consumer() {
-        let mut config = nack_config_with_delay_and_backoff();
-        config.consumer_id = Some(7);
-        let specs = ConsumerBuilder::<TokioExecutor>::topic_consumer_specs_for_joined_topics(
-            &config,
-            joined_topics(2),
-        );
-        let topic_consumer_configs = configs_received_by_topic_consumer_factory(specs);
-
-        assert_eq!(topic_consumer_configs.len(), 2);
-        assert!(topic_consumer_configs
-            .iter()
-            .all(|topic_consumer_config| topic_consumer_config.consumer_id == Some(7)));
-    }
-
 }

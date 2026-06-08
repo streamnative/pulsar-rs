@@ -35,14 +35,3 @@ pub struct ConsumerConfig {
     /// negative-ack redelivery backoff policy
     pub(crate) negative_ack_backoff: Option<Arc<dyn NegativeAckBackoff + Send + Sync>>,
 }
-
-impl ConsumerConfig {
-    /// Returns the exact configuration handed to a per-topic consumer engine.
-    ///
-    /// Keeping this as a named seam makes cross-flavor tests assert the same value that
-    /// `TopicConsumer::new` receives from single-topic, partitioned, multi-topic, regex-refresh, and
-    /// reader construction paths instead of only asserting arbitrary `ConsumerConfig` clones.
-    pub(crate) fn clone_for_topic_consumer(&self) -> Self {
-        self.clone()
-    }
-}

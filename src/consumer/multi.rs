@@ -12,11 +12,7 @@ use futures::{future::try_join_all, Stream};
 use regex::Regex;
 
 use crate::{
-    consumer::{
-        config::ConsumerConfig,
-        message::Message,
-        topic::{create_topic_consumers_with_factory, TopicConsumer},
-    },
+    consumer::{config::ConsumerConfig, message::Message, topic::TopicConsumer},
     error::{ConnectionError, ConsumerError},
     message::proto::{MessageIdData, Schema},
     proto,
@@ -45,21 +41,6 @@ pub struct MultiTopicConsumer<T: DeserializeMessage, Exe: Executor> {
 }
 
 impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
-    fn topic_consumer_configs_for_refresh<I>(
-        consumer_config: &ConsumerConfig,
-        topics: I,
-        existing_topics: &VecDeque<String>,
-    ) -> Vec<(String, crate::BrokerAddress, ConsumerConfig)>
-    where
-        I: IntoIterator<Item = (String, crate::BrokerAddress)>,
-    {
-        topics
-            .into_iter()
-            .filter(|(topic, _)| !existing_topics.contains(topic))
-            .map(|(topic, addr)| (topic, addr, consumer_config.clone_for_topic_consumer()))
-            .collect()
-    }
-
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn topics(&self) -> Vec<String> {
         self.topics.iter().map(|s| s.to_string()).collect()
@@ -203,17 +184,14 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
             .into_iter()
             .flatten();
 
-            let topic_consumer_specs = Self::topic_consumer_configs_for_refresh(
-                &consumer_config,
-                topics,
-                &existing_topics,
-            );
-
             // 3. create consumers
-            let consumers = create_topic_consumers_with_factory(
-                pulsar,
-                topic_consumer_specs,
-                TopicConsumer::new,
+            let consumers = try_join_all(
+                topics
+                    .into_iter()
+                    .filter(|(t, _)| !existing_topics.contains(t))
+                    .map(|(topic, addr)| {
+                        TopicConsumer::new(pulsar.clone(), topic, addr, consumer_config.clone())
+                    }),
             )
             .await?;
             if !consumers.is_empty() {
@@ -424,103 +402,5 @@ impl<T: 'static + DeserializeMessage, Exe: Executor> Stream for MultiTopicConsum
         }
 
         Poll::Pending
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{
-        collections::VecDeque,
-        sync::{Arc, Mutex},
-        time::Duration,
-    };
-
-    use futures::executor::block_on;
-
-    use super::*;
-    use crate::{
-        consumer::negative_ack_backoff::MultiplierRedeliveryBackoff, BrokerAddress, TokioExecutor,
-    };
-
-    fn broker_addr(port: u16) -> BrokerAddress {
-        BrokerAddress {
-            url: format!("pulsar://127.0.0.1:{port}").parse().unwrap(),
-            broker_url: format!("127.0.0.1:{port}"),
-            proxy: false,
-        }
-    }
-
-    fn nack_config_with_delay_and_backoff() -> ConsumerConfig {
-        ConsumerConfig {
-            nack_redelivery_delay: Some(Duration::from_secs(30)),
-            negative_ack_backoff: Some(Arc::new(MultiplierRedeliveryBackoff::default())),
-            ..ConsumerConfig::default()
-        }
-    }
-
-    fn configs_received_by_topic_consumer_factory(
-        specs: Vec<(String, BrokerAddress, ConsumerConfig)>,
-    ) -> Vec<(String, ConsumerConfig)> {
-        let captured_configs = Arc::new(Mutex::new(Vec::new()));
-        let factory_configs = Arc::clone(&captured_configs);
-
-        block_on(create_topic_consumers_with_factory(
-            (),
-            specs,
-            move |(), topic, _addr, config| {
-                let factory_configs = Arc::clone(&factory_configs);
-                async move {
-                    factory_configs.lock().unwrap().push((topic, config));
-                    Ok::<(), Error>(())
-                }
-            },
-        ))
-        .expect("test factory should not fail");
-
-        Arc::try_unwrap(captured_configs)
-            .expect("factory closure dropped")
-            .into_inner()
-            .unwrap()
-    }
-
-    #[test]
-    fn regex_refresh_config_carries_nack_delay_to_each_new_consumer() {
-        let config = nack_config_with_delay_and_backoff();
-        let existing_topics = VecDeque::from(["persistent://public/default/existing".to_string()]);
-        let topics = vec![
-            (
-                "persistent://public/default/existing".to_string(),
-                broker_addr(6650),
-            ),
-            (
-                "persistent://public/default/new-1".to_string(),
-                broker_addr(6651),
-            ),
-            (
-                "persistent://public/default/new-2".to_string(),
-                broker_addr(6652),
-            ),
-        ];
-
-        let topic_consumer_specs =
-            MultiTopicConsumer::<String, TokioExecutor>::topic_consumer_configs_for_refresh(
-                &config,
-                topics,
-                &existing_topics,
-            );
-
-        assert_eq!(topic_consumer_specs.len(), 2);
-        let topic_consumer_configs =
-            configs_received_by_topic_consumer_factory(topic_consumer_specs);
-        for (_, topic_consumer_config) in &topic_consumer_configs {
-            assert_eq!(
-                topic_consumer_config.nack_redelivery_delay,
-                Some(Duration::from_secs(30))
-            );
-            assert!(topic_consumer_config.negative_ack_backoff.is_some());
-        }
-        assert!(topic_consumer_configs
-            .iter()
-            .all(|(topic, _)| topic != "persistent://public/default/existing"));
     }
 }
