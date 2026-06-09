@@ -1,22 +1,11 @@
-//! Demonstrates negative acknowledgment redelivery delay and backoff configuration.
-//!
-//! Caveats:
-//! - Message-based `nack()` uses the broker-supplied `redelivery_count` as the backoff input.
-//! - `nack_with_id()` always uses fixed-delay behavior because message IDs do not carry
-//!   `redelivery_count`.
-//! - Client-side timers are best-effort and in-memory; they do not guarantee exact redelivery timing.
-//! - Closing or crashing the consumer drops pending nack schedules, so redelivery then follows
-//!   broker-side behavior.
-//! - DLQ and retry-letter-topic routing behavior is not redesigned by this feature; existing DLQ
-//!   settings continue to apply independently.
-
 #[macro_use]
 extern crate serde;
 use std::{env, time::Duration};
 
 use futures::TryStreamExt;
 use pulsar::{
-    Consumer, DeserializeMessage, MultiplierRedeliveryBackoff, NegativeAckBackoff, Payload, Pulsar,
+    authentication::{basic::BasicAuthentication, oauth2::OAuth2Authentication},
+    Authentication, Consumer, DeserializeMessage, MultiplierRedeliveryBackoff, Payload, Pulsar,
     SubType, TokioExecutor,
 };
 
@@ -33,63 +22,6 @@ impl DeserializeMessage for TestData {
     }
 }
 
-#[derive(Debug)]
-struct LinearBackoff(Duration);
-
-impl NegativeAckBackoff for LinearBackoff {
-    fn next(&self, redelivery_count: u32) -> Duration {
-        self.0 * redelivery_count.saturating_add(1)
-    }
-}
-
-#[allow(dead_code)]
-async fn build_zero_delay_consumer(
-    pulsar: &Pulsar<TokioExecutor>,
-    topic: String,
-) -> Result<Consumer<TestData, TokioExecutor>, pulsar::Error> {
-    pulsar
-        .consumer()
-        .with_topic(topic)
-        .with_consumer_name("negative_ack_zero_delay")
-        .with_subscription_type(SubType::Exclusive)
-        .with_subscription("negative_ack_subscription")
-        .with_nack_redelivery_delay(Duration::ZERO)
-        .build()
-        .await
-}
-
-#[allow(dead_code)]
-async fn build_multiplier_backoff_consumer(
-    pulsar: &Pulsar<TokioExecutor>,
-    topic: String,
-) -> Result<Consumer<TestData, TokioExecutor>, pulsar::Error> {
-    pulsar
-        .consumer()
-        .with_topic(topic)
-        .with_consumer_name("negative_ack_multiplier_backoff")
-        .with_subscription_type(SubType::Exclusive)
-        .with_subscription("negative_ack_subscription")
-        .with_negative_ack_backoff(MultiplierRedeliveryBackoff::default())
-        .build()
-        .await
-}
-
-#[allow(dead_code)]
-async fn build_linear_backoff_consumer(
-    pulsar: &Pulsar<TokioExecutor>,
-    topic: String,
-) -> Result<Consumer<TestData, TokioExecutor>, pulsar::Error> {
-    pulsar
-        .consumer()
-        .with_topic(topic)
-        .with_consumer_name("negative_ack_linear_backoff")
-        .with_subscription_type(SubType::Exclusive)
-        .with_subscription("negative_ack_subscription")
-        .with_negative_ack_backoff(LinearBackoff(Duration::from_secs(10)))
-        .build()
-        .await
-}
-
 #[tokio::main]
 async fn main() -> Result<(), pulsar::Error> {
     env_logger::init();
@@ -101,46 +33,44 @@ async fn main() -> Result<(), pulsar::Error> {
         .ok()
         .unwrap_or_else(|| "non-persistent://public/default/test".to_string());
 
-    let pulsar: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await?;
+    let mut builder = Pulsar::builder(addr, TokioExecutor);
 
-    // HOW TO USE THIS EXAMPLE
-    // Section 1 (default delay) is the active configuration and runs by default.
-    // To try a different configuration:
-    //   1. Comment out the Section 1 consumer builder block below.
-    //   2. Replace it with exactly ONE of the compiled helper calls shown in Sections 2-4.
-    // Running multiple sections simultaneously is not supported; each section
-    // creates its own consumer on the same subscription.
+    if let Ok(token) = env::var("PULSAR_TOKEN") {
+        let authentication = Authentication {
+            name: "token".to_string(),
+            data: token.into_bytes(),
+        };
 
-    // Section 1: Default 60s fixed delay.
-    // As of this release, negative acknowledgments default to a 60 seconds fixed delay
-    // before redelivery. Previously, the Rust client requested immediate redelivery.
-    // To spell out that same fixed delay explicitly, add:
-    // .with_nack_redelivery_delay(Duration::from_secs(60))
+        builder = builder.with_auth(authentication);
+    } else if let Ok(oauth2_cfg) = env::var("PULSAR_OAUTH2") {
+        builder = builder.with_auth_provider(OAuth2Authentication::client_credentials(
+            serde_json::from_str(oauth2_cfg.as_str())
+                .unwrap_or_else(|_| panic!("invalid oauth2 config [{}]", oauth2_cfg.as_str())),
+        ));
+    } else if let (Ok(username), Ok(password)) = (
+        env::var("PULSAR_BASIC_USERNAME"),
+        env::var("PULSAR_BASIC_PASSWORD"),
+    ) {
+        builder = builder.with_auth_provider(BasicAuthentication::new(&username, &password))
+    }
+
+    let pulsar: Pulsar<_> = builder.build().await?;
+    let negative_ack_backoff = MultiplierRedeliveryBackoff::builder()
+        .min_delay(Duration::from_secs(1))
+        .max_delay(Duration::from_secs(30))
+        .multiplier(2.0)
+        .build()?;
+
     let mut consumer: Consumer<TestData, _> = pulsar
         .consumer()
         .with_topic(topic)
-        .with_consumer_name("negative_ack_default_delay")
+        .with_consumer_name("negative_ack_consumer")
         .with_subscription_type(SubType::Exclusive)
         .with_subscription("negative_ack_subscription")
+        .with_nack_redelivery_delay(Duration::from_secs(5))
+        .with_negative_ack_backoff(negative_ack_backoff)
         .build()
         .await?;
-
-    // Section 2: Duration::ZERO migration escape hatch.
-    // Restores pre-release immediate-redelivery behavior for consumers that cannot tolerate the
-    // 60s delay.
-    // Duration::ZERO is the pre-v* immediate-redelivery equivalent.
-    //
-    // let mut consumer = build_zero_delay_consumer(&pulsar, topic).await?;
-
-    // Section 3: Built-in MultiplierRedeliveryBackoff.
-    // The default policy uses broker redelivery count with a 1s minimum and 10min maximum delay.
-    //
-    // let mut consumer = build_multiplier_backoff_consumer(&pulsar, topic).await?;
-
-    // Section 4: Custom NegativeAckBackoff policy.
-    // Implement the trait when you need application-specific redelivery spacing.
-    //
-    // let mut consumer = build_linear_backoff_consumer(&pulsar, topic).await?;
 
     let mut counter = 0usize;
     while let Some(msg) = consumer.try_next().await? {
@@ -148,20 +78,23 @@ async fn main() -> Result<(), pulsar::Error> {
         log::info!("id: {:?}", msg.message_id());
         log::info!("redelivery_count: {}", msg.redelivery_count());
 
-        match msg.deserialize() {
-            Ok(data) => log::info!("payload data: {}", data.data),
-            Err(e) => log::error!("could not deserialize message: {:?}", e),
-        }
+        let data = match msg.deserialize() {
+            Ok(data) => data,
+            Err(e) => {
+                log::error!("could not deserialize message: {:?}", e);
+                consumer.nack(&msg).await?;
+                break;
+            }
+        };
 
+        log::info!("payload data: {}", data.data);
         consumer.nack(&msg).await?;
 
-        // Section 5: nack_with_id note.
-        // consumer.nack_with_id(&msg.topic, msg.message_id().clone()).await? is also supported
-        // but always uses fixed delay only, because message IDs do not carry redelivery count.
-
         counter += 1;
+        log::info!("nacked {} messages", counter);
+
         if counter > 10 {
-            consumer.close().await?;
+            consumer.close().await.expect("Unable to close consumer");
             break;
         }
     }
