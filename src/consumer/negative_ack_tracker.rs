@@ -224,7 +224,8 @@ impl NegativeAckTracker {
     fn due_at(&self, now: Instant, delay: Duration) -> Instant {
         now.checked_add(delay)
             .or_else(|| now.checked_add(self.fixed_delay))
-            .unwrap_or_else(|| now + DEFAULT_NACK_REDELIVERY_DELAY)
+            .or_else(|| now.checked_add(DEFAULT_NACK_REDELIVERY_DELAY))
+            .unwrap_or(now)
     }
 
     #[cfg(test)]
@@ -449,6 +450,22 @@ mod tests {
             NegativeAckSchedule::Scheduled
         );
         assert_eq!(tracker.next_due_time(), Some(now + Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn oversized_backoff_and_fixed_delays_fall_back_to_default_delay() {
+        let now = Instant::now();
+        let mut tracker =
+            NegativeAckTracker::new(Some(Duration::MAX), Some(backoff(Duration::MAX)));
+
+        assert_eq!(
+            tracker.schedule(message_id(1, 2, None, None), Some(7), now),
+            NegativeAckSchedule::Scheduled
+        );
+        assert_eq!(
+            tracker.next_due_time(),
+            Some(now + DEFAULT_NACK_REDELIVERY_DELAY)
+        );
     }
 
     #[test]

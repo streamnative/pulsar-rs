@@ -437,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    fn test_nack_delay_validation_rejects_unrepresentable_instant_delay() {
+    fn test_nack_delay_validation_rejects_millisecond_range_boundary() {
         let delay = Duration::from_millis(u64::MAX);
         let result = check_nack_delay_duration(delay);
 
