@@ -330,6 +330,27 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
     }
 }
 
+impl<T: DeserializeMessage, Exe: Executor> Stream for TopicConsumer<T, Exe> {
+    type Item = Result<Message<T>, Error>;
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.messages.as_mut().poll_next(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Ready(Some(Ok((id, payload, redelivery_count)))) => {
+                self.last_message_received = Some(Utc::now());
+                self.messages_received += 1;
+                Poll::Ready(Some(Ok(self.create_message(id, payload, redelivery_count))))
+            }
+            Poll::Ready(Some(Err(e))) => {
+                error!("we are using in the single-consumer and we got an error, {e}");
+                Poll::Ready(Some(Err(e)))
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use futures::{channel::mpsc, executor::block_on, StreamExt};
@@ -415,27 +436,6 @@ mod tests {
                 assert_eq!(redelivery_count, Some(3));
             }
             _ => panic!("expected nack engine message"),
-        }
-    }
-}
-
-impl<T: DeserializeMessage, Exe: Executor> Stream for TopicConsumer<T, Exe> {
-    type Item = Result<Message<T>, Error>;
-
-    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match self.messages.as_mut().poll_next(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(None) => Poll::Ready(None),
-            Poll::Ready(Some(Ok((id, payload, redelivery_count)))) => {
-                self.last_message_received = Some(Utc::now());
-                self.messages_received += 1;
-                Poll::Ready(Some(Ok(self.create_message(id, payload, redelivery_count))))
-            }
-            Poll::Ready(Some(Err(e))) => {
-                error!("we are using in the single-consumer and we got an error, {e}");
-                Poll::Ready(Some(Err(e)))
-            }
         }
     }
 }
