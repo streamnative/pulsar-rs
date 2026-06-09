@@ -26,7 +26,7 @@ pub(crate) enum NegativeAckDispatchState {
 
 pub(crate) struct NegativeAckTracker {
     fixed_delay: Duration,
-    backoff: Option<Arc<dyn NegativeAckBackoff + Send + Sync>>,
+    backoff: Option<Arc<dyn NegativeAckBackoff>>,
     entries: HashMap<NormalizedMessageId, PendingNegativeAck>,
 }
 
@@ -131,7 +131,7 @@ impl PendingBatchScope {
 impl NegativeAckTracker {
     pub(crate) fn new(
         fixed_delay: Option<Duration>,
-        backoff: Option<Arc<dyn NegativeAckBackoff + Send + Sync>>,
+        backoff: Option<Arc<dyn NegativeAckBackoff>>,
     ) -> Self {
         Self {
             fixed_delay: fixed_delay.unwrap_or(DEFAULT_NACK_REDELIVERY_DELAY),
@@ -351,7 +351,7 @@ mod tests {
         }
     }
 
-    fn backoff(delay: Duration) -> Arc<dyn NegativeAckBackoff + Send + Sync> {
+    fn backoff(delay: Duration) -> Arc<dyn NegativeAckBackoff> {
         Arc::new(FixedBackoff(delay))
     }
 

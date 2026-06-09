@@ -43,7 +43,7 @@ pub struct ConsumerBuilder<Exe: Executor> {
     namespace: Option<String>,
     topic_refresh: Option<Duration>,
     nack_redelivery_delay: Option<Duration>,
-    negative_ack_backoff: Option<Arc<dyn NegativeAckBackoff + Send + Sync>>,
+    negative_ack_backoff: Option<Arc<dyn NegativeAckBackoff>>,
 }
 
 fn check_nack_delay_duration(delay: Duration) -> Result<(), Error> {
@@ -233,8 +233,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
     where
         B: NegativeAckBackoff + 'static,
     {
-        self.negative_ack_backoff =
-            Some(Arc::new(backoff) as Arc<dyn NegativeAckBackoff + Send + Sync>);
+        self.negative_ack_backoff = Some(Arc::new(backoff) as Arc<dyn NegativeAckBackoff>);
         self
     }
 

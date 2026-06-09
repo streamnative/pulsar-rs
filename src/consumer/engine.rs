@@ -126,7 +126,7 @@ pub struct ConsumerEngine<Exe: Executor> {
     unacked_message_redelivery_delay: Option<Duration>,
     unacked_messages: HashMap<MessageIdData, Instant>,
     nack_redelivery_delay: Option<Duration>,
-    negative_ack_backoff: Option<Arc<dyn NegativeAckBackoff + Send + Sync>>,
+    negative_ack_backoff: Option<Arc<dyn NegativeAckBackoff>>,
     negative_ack_tracker: Option<NegativeAckTracker>,
     negative_ack_ticker_running: Option<Arc<AtomicBool>>,
     negative_ack_due_event_pending: Arc<AtomicBool>,
@@ -150,7 +150,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         batch_size: u32,
         unacked_message_redelivery_delay: Option<Duration>,
         nack_redelivery_delay: Option<Duration>,
-        negative_ack_backoff: Option<Arc<dyn NegativeAckBackoff + Send + Sync>>,
+        negative_ack_backoff: Option<Arc<dyn NegativeAckBackoff>>,
         dead_letter_policy: Option<DeadLetterPolicy>,
         options: ConsumerOptions,
     ) -> ConsumerEngine<Exe> {

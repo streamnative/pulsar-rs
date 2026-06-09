@@ -33,7 +33,7 @@ pub struct ConsumerConfig {
     /// fixed negative-ack redelivery delay
     pub(crate) nack_redelivery_delay: Option<Duration>,
     /// negative-ack redelivery backoff policy
-    pub(crate) negative_ack_backoff: Option<Arc<dyn NegativeAckBackoff + Send + Sync>>,
+    pub(crate) negative_ack_backoff: Option<Arc<dyn NegativeAckBackoff>>,
 }
 
 impl fmt::Debug for ConsumerConfig {
