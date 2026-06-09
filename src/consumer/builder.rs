@@ -202,18 +202,16 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
         self
     }
 
-    /// Sets the fixed negative-ack redelivery delay.
+    /// Sets the fixed delay before redelivering negatively acknowledged messages.
     ///
     /// If this option is not set, negative acknowledgments use a 60 seconds default delay before
-    /// broker redelivery. This is an intentional parity behavior change from the previous Rust
-    /// client immediate-redelivery default.
+    /// broker redelivery.
     ///
-    /// `Duration::ZERO` is valid and means zero delay immediate redelivery; use it to preserve the
-    /// previous Rust-client behavior. Repeated calls are last-call-wins.
+    /// `Duration::ZERO` is valid and requests immediate redelivery. Repeated calls are
+    /// last-call-wins.
     ///
-    /// Delayed negative acks are tracked by a best-effort in-memory timer. Pending timers are
-    /// dropped on consumer close or process loss, and are preserved only best-effort across
-    /// reconnect when the same consumer engine survives.
+    /// The configured fixed delay is also used as the fallback for negative acknowledgments that do
+    /// not carry a broker redelivery count.
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_nack_redelivery_delay(mut self, delay: Duration) -> Self {
         self.nack_redelivery_delay = Some(delay);
@@ -222,19 +220,14 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
 
     /// Configures an optional negative-ack backoff policy.
     ///
-    /// Message-based nacks use the message redelivery count supplied by the broker to compute the
-    /// backoff delay. ID-only `nack_with_id` calls have no redelivery count, so the ID-only fixed
-    /// fallback uses [`Self::with_nack_redelivery_delay`] or the 60 seconds default instead.
-    /// The fixed fallback never uses the backoff policy.
+    /// Message-based negative acknowledgments use the broker-supplied redelivery count to compute
+    /// the backoff delay. ID-only `nack_with_id` calls have no redelivery count, so they use
+    /// [`Self::with_nack_redelivery_delay`] or the 60 seconds default instead.
     ///
-    /// A backoff that returns `Duration::ZERO` uses zero delay immediate redelivery. Batched message
-    /// ids use batch-entry normalization for scheduling, while ack cancellation remains
-    /// partial-batch-safe; this does not expose public precision controls or partial-batch
-    /// redelivery APIs.
+    /// A backoff that returns `Duration::ZERO` requests immediate redelivery.
     ///
-    /// Negative-ack tracking is separate from unacked-message resend tracking and preserves the
-    /// existing Rust DLQ behavior. This option adds no retry-letter/DLQ redesign, no
-    /// delayed-reconsume behavior, and no acknowledgement-timeout backoff behavior.
+    /// This policy affects only negative acknowledgments. Unacked-message redelivery and
+    /// dead-letter policy behavior remain configured separately.
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_negative_ack_backoff<B>(mut self, backoff: B) -> Self
     where
