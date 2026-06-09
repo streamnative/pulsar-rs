@@ -34,12 +34,6 @@ Try out [examples](examples):
 - [reader](examples/reader.rs)
 - [negative_ack](examples/negative_ack.rs)
 
-## Negative Acknowledgment Delay
-
-The default negative-ack redelivery delay changed from immediate redelivery to 60 seconds, matching Go/Java client behavior. Consumers that relied on immediate redelivery can add `.with_nack_redelivery_delay(Duration::ZERO)` to preserve previous behavior.
-
-See the [negative_ack example](examples/negative_ack.rs) and [`ConsumerBuilder::with_nack_redelivery_delay`](https://docs.rs/pulsar/latest/pulsar/struct.ConsumerBuilder.html#method.with_nack_redelivery_delay) for configuration details.
-
 ## Project Maintainers
 
 - [@CleverAkanoa](https://github.com/CleverAkanoa)
