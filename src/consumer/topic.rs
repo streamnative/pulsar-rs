@@ -274,6 +274,9 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn close(&mut self) -> Result<(), Error> {
         let consumer_id = self.consumer_id;
+        let _ = self
+            .engine_tx
+            .unbounded_send(InternalEngineMessage::ClearNegativeAcks);
         self.connection()
             .await?
             .sender()

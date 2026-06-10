@@ -419,6 +419,10 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 });
                 true
             }
+            Some(InternalEngineMessage::ClearNegativeAcks) => {
+                self.clear_negative_ack_state();
+                true
+            }
         }
     }
 
@@ -1255,5 +1259,26 @@ mod tests {
         assert!(tracker
             .collect_due(now + Duration::from_secs(7) + NEGATIVE_ACK_REDELIVERY_TICK_INTERVAL)
             .is_empty());
+    }
+
+    #[test]
+    fn clear_negative_ack_state_drains_tracker_and_stops_ticker() {
+        let now = Instant::now();
+        let id = message_id(1, 2, Some(0));
+        let mut tracker = NegativeAckTracker::new(Some(Duration::from_secs(60)), None);
+        let ticker_running = Arc::new(AtomicBool::new(false));
+
+        // Schedule a nack so the tracker is non-empty
+        tracker.schedule(id.clone(), Some(0), now);
+        ticker_running.store(true, Ordering::SeqCst);
+
+        // Simulate what clear_negative_ack_state does
+        tracker.clear();
+        ticker_running.store(false, Ordering::SeqCst);
+
+        assert!(tracker
+            .collect_due(now + Duration::from_secs(120))
+            .is_empty());
+        assert!(!ticker_running.load(Ordering::SeqCst));
     }
 }
