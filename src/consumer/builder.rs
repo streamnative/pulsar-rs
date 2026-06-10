@@ -210,8 +210,9 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
     /// `Duration::ZERO` is valid and requests immediate redelivery. Repeated calls are
     /// last-call-wins.
     ///
-    /// The configured fixed delay is also used as the fallback for negative acknowledgments that do
-    /// not carry a broker redelivery count.
+    /// The configured fixed delay is used for ID-only [`Self::nack_with_id`] calls, which carry no
+    /// redelivery count. It is also used as the delay for message-based [`Consumer::nack`] calls
+    /// when no backoff policy has been configured.
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_nack_redelivery_delay(mut self, delay: Duration) -> Self {
         self.nack_redelivery_delay = Some(delay);
@@ -220,8 +221,9 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
 
     /// Configures an optional negative-ack backoff policy.
     ///
-    /// Message-based negative acknowledgments use the broker-supplied redelivery count to compute
-    /// the backoff delay. ID-only `nack_with_id` calls have no redelivery count, so they use
+    /// Message-based negative acknowledgments use the message's redelivery count (`0` on first
+    /// delivery) to compute the backoff delay. ID-only `nack_with_id` calls have no redelivery
+    /// count, so they use
     /// [`Self::with_nack_redelivery_delay`] or the 60 seconds default instead.
     ///
     /// A backoff that returns `Duration::ZERO` requests immediate redelivery.

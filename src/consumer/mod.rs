@@ -157,9 +157,12 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         }
     }
 
-    /// negative acknowledgement
+    /// Negative acknowledgement.
     ///
-    /// the message will be sent again on the subscription
+    /// The message will be redelivered on the subscription after the configured negative-ack
+    /// redelivery delay (60 seconds by default). If a backoff policy is configured via
+    /// [`ConsumerBuilder::with_negative_ack_backoff`], the delay is computed from the message's
+    /// redelivery count instead.
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn nack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         match &mut self.inner {
@@ -168,9 +171,11 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         }
     }
 
-    /// negative acknowledgement
+    /// Negative acknowledgement by message ID.
     ///
-    /// the message with the given ID will be sent again on the subscription
+    /// The message with the given ID will be redelivered on the subscription after the configured
+    /// negative-ack redelivery delay (60 seconds by default). Because no redelivery count is
+    /// available, a backoff policy is not applied.
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn nack_with_id(
         &mut self,
