@@ -16,7 +16,6 @@ Features:
 - Compression with LZ4, zlib, zstd or Snappy (can be deactivated with Cargo features);
 - Telemetry using [tracing](https://github.com/tokio-rs/tracing) crate (can be activated with Cargo features);
 - Configurable negative-acknowledgment redelivery delay with pluggable backoff policies
-  (multiplier-based backoff built in);
 
 ## Getting Started
 
