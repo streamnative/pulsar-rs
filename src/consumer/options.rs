@@ -40,6 +40,11 @@ pub struct ConsumerOptions {
     /// This is the protocol-native way to "start N seconds back" for
     /// readers and non-durable consumers, without a separate `seek()` after
     /// creation (which forces a broker-side consumer close + reconnect).
+    ///
+    /// The rollback is applied at subscribe time and on resubscribes only
+    /// while the consumer has made no progress; once messages have been
+    /// dequeued, reconnects no longer send it (matching the Java client),
+    /// so a network blip does not rewind the cursor by the whole window.
     pub start_message_rollback_duration_secs: Option<u64>,
 }
 

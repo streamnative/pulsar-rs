@@ -51,6 +51,7 @@ pub struct ConsumerEngine<Exe: Executor> {
     unacked_messages: HashMap<MessageIdData, Instant>,
     dead_letter_policy: Option<DeadLetterPolicy>,
     options: ConsumerOptions,
+    dequeued_any_message: bool,
 }
 
 impl<Exe: Executor> ConsumerEngine<Exe> {
@@ -91,6 +92,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             unacked_messages: HashMap::new(),
             dead_letter_policy,
             options,
+            dequeued_any_message: false,
         }
     }
 
@@ -614,6 +616,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 error!("tx returned {:?}", e);
                 Error::Custom("tx closed".to_string())
             })?;
+        self.dequeued_any_message = true;
         if let Some(duration) = self.unacked_message_redelivery_delay {
             self.unacked_messages.insert(message_id, now + duration);
         }
@@ -637,6 +640,14 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
 
         let broker_address = self.client.lookup_topic(&self.topic).await?;
 
+        // Re-applying the start-message rollback on every resubscribe would
+        // reset the cursor back by the window again after each broker/network
+        // blip, replaying messages this consumer already processed. Mirror the
+        // Java client: the rollback is only sent while the consumer has made
+        // no progress (ConsumerImpl sends it only while startMessageId still
+        // equals the initial one).
+        let options = resubscribe_options(&self.options, self.dequeued_any_message);
+
         let messages = retry_subscribe_consumer(
             &self.client,
             &mut self.connection,
@@ -646,7 +657,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             self.sub_type,
             self.id,
             &self.name,
-            &self.options,
+            &options,
             self.batch_size,
         )
         .await?;
@@ -704,5 +715,47 @@ impl<Exe: Executor> std::ops::Drop for ConsumerEngine<Exe> {
                 );
             }
         }));
+    }
+}
+
+/// Options to use when resubscribing after a connection loss.
+///
+/// The start-message rollback must only be applied while the consumer has
+/// made no progress, matching the Java client (`ConsumerImpl` only sends
+/// `startMessageRollbackDurationInSec` while its `startMessageId` still
+/// equals the initial one). Re-sending it once messages were dequeued would
+/// rewind the cursor by the whole window on every reconnect.
+#[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+fn resubscribe_options(options: &ConsumerOptions, dequeued_any_message: bool) -> ConsumerOptions {
+    let mut options = options.clone();
+    if dequeued_any_message {
+        options.start_message_rollback_duration_secs = None;
+    }
+    options
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resubscribe_options;
+    use crate::consumer::ConsumerOptions;
+
+    #[test]
+    fn rollback_survives_resubscribe_without_progress() {
+        let options = ConsumerOptions::default().with_start_message_rollback_duration_secs(600);
+        assert_eq!(
+            resubscribe_options(&options, false).start_message_rollback_duration_secs,
+            Some(600)
+        );
+    }
+
+    #[test]
+    fn rollback_cleared_on_resubscribe_after_progress() {
+        let options = ConsumerOptions::default().with_start_message_rollback_duration_secs(600);
+        assert_eq!(
+            resubscribe_options(&options, true).start_message_rollback_duration_secs,
+            None
+        );
+        // everything else must be preserved
+        assert_eq!(resubscribe_options(&options, true).durable, options.durable);
     }
 }
