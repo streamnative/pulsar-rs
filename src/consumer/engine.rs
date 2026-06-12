@@ -53,14 +53,9 @@ pub struct ConsumerEngine<Exe: Executor> {
     options: ConsumerOptions,
     last_dequeued_message_id: Option<MessageIdData>,
     /// Whether reconnects resubscribe from the last dequeued message id.
-    /// Captured once at construction: only consumers CREATED with a
-    /// start-message rollback opt into this — their cursor position is
-    /// client-driven, so a resubscribe at the default position would skip
-    /// the undrained window. For everything else — durable subscriptions in
-    /// particular — the broker-side cursor governs, and sending a resume id
-    /// would move it past unacked messages. Not reset when a later seek
-    /// clears the rollback from `options`: the cursor stays client-driven
-    /// for the lifetime of this engine.
+    /// Captured once at construction (see [`tracks_resume_position`]) and
+    /// not reset when a later seek clears the rollback from `options`: the
+    /// cursor stays client-driven for the lifetime of this engine.
     track_resume_position: bool,
 }
 
@@ -83,7 +78,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         options: ConsumerOptions,
     ) -> ConsumerEngine<Exe> {
         let (event_tx, event_rx) = mpsc::unbounded();
-        let track_resume_position = rollback_enabled(&options);
+        let track_resume_position = tracks_resume_position(&options);
         ConsumerEngine {
             client,
             connection,
@@ -761,8 +756,8 @@ impl<Exe: Executor> std::ops::Drop for ConsumerEngine<Exe> {
 /// messages of that batch may be seen again (at-least-once, same as the
 /// Java client's coarser entry-level resume).
 ///
-/// `track_resume_position` gates the whole rewrite to consumers created
-/// with the rollback option, whose cursor position is client-driven. For
+/// `track_resume_position` gates the whole rewrite to consumers whose
+/// cursor position is client-driven (see [`tracks_resume_position`]). For
 /// every other consumer — durable subscriptions in particular — the options
 /// are returned unchanged: there the broker-side cursor governs, and
 /// sending a resume id would move it past in-flight unacked messages,
@@ -774,6 +769,20 @@ fn rollback_enabled(options: &ConsumerOptions) -> bool {
     options
         .start_message_rollback_duration_secs
         .is_some_and(|secs| secs > 0)
+}
+
+/// Resume tracking applies to consumers whose cursor position is
+/// client-driven: non-durable subscriptions (readers included — the broker
+/// drops their cursor on disconnect, so without a resume id a reconnect
+/// pins back to the configured start position or jumps to the default) and
+/// consumers created with a start-message rollback. This is the Java
+/// client's behavior: `ConsumerImpl.clearReceiverQueue` advances
+/// `startMessageId` to the last dequeued message for non-durable
+/// subscriptions. Durable subscriptions without a rollback are untouched:
+/// their broker-side cursor governs the resume position, and sending a
+/// resume id could move it past in-flight unacked messages.
+fn tracks_resume_position(options: &ConsumerOptions) -> bool {
+    rollback_enabled(options) || options.durable == Some(false)
 }
 
 #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
@@ -795,7 +804,7 @@ fn resubscribe_options(
 
 #[cfg(test)]
 mod tests {
-    use super::{resubscribe_options, rollback_enabled};
+    use super::{resubscribe_options, rollback_enabled, tracks_resume_position};
     use crate::{consumer::ConsumerOptions, message::proto::MessageIdData};
 
     #[test]
@@ -808,6 +817,24 @@ mod tests {
         ));
         assert!(rollback_enabled(
             &ConsumerOptions::default().with_start_message_rollback_duration_secs(600)
+        ));
+    }
+
+    #[test]
+    fn resume_tracking_covers_client_driven_cursors_only() {
+        // Durable subscription (the default): broker cursor governs.
+        assert!(!tracks_resume_position(&ConsumerOptions::default()));
+        assert!(!tracks_resume_position(
+            &ConsumerOptions::default().durable(true)
+        ));
+        // Rollback consumers and non-durable consumers (readers) are
+        // client-driven: a reconnect without a resume id would rewind to
+        // the configured start or jump to the default position.
+        assert!(tracks_resume_position(
+            &ConsumerOptions::default().with_start_message_rollback_duration_secs(600)
+        ));
+        assert!(tracks_resume_position(
+            &ConsumerOptions::default().durable(false)
         ));
     }
 
@@ -844,6 +871,20 @@ mod tests {
         assert_eq!(resubscribe.start_message_id, Some(last));
         // everything else must be preserved
         assert_eq!(resubscribe.durable, options.durable);
+    }
+
+    #[test]
+    fn reader_resumes_from_last_dequeued_not_original_start() {
+        // The reader path of the gate: non-durable, no rollback. After
+        // progress, a reconnect resumes from the last dequeued message
+        // instead of replaying from the configured start position.
+        let options = ConsumerOptions::default()
+            .durable(false)
+            .starting_on_message(message_id(1, 1));
+        let last = message_id(7, 42);
+        let resubscribe = resubscribe_options(&options, true, Some(&last));
+        assert_eq!(resubscribe.start_message_id, Some(last));
+        assert_eq!(resubscribe.durable, Some(false));
     }
 
     #[test]

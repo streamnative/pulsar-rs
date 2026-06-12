@@ -200,14 +200,11 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
             InnerConsumer::Multi(c) => {
                 c.seek(consumer_ids, message_id, timestamp).await?;
                 let topics = c.topics();
-                // The rollback is one-shot: the replacement consumers (and any
-                // consumer update_topics() creates later from this config) must
-                // not re-apply it on top of the position that was just seeked.
-                // start_message_id is left alone here: message ids are
-                // topic-specific, so a single seek target cannot be rebased
-                // into a config shared by every topic of this consumer.
-                let mut config = c.config().clone();
-                config.options.start_message_rollback_duration_secs = None;
+                // The central config stays untouched: it only seeds topics
+                // this consumer has never subscribed to (update_topics()
+                // discoveries), and for those a configured rollback
+                // legitimately applies — it is their first subscribe.
+                let config = c.config().clone();
 
                 //currently, pulsar only supports seek for non partitioned topics
                 let addrs =
@@ -217,19 +214,19 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
                 let topic_addr_pair = c.topics.iter().cloned().zip(addrs.iter().cloned());
 
                 let consumers = try_join_all(topic_addr_pair.map(|(topic, addr)| {
-                    // Rebuild each topic from its own consumer's config:
-                    // TopicConsumer::seek rebased the seeked topics' start
-                    // position into theirs, and the ones that were not seeked
-                    // keep their position. The shared config (with no usable
-                    // start position) is only the fallback.
+                    // Rebuild each topic from its own consumer's config, as
+                    // is: TopicConsumer::seek already rebased the seeked
+                    // topics' configs (seek target in, one-shot rollback
+                    // out), and the topics that were NOT seeked keep their
+                    // original options — including a configured rollback,
+                    // whose bounded window replay is at-least-once for
+                    // non-durable consumers, whereas dropping it would
+                    // resubscribe them at the default position and skip
+                    // messages. The shared config is only the fallback.
                     let topic_config = c
                         .consumers
                         .get(&topic)
-                        .map(|old| {
-                            let mut cfg = old.config().clone();
-                            cfg.options.start_message_rollback_duration_secs = None;
-                            cfg
-                        })
+                        .map(|old| old.config().clone())
                         .unwrap_or_else(|| config.clone());
                     TopicConsumer::new(client.clone(), topic, addr, topic_config)
                 }))
