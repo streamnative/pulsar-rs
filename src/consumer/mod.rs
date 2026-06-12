@@ -217,7 +217,21 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
                 let topic_addr_pair = c.topics.iter().cloned().zip(addrs.iter().cloned());
 
                 let consumers = try_join_all(topic_addr_pair.map(|(topic, addr)| {
-                    TopicConsumer::new(client.clone(), topic, addr, config.clone())
+                    // Rebuild each topic from its own consumer's config:
+                    // TopicConsumer::seek rebased the seeked topics' start
+                    // position into theirs, and the ones that were not seeked
+                    // keep their position. The shared config (with no usable
+                    // start position) is only the fallback.
+                    let topic_config = c
+                        .consumers
+                        .get(&topic)
+                        .map(|old| {
+                            let mut cfg = old.config().clone();
+                            cfg.options.start_message_rollback_duration_secs = None;
+                            cfg
+                        })
+                        .unwrap_or_else(|| config.clone());
+                    TopicConsumer::new(client.clone(), topic, addr, topic_config)
                 }))
                 .await?;
 
