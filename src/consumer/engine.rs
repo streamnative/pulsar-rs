@@ -83,7 +83,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         options: ConsumerOptions,
     ) -> ConsumerEngine<Exe> {
         let (event_tx, event_rx) = mpsc::unbounded();
-        let track_resume_position = options.start_message_rollback_duration_secs.is_some();
+        let track_resume_position = rollback_enabled(&options);
         ConsumerEngine {
             client,
             connection,
@@ -767,6 +767,15 @@ impl<Exe: Executor> std::ops::Drop for ConsumerEngine<Exe> {
 /// are returned unchanged: there the broker-side cursor governs, and
 /// sending a resume id would move it past in-flight unacked messages,
 /// losing them instead of redelivering.
+/// A zero rollback means "disabled", matching the wire encoding (the
+/// `CommandSubscribe` builder filters zero out as "no rollback") — it must
+/// not opt the consumer into client-side resume tracking either.
+fn rollback_enabled(options: &ConsumerOptions) -> bool {
+    options
+        .start_message_rollback_duration_secs
+        .is_some_and(|secs| secs > 0)
+}
+
 #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
 fn resubscribe_options(
     options: &ConsumerOptions,
@@ -786,8 +795,21 @@ fn resubscribe_options(
 
 #[cfg(test)]
 mod tests {
-    use super::resubscribe_options;
+    use super::{resubscribe_options, rollback_enabled};
     use crate::{consumer::ConsumerOptions, message::proto::MessageIdData};
+
+    #[test]
+    fn zero_rollback_is_disabled() {
+        // Matches the wire encoding: CommandSubscribe omits a zero rollback,
+        // so it must not opt the consumer into resume tracking either.
+        assert!(!rollback_enabled(&ConsumerOptions::default()));
+        assert!(!rollback_enabled(
+            &ConsumerOptions::default().with_start_message_rollback_duration_secs(0)
+        ));
+        assert!(rollback_enabled(
+            &ConsumerOptions::default().with_start_message_rollback_duration_secs(600)
+        ));
+    }
 
     fn message_id(ledger_id: u64, entry_id: u64) -> MessageIdData {
         MessageIdData {
