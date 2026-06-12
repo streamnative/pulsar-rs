@@ -1726,6 +1726,11 @@ pub(crate) mod messages {
                     initial_position: Some(options.initial_position.into()),
                     schema: options.schema,
                     start_message_id: options.start_message_id,
+                    // proto default is 0 = no rollback; only send a
+                    // meaningful value
+                    start_message_rollback_duration_sec: options
+                        .start_message_rollback_duration_secs
+                        .filter(|secs| *secs > 0),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -2090,5 +2095,57 @@ mod tests {
             }
             _ => panic!("Unexpected message"),
         };
+    }
+
+    #[test]
+    fn subscribe_carries_start_message_rollback_duration() {
+        use crate::{consumer::ConsumerOptions, message::proto};
+
+        let msg = super::messages::subscribe(
+            "topic".to_string(),
+            "sub".to_string(),
+            crate::message::proto::command_subscribe::SubType::Exclusive,
+            1,
+            2,
+            None,
+            ConsumerOptions::default().with_start_message_rollback_duration_secs(600),
+        );
+        let subscribe = msg.command.subscribe.as_ref().unwrap();
+        assert_eq!(subscribe.start_message_rollback_duration_sec, Some(600));
+
+        // Zero and unset must not be sent (proto default 0 = no rollback).
+        let msg = super::messages::subscribe(
+            "topic".to_string(),
+            "sub".to_string(),
+            proto::command_subscribe::SubType::Exclusive,
+            1,
+            2,
+            None,
+            ConsumerOptions::default().with_start_message_rollback_duration_secs(0),
+        );
+        assert_eq!(
+            msg.command
+                .subscribe
+                .unwrap()
+                .start_message_rollback_duration_sec,
+            None
+        );
+
+        let msg = super::messages::subscribe(
+            "topic".to_string(),
+            "sub".to_string(),
+            proto::command_subscribe::SubType::Exclusive,
+            1,
+            2,
+            None,
+            ConsumerOptions::default(),
+        );
+        assert_eq!(
+            msg.command
+                .subscribe
+                .unwrap()
+                .start_message_rollback_duration_sec,
+            None
+        );
     }
 }
