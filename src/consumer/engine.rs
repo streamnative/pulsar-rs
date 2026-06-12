@@ -51,7 +51,7 @@ pub struct ConsumerEngine<Exe: Executor> {
     unacked_messages: HashMap<MessageIdData, Instant>,
     dead_letter_policy: Option<DeadLetterPolicy>,
     options: ConsumerOptions,
-    dequeued_any_message: bool,
+    last_dequeued_message_id: Option<MessageIdData>,
 }
 
 impl<Exe: Executor> ConsumerEngine<Exe> {
@@ -92,7 +92,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             unacked_messages: HashMap::new(),
             dead_letter_policy,
             options,
-            dequeued_any_message: false,
+            last_dequeued_message_id: None,
         }
     }
 
@@ -337,6 +337,15 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                                      channel before receiving"
                     );
                 });
+                true
+            }
+            Some(EngineMessage::SeekPosition(message_id)) => {
+                // Everything recorded before the seek is stale: rebase the
+                // subscribe options on the seek target so a reconnect resumes
+                // there, and drop the rollback so it cannot rewind past it.
+                self.options.start_message_id = message_id;
+                self.options.start_message_rollback_duration_secs = None;
+                self.last_dequeued_message_id = None;
                 true
             }
         }
@@ -616,7 +625,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 error!("tx returned {:?}", e);
                 Error::Custom("tx closed".to_string())
             })?;
-        self.dequeued_any_message = true;
+        self.last_dequeued_message_id = Some(message_id.clone());
         if let Some(duration) = self.unacked_message_redelivery_delay {
             self.unacked_messages.insert(message_id, now + duration);
         }
@@ -643,10 +652,12 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         // Re-applying the start-message rollback on every resubscribe would
         // reset the cursor back by the window again after each broker/network
         // blip, replaying messages this consumer already processed. Mirror the
-        // Java client: the rollback is only sent while the consumer has made
-        // no progress (ConsumerImpl sends it only while startMessageId still
-        // equals the initial one).
-        let options = resubscribe_options(&self.options, self.dequeued_any_message);
+        // Java client (ConsumerImpl.clearReceiverQueue): once the consumer has
+        // made progress, resubscribe from the last dequeued message id instead
+        // of rolling back — clearing the rollback alone would resubscribe at
+        // the default position (latest) and skip whatever was left of the
+        // window.
+        let options = resubscribe_options(&self.options, self.last_dequeued_message_id.as_ref());
 
         let messages = retry_subscribe_consumer(
             &self.client,
@@ -720,15 +731,27 @@ impl<Exe: Executor> std::ops::Drop for ConsumerEngine<Exe> {
 
 /// Options to use when resubscribing after a connection loss.
 ///
-/// The start-message rollback must only be applied while the consumer has
-/// made no progress, matching the Java client (`ConsumerImpl` only sends
-/// `startMessageRollbackDurationInSec` while its `startMessageId` still
-/// equals the initial one). Re-sending it once messages were dequeued would
-/// rewind the cursor by the whole window on every reconnect.
+/// Mirrors the Java client (`ConsumerImpl.clearReceiverQueue`): while the
+/// consumer has made no progress the original options — including the
+/// start-message rollback — are re-sent unchanged; once a message has been
+/// dequeued, the resubscribe starts from that message id (the broker resumes
+/// delivery after it) and the rollback is dropped. Sending the rollback again
+/// would rewind the cursor by the whole window on every reconnect, while
+/// dropping it without a resume position would jump to the default position
+/// (latest) and skip the undrained remainder of the window.
+///
+/// For batched messages the resume id carries the batch index of the last
+/// dequeued message; the broker redelivers the containing entry, so a few
+/// messages of that batch may be seen again (at-least-once, same as the
+/// Java client's coarser entry-level resume).
 #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-fn resubscribe_options(options: &ConsumerOptions, dequeued_any_message: bool) -> ConsumerOptions {
+fn resubscribe_options(
+    options: &ConsumerOptions,
+    last_dequeued_message_id: Option<&MessageIdData>,
+) -> ConsumerOptions {
     let mut options = options.clone();
-    if dequeued_any_message {
+    if let Some(resume_from) = last_dequeued_message_id {
+        options.start_message_id = Some(resume_from.clone());
         options.start_message_rollback_duration_secs = None;
     }
     options
@@ -737,25 +760,40 @@ fn resubscribe_options(options: &ConsumerOptions, dequeued_any_message: bool) ->
 #[cfg(test)]
 mod tests {
     use super::resubscribe_options;
-    use crate::consumer::ConsumerOptions;
+    use crate::{consumer::ConsumerOptions, message::proto::MessageIdData};
 
-    #[test]
-    fn rollback_survives_resubscribe_without_progress() {
-        let options = ConsumerOptions::default().with_start_message_rollback_duration_secs(600);
-        assert_eq!(
-            resubscribe_options(&options, false).start_message_rollback_duration_secs,
-            Some(600)
-        );
+    fn message_id(ledger_id: u64, entry_id: u64) -> MessageIdData {
+        MessageIdData {
+            ledger_id,
+            entry_id,
+            ..Default::default()
+        }
     }
 
     #[test]
-    fn rollback_cleared_on_resubscribe_after_progress() {
-        let options = ConsumerOptions::default().with_start_message_rollback_duration_secs(600);
-        assert_eq!(
-            resubscribe_options(&options, true).start_message_rollback_duration_secs,
-            None
-        );
+    fn resubscribe_without_progress_keeps_rollback_and_start_position() {
+        let options = ConsumerOptions::default()
+            .with_start_message_rollback_duration_secs(600)
+            .starting_on_message(message_id(1, 1));
+        let resubscribe = resubscribe_options(&options, None);
+        assert_eq!(resubscribe.start_message_rollback_duration_secs, Some(600));
+        assert_eq!(resubscribe.start_message_id, Some(message_id(1, 1)));
+    }
+
+    #[test]
+    fn resubscribe_after_progress_resumes_from_last_dequeued() {
+        let options = ConsumerOptions::default()
+            .with_start_message_rollback_duration_secs(600)
+            .starting_on_message(message_id(1, 1));
+        let last = message_id(7, 42);
+        let resubscribe = resubscribe_options(&options, Some(&last));
+        // the rollback must not rewind the cursor again...
+        assert_eq!(resubscribe.start_message_rollback_duration_secs, None);
+        // ...and the resume position replaces the original start id, so the
+        // broker continues after the last delivered message instead of
+        // jumping to the default position (latest).
+        assert_eq!(resubscribe.start_message_id, Some(last));
         // everything else must be preserved
-        assert_eq!(resubscribe_options(&options, true).durable, options.durable);
+        assert_eq!(resubscribe.durable, options.durable);
     }
 }
