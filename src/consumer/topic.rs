@@ -250,9 +250,15 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         // would resubscribe from a stale pre-seek position and silently undo
         // the seek.
         self.engine_tx
-            .send(EngineMessage::SeekPosition(message_id))
+            .send(EngineMessage::SeekPosition(message_id.clone()))
             .await
             .map_err(|e| Error::Custom(format!("could not notify the engine of the seek: {e}")))?;
+        // Consumer::seek rebuilds a replacement TopicConsumer from this
+        // config; rebase it the same way or the replacement would subscribe
+        // with the stale pre-seek start position and re-apply the rollback,
+        // moving the cursor away from the seek target.
+        self.config.options.start_message_id = message_id;
+        self.config.options.start_message_rollback_duration_secs = None;
         Ok(())
     }
 

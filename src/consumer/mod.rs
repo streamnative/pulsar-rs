@@ -200,7 +200,14 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
             InnerConsumer::Multi(c) => {
                 c.seek(consumer_ids, message_id, timestamp).await?;
                 let topics = c.topics();
-                let config = c.config().clone();
+                // The rollback is one-shot: the replacement consumers (and any
+                // consumer update_topics() creates later from this config) must
+                // not re-apply it on top of the position that was just seeked.
+                // start_message_id is left alone here: message ids are
+                // topic-specific, so a single seek target cannot be rebased
+                // into a config shared by every topic of this consumer.
+                let mut config = c.config().clone();
+                config.options.start_message_rollback_duration_secs = None;
 
                 //currently, pulsar only supports seek for non partitioned topics
                 let addrs =
@@ -223,7 +230,6 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
                 let topic_refresh = Duration::from_secs(30);
                 let refresh = Box::pin(client.executor.interval(topic_refresh).map(drop));
                 let namespace = c.namespace.clone();
-                let config = c.config().clone();
                 let topic_regex = c.topic_regex.clone();
                 InnerConsumer::Multi(MultiTopicConsumer {
                     namespace,
