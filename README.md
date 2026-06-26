@@ -14,7 +14,8 @@ Features:
 - Automatic reconnection with exponential back off;
 - Message batching;
 - Compression with LZ4, zlib, zstd or Snappy (can be deactivated with Cargo features);
-- Telemetry using [tracing](https://github.com/tokio-rs/tracing) crate (can be activated with Cargo features).
+- Telemetry using [tracing](https://github.com/tokio-rs/tracing) crate (can be activated with Cargo features);
+- Configurable negative-acknowledgment redelivery delay with pluggable backoff policies
 
 ## Getting Started
 
@@ -31,6 +32,7 @@ Try out [examples](examples):
 - [producer](examples/producer.rs)
 - [consumer](examples/consumer.rs)
 - [reader](examples/reader.rs)
+- [negative_ack](examples/negative_ack.rs)
 
 ## Project Maintainers
 

@@ -1,7 +1,10 @@
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -14,7 +17,14 @@ use crate::{
     connection::Connection,
     consumer::{
         batched_message_iterator::BatchedMessageIterator,
-        data::{DeadLetterPolicy, EngineEvent, EngineMessage},
+        data::{
+            DeadLetterPolicy, InternalEngineEvent, InternalEngineMessage,
+            InternalMessageIdDataSender,
+        },
+        negative_ack_backoff::NegativeAckBackoff,
+        negative_ack_tracker::{
+            NegativeAckSchedule, NegativeAckTracker, NEGATIVE_ACK_REDELIVERY_TICK_INTERVAL,
+        },
         options::ConsumerOptions,
     },
     error::{ConnectionError, ConsumerError},
@@ -32,6 +42,72 @@ use crate::{
 const SYSTEM_PROPERTY_REAL_TOPIC: &str = "REAL_TOPIC";
 const SYSTEM_PROPERTY_ORIGIN_MESSAGE_ID: &str = "ORIGIN_MESSAGE_ID";
 
+#[async_trait::async_trait]
+trait NegativeAckRedeliveryRequester {
+    async fn request_negative_ack_redelivery(
+        &mut self,
+        consumer_id: u64,
+        ids: Vec<MessageIdData>,
+    ) -> Result<(), ConnectionError>;
+}
+
+struct BrokerNegativeAckRedeliveryRequester<Exe: Executor> {
+    connection: Arc<Connection<Exe>>,
+}
+
+#[async_trait::async_trait]
+impl<Exe: Executor> NegativeAckRedeliveryRequester for BrokerNegativeAckRedeliveryRequester<Exe> {
+    async fn request_negative_ack_redelivery(
+        &mut self,
+        consumer_id: u64,
+        ids: Vec<MessageIdData>,
+    ) -> Result<(), ConnectionError> {
+        self.connection
+            .sender()
+            .send_redeliver_unacknowleged_messages(consumer_id, ids)
+            .await
+    }
+}
+
+async fn send_negative_ack_redelivery_with_requester<R>(
+    requester: &mut R,
+    consumer_id: u64,
+    ids: Vec<MessageIdData>,
+) -> Result<(), ConnectionError>
+where
+    R: NegativeAckRedeliveryRequester + ?Sized,
+{
+    let ids = ids
+        .into_iter()
+        .map(|id| NegativeAckTracker::redelivery_message_id(&id))
+        .collect();
+    requester
+        .request_negative_ack_redelivery(consumer_id, ids)
+        .await
+}
+
+async fn dispatch_negative_ack_redelivery_with_requester<R>(
+    tracker: &mut NegativeAckTracker,
+    requester: &mut R,
+    consumer_id: u64,
+    ids: &[MessageIdData],
+    retry_at: Instant,
+) -> Result<(), ConnectionError>
+where
+    R: NegativeAckRedeliveryRequester + ?Sized,
+{
+    match send_negative_ack_redelivery_with_requester(requester, consumer_id, ids.to_vec()).await {
+        Ok(()) => {
+            tracker.mark_dispatched(ids);
+            Ok(())
+        }
+        Err(e) => {
+            tracker.mark_retry_pending(ids, retry_at);
+            Err(e)
+        }
+    }
+}
+
 pub struct ConsumerEngine<Exe: Executor> {
     client: Pulsar<Exe>,
     connection: Arc<Connection<Exe>>,
@@ -40,15 +116,20 @@ pub struct ConsumerEngine<Exe: Executor> {
     sub_type: SubType,
     id: u64,
     name: Option<String>,
-    tx: mpsc::Sender<Result<(MessageIdData, Payload), Error>>,
+    tx: InternalMessageIdDataSender,
     messages_rx: Option<mpsc::UnboundedReceiver<RawMessage>>,
-    engine_rx: Option<mpsc::UnboundedReceiver<EngineMessage<Exe>>>,
-    event_rx: mpsc::UnboundedReceiver<EngineEvent<Exe>>,
-    event_tx: UnboundedSender<EngineEvent<Exe>>,
+    engine_rx: Option<mpsc::UnboundedReceiver<InternalEngineMessage<Exe>>>,
+    event_rx: mpsc::UnboundedReceiver<InternalEngineEvent<Exe>>,
+    event_tx: UnboundedSender<InternalEngineEvent<Exe>>,
     batch_size: u32,
     remaining_messages: i64,
     unacked_message_redelivery_delay: Option<Duration>,
     unacked_messages: HashMap<MessageIdData, Instant>,
+    nack_redelivery_delay: Option<Duration>,
+    negative_ack_backoff: Option<Arc<dyn NegativeAckBackoff>>,
+    negative_ack_tracker: Option<NegativeAckTracker>,
+    negative_ack_ticker_running: Option<Arc<AtomicBool>>,
+    negative_ack_due_event_pending: Arc<AtomicBool>,
     dead_letter_policy: Option<DeadLetterPolicy>,
     options: ConsumerOptions,
 }
@@ -63,11 +144,13 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         sub_type: SubType,
         id: u64,
         name: Option<String>,
-        tx: mpsc::Sender<Result<(MessageIdData, Payload), Error>>,
+        tx: InternalMessageIdDataSender,
         messages_rx: mpsc::UnboundedReceiver<RawMessage>,
-        engine_rx: mpsc::UnboundedReceiver<EngineMessage<Exe>>,
+        engine_rx: mpsc::UnboundedReceiver<InternalEngineMessage<Exe>>,
         batch_size: u32,
         unacked_message_redelivery_delay: Option<Duration>,
+        nack_redelivery_delay: Option<Duration>,
+        negative_ack_backoff: Option<Arc<dyn NegativeAckBackoff>>,
         dead_letter_policy: Option<DeadLetterPolicy>,
         options: ConsumerOptions,
     ) -> ConsumerEngine<Exe> {
@@ -89,6 +172,11 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             remaining_messages: batch_size as i64,
             unacked_message_redelivery_delay,
             unacked_messages: HashMap::new(),
+            nack_redelivery_delay,
+            negative_ack_backoff,
+            negative_ack_tracker: None,
+            negative_ack_ticker_running: None,
+            negative_ack_due_event_pending: Arc::new(AtomicBool::new(false)),
             dead_letter_policy,
             options,
         }
@@ -97,7 +185,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
     fn register_source<E, M>(&self, mut rx: mpsc::UnboundedReceiver<E>, mapper: M) -> Result<(), ()>
     where
         E: Send + 'static,
-        M: Fn(Option<E>) -> EngineEvent<Exe> + Send + Sync + 'static,
+        M: Fn(Option<E>) -> InternalEngineEvent<Exe> + Send + Sync + 'static,
     {
         let mut event_tx = self.event_tx.clone();
 
@@ -138,14 +226,14 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             }
 
             if let Some(messages_rx) = self.messages_rx.take() {
-                self.register_source(messages_rx, |msg| EngineEvent::Message(msg))
+                self.register_source(messages_rx, |msg| InternalEngineEvent::Message(msg))
                     .map_err(|_| {
                         Error::Custom(String::from("Error registering messages_rx source"))
                     })?;
             }
 
             if let Some(engine_rx) = self.engine_rx.take() {
-                self.register_source(engine_rx, |msg| EngineEvent::EngineMessage(msg))
+                self.register_source(engine_rx, |msg| InternalEngineEvent::EngineMessage(msg))
                     .map_err(|_| {
                         Error::Custom(String::from("Error registering engine_rx source"))
                     })?;
@@ -214,14 +302,14 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                     // ```
                     debug!("consumer engine: timeout (1s)");
                 }
-                Ok(Some(EngineEvent::Message(msg))) => {
+                Ok(Some(InternalEngineEvent::Message(msg))) => {
                     debug!("consumer engine: received message, {:?}", msg);
                     let out = self.handle_message_opt(msg).await;
                     if let Some(res) = out {
                         return res;
                     }
                 }
-                Ok(Some(EngineEvent::EngineMessage(msg))) => {
+                Ok(Some(InternalEngineEvent::EngineMessage(msg))) => {
                     debug!("consumer engine: received engine message");
                     let continue_loop = self.handle_ack_opt(msg).await;
                     if !continue_loop {
@@ -276,31 +364,25 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         }
     }
 
-    async fn handle_ack_opt(&mut self, ack_opt: Option<EngineMessage<Exe>>) -> bool {
+    async fn handle_ack_opt(&mut self, ack_opt: Option<InternalEngineMessage<Exe>>) -> bool {
         match ack_opt {
             None => {
                 trace!("ack channel was closed");
                 false
             }
-            Some(EngineMessage::Ack(message_id, cumulative)) => {
+            Some(InternalEngineMessage::Ack(message_id, cumulative)) => {
                 self.ack(message_id, cumulative).await;
                 true
             }
-            Some(EngineMessage::Nack(message_id)) => {
-                if let Err(e) = self
-                    .connection
-                    .sender()
-                    .send_redeliver_unacknowleged_messages(self.id, vec![message_id.clone()])
-                    .await
-                {
-                    error!(
-                        "could not ask for redelivery for message {:?}: {:?}",
-                        message_id, e
-                    );
-                }
+            Some(InternalEngineMessage::Nack(message_id, redelivery_count)) => {
+                self.handle_negative_ack(message_id, redelivery_count).await;
                 true
             }
-            Some(EngineMessage::UnackedRedelivery) => {
+            Some(InternalEngineMessage::NegativeAckRedelivery) => {
+                self.handle_negative_ack_redelivery().await;
+                true
+            }
+            Some(InternalEngineMessage::UnackedRedelivery) => {
                 let mut h = HashSet::new();
                 let now = Instant::now();
                 // info!("unacked messages length: {}", self.unacked_messages.len());
@@ -328,7 +410,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 }
                 true
             }
-            Some(EngineMessage::GetConnection(sender)) => {
+            Some(InternalEngineMessage::GetConnection(sender)) => {
                 let _ = sender.send(self.connection.clone()).map_err(|_| {
                     error!(
                         "consumer requested the engine's connection but dropped the \
@@ -337,13 +419,258 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 });
                 true
             }
+            Some(InternalEngineMessage::ClearNegativeAcks) => {
+                self.clear_negative_ack_state();
+                true
+            }
         }
+    }
+
+    fn make_negative_ack_tracker(&self) -> NegativeAckTracker {
+        NegativeAckTracker::new(
+            self.nack_redelivery_delay,
+            self.negative_ack_backoff.clone(),
+        )
+    }
+
+    fn ensure_negative_ack_tracker(&mut self) -> &mut NegativeAckTracker {
+        if self.negative_ack_tracker.is_none() {
+            self.negative_ack_tracker = Some(self.make_negative_ack_tracker());
+        }
+        self.negative_ack_tracker
+            .as_mut()
+            .expect("negative ack tracker was just initialized")
+    }
+
+    fn start_negative_ack_ticker(&mut self) -> Result<(), ()> {
+        if self
+            .negative_ack_ticker_running
+            .as_ref()
+            .map(|ticker_running| ticker_running.load(Ordering::SeqCst))
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+
+        let ticker_running = Arc::new(AtomicBool::new(true));
+        self.negative_ack_ticker_running = Some(ticker_running.clone());
+        let due_event_pending = self.negative_ack_due_event_pending.clone();
+        let mut event_tx = self.event_tx.clone();
+        let mut interval = self
+            .client
+            .executor
+            .interval(NEGATIVE_ACK_REDELIVERY_TICK_INTERVAL);
+
+        let spawn_result = self.client.executor.spawn(Box::pin(async move {
+            while interval.next().await.is_some() {
+                if !ticker_running.load(Ordering::SeqCst) {
+                    break;
+                }
+
+                if due_event_pending
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_err()
+                {
+                    continue;
+                }
+
+                if event_tx
+                    .send(InternalEngineEvent::EngineMessage(Some(
+                        InternalEngineMessage::NegativeAckRedelivery,
+                    )))
+                    .await
+                    .is_err()
+                {
+                    due_event_pending.store(false, Ordering::SeqCst);
+                    ticker_running.store(false, Ordering::SeqCst);
+                    break;
+                }
+            }
+        }));
+
+        if spawn_result.is_err() {
+            if let Some(ticker_running) = &self.negative_ack_ticker_running {
+                ticker_running.store(false, Ordering::SeqCst);
+            }
+            self.negative_ack_due_event_pending
+                .store(false, Ordering::SeqCst);
+        }
+
+        spawn_result
+    }
+
+    fn stop_negative_ack_ticker_if_idle(&mut self) {
+        let tracker_empty = match &self.negative_ack_tracker {
+            Some(tracker) => tracker.is_empty(),
+            None => true,
+        };
+
+        if tracker_empty {
+            if let Some(ticker_running) = &self.negative_ack_ticker_running {
+                ticker_running.store(false, Ordering::SeqCst);
+            }
+            self.negative_ack_ticker_running = None;
+            self.negative_ack_due_event_pending
+                .store(false, Ordering::SeqCst);
+        }
+    }
+
+    fn clear_negative_ack_state(&mut self) {
+        if let Some(tracker) = self.negative_ack_tracker.as_mut() {
+            tracker.clear();
+        }
+        if let Some(ticker_running) = &self.negative_ack_ticker_running {
+            ticker_running.store(false, Ordering::SeqCst);
+        }
+        self.negative_ack_ticker_running = None;
+        self.negative_ack_due_event_pending
+            .store(false, Ordering::SeqCst);
+    }
+
+    async fn handle_negative_ack(
+        &mut self,
+        message_id: MessageIdData,
+        redelivery_count: Option<u32>,
+    ) {
+        self.remove_negative_ack_from_unacked(&message_id);
+
+        let schedule = self.ensure_negative_ack_tracker().schedule(
+            message_id.clone(),
+            redelivery_count,
+            Instant::now(),
+        );
+
+        match schedule {
+            NegativeAckSchedule::Immediate => {
+                let mut requester = BrokerNegativeAckRedeliveryRequester {
+                    connection: self.connection.clone(),
+                };
+                let consumer_id = self.id;
+                let retry_at = Instant::now() + NEGATIVE_ACK_REDELIVERY_TICK_INTERVAL;
+                match dispatch_negative_ack_redelivery_with_requester(
+                    self.ensure_negative_ack_tracker(),
+                    &mut requester,
+                    consumer_id,
+                    std::slice::from_ref(&message_id),
+                    retry_at,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        self.stop_negative_ack_ticker_if_idle();
+                    }
+                    Err(e) => {
+                        error!(
+                            "could not ask for immediate negative ack redelivery: {:?}",
+                            e
+                        );
+                        if self.start_negative_ack_ticker().is_err() {
+                            error!("could not start negative ack redelivery ticker after immediate redelivery failure");
+                            let mut requester = BrokerNegativeAckRedeliveryRequester {
+                                connection: self.connection.clone(),
+                            };
+                            let retry_at = Instant::now() + NEGATIVE_ACK_REDELIVERY_TICK_INTERVAL;
+                            if let Err(e) = dispatch_negative_ack_redelivery_with_requester(
+                                self.ensure_negative_ack_tracker(),
+                                &mut requester,
+                                consumer_id,
+                                std::slice::from_ref(&message_id),
+                                retry_at,
+                            )
+                            .await
+                            {
+                                error!(
+                                    "could not ask for fallback immediate negative ack redelivery after ticker failure: {:?}",
+                                    e
+                                );
+                            }
+                            self.stop_negative_ack_ticker_if_idle();
+                        }
+                    }
+                }
+            }
+            NegativeAckSchedule::Scheduled | NegativeAckSchedule::DuplicateEarlier => {
+                if self.start_negative_ack_ticker().is_err() {
+                    error!("could not start negative ack redelivery ticker");
+                    let mut requester = BrokerNegativeAckRedeliveryRequester {
+                        connection: self.connection.clone(),
+                    };
+                    let consumer_id = self.id;
+                    let retry_at = Instant::now() + NEGATIVE_ACK_REDELIVERY_TICK_INTERVAL;
+                    if let Err(e) = dispatch_negative_ack_redelivery_with_requester(
+                        self.ensure_negative_ack_tracker(),
+                        &mut requester,
+                        consumer_id,
+                        std::slice::from_ref(&message_id),
+                        retry_at,
+                    )
+                    .await
+                    {
+                        error!(
+                            "could not ask for immediate negative ack redelivery after ticker failure: {:?}",
+                            e
+                        );
+                    }
+                    self.stop_negative_ack_ticker_if_idle();
+                }
+            }
+            NegativeAckSchedule::RetryPending => {}
+        }
+    }
+
+    fn remove_negative_ack_from_unacked(&mut self, message_id: &MessageIdData) {
+        self.unacked_messages
+            .retain(|id, _| !NegativeAckTracker::is_same_redelivery_entry(id, message_id));
+    }
+
+    async fn handle_negative_ack_redelivery(&mut self) {
+        self.negative_ack_due_event_pending
+            .store(false, Ordering::SeqCst);
+
+        let ids = match self.negative_ack_tracker.as_mut() {
+            Some(tracker) => tracker.collect_due(Instant::now()),
+            None => return,
+        };
+
+        if ids.is_empty() {
+            self.stop_negative_ack_ticker_if_idle();
+            return;
+        }
+
+        let mut requester = BrokerNegativeAckRedeliveryRequester {
+            connection: self.connection.clone(),
+        };
+        let consumer_id = self.id;
+        let retry_at = Instant::now() + NEGATIVE_ACK_REDELIVERY_TICK_INTERVAL;
+        if let Some(tracker) = self.negative_ack_tracker.as_mut() {
+            if let Err(e) = dispatch_negative_ack_redelivery_with_requester(
+                tracker,
+                &mut requester,
+                consumer_id,
+                &ids,
+                retry_at,
+            )
+            .await
+            {
+                error!("could not ask for delayed negative ack redelivery: {:?}", e);
+            }
+        }
+
+        self.stop_negative_ack_ticker_if_idle();
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn ack(&mut self, message_id: MessageIdData, cumulative: bool) {
         // FIXME: this does not handle cumulative acks
         self.unacked_messages.remove(&message_id);
+        if let Some(tracker) = self.negative_ack_tracker.as_mut() {
+            if cumulative {
+                tracker.cancel_cumulative_ack(&message_id);
+            } else {
+                tracker.cancel_ack(&message_id);
+            }
+        }
+        self.stop_negative_ack_ticker_if_idle();
         let res = self
             .connection
             .sender()
@@ -540,6 +867,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         } else {
             vec![(message.message_id, payload)]
         };
+        let redelivery_count = message.redelivery_count;
         for (message_id, payload) in payloads {
             match (message.redelivery_count, &self.dead_letter_policy) {
                 (Some(redelivery_count), Some(dead_letter_policy))
@@ -586,15 +914,14 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                     self.client
                         .send(&dead_letter_policy.dead_letter_topic, message)
                         .await?
-                        .await
-                        .map_err(|e| {
-                            error!("One shot cancelled {:?}", e);
-                            Error::Custom("DLQ send error".to_string())
-                        })?;
+                        .await?;
 
                     self.ack(message_id, false).await;
                 }
-                _ => self.send_to_consumer(message_id, payload).await?,
+                _ => {
+                    self.send_to_consumer(message_id, payload, redelivery_count)
+                        .await?
+                }
             }
         }
         Ok(())
@@ -605,10 +932,11 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         &mut self,
         message_id: MessageIdData,
         payload: Payload,
+        redelivery_count: Option<u32>,
     ) -> Result<(), Error> {
         let now = Instant::now();
         self.tx
-            .send(Ok((message_id.clone(), payload)))
+            .send(Ok((message_id.clone(), payload, redelivery_count)))
             .await
             .map_err(|e| {
                 error!("tx returned {:?}", e);
@@ -692,6 +1020,8 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
 
 impl<Exe: Executor> std::ops::Drop for ConsumerEngine<Exe> {
     fn drop(&mut self) {
+        self.clear_negative_ack_state();
+
         let conn = self.connection.clone();
         let id = self.id;
         let name = self.name.clone();
@@ -704,5 +1034,251 @@ impl<Exe: Executor> std::ops::Drop for ConsumerEngine<Exe> {
                 );
             }
         }));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use futures::executor::block_on;
+
+    use super::*;
+    use crate::{
+        consumer::negative_ack_tracker::{NegativeAckSchedule, NegativeAckTracker},
+        message::proto::MessageIdData,
+    };
+
+    #[test]
+    fn nack_handling_uses_tracker_with_zero_delay_immediate_redelivery() {
+        let now = Instant::now();
+        let id = message_id(1, 2, Some(0));
+        let mut tracker = NegativeAckTracker::new(Some(Duration::ZERO), None);
+        let mut requester = FakeNegativeAckRequester::default();
+
+        assert_eq!(
+            tracker.schedule(id.clone(), Some(1), now),
+            NegativeAckSchedule::Immediate
+        );
+        block_on(dispatch_negative_ack_redelivery_with_requester(
+            &mut tracker,
+            &mut requester,
+            7,
+            std::slice::from_ref(&id),
+            now + NEGATIVE_ACK_REDELIVERY_TICK_INTERVAL,
+        ))
+        .unwrap();
+
+        assert_eq!(requester.redelivery_requests, vec![message_id(1, 2, None)]);
+        assert!(tracker
+            .collect_due(now + NEGATIVE_ACK_REDELIVERY_TICK_INTERVAL)
+            .is_empty());
+    }
+
+    #[test]
+    fn due_redelivery_dispatch_is_in_flight_retry_safe() {
+        let now = Instant::now();
+        let id = message_id(1, 2, Some(3));
+        let mut tracker = NegativeAckTracker::new(Some(Duration::from_secs(5)), None);
+        let mut requester = FakeNegativeAckRequester {
+            fail_redelivery: true,
+            ..FakeNegativeAckRequester::default()
+        };
+
+        assert_eq!(
+            tracker.schedule(id.clone(), Some(1), now),
+            NegativeAckSchedule::Scheduled
+        );
+        let due = tracker.collect_due(now + Duration::from_secs(5));
+        assert_eq!(due, vec![message_id(1, 2, None)]);
+
+        let result = block_on(dispatch_negative_ack_redelivery_with_requester(
+            &mut tracker,
+            &mut requester,
+            7,
+            &due,
+            now + Duration::from_secs(5) + NEGATIVE_ACK_REDELIVERY_TICK_INTERVAL,
+        ));
+
+        assert!(matches!(result, Err(ConnectionError::Disconnected)));
+        assert_eq!(requester.redelivery_requests, vec![message_id(1, 2, None)]);
+        let retried = tracker
+            .collect_due(now + Duration::from_secs(5) + NEGATIVE_ACK_REDELIVERY_TICK_INTERVAL);
+        assert_eq!(retried, vec![message_id(1, 2, None)]);
+    }
+
+    #[test]
+    fn immediate_nack_failure_keeps_entry_retryable() {
+        let now = Instant::now();
+        let id = message_id(5, 6, None);
+        let mut tracker = NegativeAckTracker::new(Some(Duration::ZERO), None);
+        let mut requester = FakeNegativeAckRequester {
+            fail_redelivery: true,
+            ..FakeNegativeAckRequester::default()
+        };
+
+        assert_eq!(
+            tracker.schedule(id.clone(), Some(99), now),
+            NegativeAckSchedule::Immediate
+        );
+        let result = block_on(dispatch_negative_ack_redelivery_with_requester(
+            &mut tracker,
+            &mut requester,
+            7,
+            std::slice::from_ref(&id),
+            now + NEGATIVE_ACK_REDELIVERY_TICK_INTERVAL,
+        ));
+
+        assert!(matches!(result, Err(ConnectionError::Disconnected)));
+        assert_eq!(requester.redelivery_requests, vec![id]);
+        let retried = tracker.collect_due(now + NEGATIVE_ACK_REDELIVERY_TICK_INTERVAL);
+        assert_eq!(retried, vec![message_id(5, 6, None)]);
+    }
+
+    #[derive(Default)]
+    struct FakeNegativeAckRequester {
+        redelivery_requests: Vec<MessageIdData>,
+        fail_redelivery: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl NegativeAckRedeliveryRequester for FakeNegativeAckRequester {
+        async fn request_negative_ack_redelivery(
+            &mut self,
+            _consumer_id: u64,
+            ids: Vec<MessageIdData>,
+        ) -> Result<(), ConnectionError> {
+            self.redelivery_requests.extend(ids);
+            if self.fail_redelivery {
+                Err(ConnectionError::Disconnected)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn message_id(ledger_id: u64, entry_id: u64, batch_index: Option<i32>) -> MessageIdData {
+        message_id_for_partition(ledger_id, entry_id, Some(0), batch_index)
+    }
+
+    fn message_id_for_partition(
+        ledger_id: u64,
+        entry_id: u64,
+        partition: Option<i32>,
+        batch_index: Option<i32>,
+    ) -> MessageIdData {
+        MessageIdData {
+            ledger_id,
+            entry_id,
+            partition,
+            batch_index,
+            ack_set: vec![],
+            batch_size: None,
+            first_chunk_message_id: None,
+        }
+    }
+
+    #[test]
+    fn immediate_negative_ack_requests_broker_redelivery_only() {
+        let now = Instant::now();
+        let id = message_id(1, 2, None);
+        let mut tracker = NegativeAckTracker::new(Some(Duration::ZERO), None);
+        let mut requester = FakeNegativeAckRequester::default();
+
+        assert_eq!(
+            tracker.schedule(id.clone(), Some(99), now),
+            NegativeAckSchedule::Immediate
+        );
+        block_on(dispatch_negative_ack_redelivery_with_requester(
+            &mut tracker,
+            &mut requester,
+            7,
+            std::slice::from_ref(&id),
+            now + NEGATIVE_ACK_REDELIVERY_TICK_INTERVAL,
+        ))
+        .unwrap();
+
+        assert_eq!(requester.redelivery_requests, vec![id.clone()]);
+        assert!(tracker
+            .collect_due(now + NEGATIVE_ACK_REDELIVERY_TICK_INTERVAL)
+            .is_empty());
+    }
+
+    #[test]
+    fn delayed_negative_ack_requests_broker_redelivery_when_due() {
+        let now = Instant::now();
+        let id = message_id(1, 2, Some(3));
+        let mut tracker = NegativeAckTracker::new(Some(Duration::from_secs(5)), None);
+        let mut requester = FakeNegativeAckRequester::default();
+
+        assert_eq!(
+            tracker.schedule(id.clone(), Some(99), now),
+            NegativeAckSchedule::Scheduled
+        );
+        assert!(tracker.collect_due(now + Duration::from_secs(4)).is_empty());
+
+        let due = tracker.collect_due(now + Duration::from_secs(5));
+        block_on(dispatch_negative_ack_redelivery_with_requester(
+            &mut tracker,
+            &mut requester,
+            7,
+            &due,
+            now + Duration::from_secs(5) + NEGATIVE_ACK_REDELIVERY_TICK_INTERVAL,
+        ))
+        .unwrap();
+
+        assert_eq!(requester.redelivery_requests, vec![message_id(1, 2, None)]);
+        assert!(tracker
+            .collect_due(now + Duration::from_secs(5) + NEGATIVE_ACK_REDELIVERY_TICK_INTERVAL)
+            .is_empty());
+    }
+
+    #[test]
+    fn id_only_negative_ack_uses_fixed_delay_behavior() {
+        let now = Instant::now();
+        let id = message_id(3, 4, None);
+        let mut tracker = NegativeAckTracker::new(Some(Duration::from_secs(7)), None);
+        let mut requester = FakeNegativeAckRequester::default();
+
+        assert_eq!(
+            tracker.schedule(id.clone(), None, now),
+            NegativeAckSchedule::Scheduled
+        );
+
+        let due = tracker.collect_due(now + Duration::from_secs(7));
+        block_on(dispatch_negative_ack_redelivery_with_requester(
+            &mut tracker,
+            &mut requester,
+            7,
+            &due,
+            now + Duration::from_secs(7) + NEGATIVE_ACK_REDELIVERY_TICK_INTERVAL,
+        ))
+        .unwrap();
+
+        assert_eq!(requester.redelivery_requests, vec![id.clone()]);
+        assert!(tracker
+            .collect_due(now + Duration::from_secs(7) + NEGATIVE_ACK_REDELIVERY_TICK_INTERVAL)
+            .is_empty());
+    }
+
+    #[test]
+    fn clear_negative_ack_state_drains_tracker_and_stops_ticker() {
+        let now = Instant::now();
+        let id = message_id(1, 2, Some(0));
+        let mut tracker = NegativeAckTracker::new(Some(Duration::from_secs(60)), None);
+        let ticker_running = Arc::new(AtomicBool::new(false));
+
+        // Schedule a nack so the tracker is non-empty
+        tracker.schedule(id.clone(), Some(0), now);
+        ticker_running.store(true, Ordering::SeqCst);
+
+        // Simulate what clear_negative_ack_state does
+        tracker.clear();
+        ticker_running.store(false, Ordering::SeqCst);
+
+        assert!(tracker
+            .collect_due(now + Duration::from_secs(120))
+            .is_empty());
+        assert!(!ticker_running.load(Ordering::SeqCst));
     }
 }

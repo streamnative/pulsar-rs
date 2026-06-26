@@ -19,7 +19,9 @@ use crate::{
     connection::Connection,
     consumer::{
         config::ConsumerConfig,
-        data::{DeadLetterPolicy, EngineMessage, MessageData, MessageIdDataReceiver},
+        data::{
+            DeadLetterPolicy, InternalEngineMessage, InternalMessageIdDataReceiver, MessageData,
+        },
         engine::ConsumerEngine,
         message::Message,
     },
@@ -35,8 +37,8 @@ pub struct TopicConsumer<T: DeserializeMessage, Exe: Executor> {
     pub(crate) consumer_id: u64,
     pub(crate) config: ConsumerConfig,
     topic: String,
-    messages: Pin<Box<MessageIdDataReceiver>>,
-    engine_tx: mpsc::UnboundedSender<EngineMessage<Exe>>,
+    messages: Pin<Box<InternalMessageIdDataReceiver>>,
+    engine_tx: mpsc::UnboundedSender<InternalEngineMessage<Exe>>,
     data_type: PhantomData<fn(Payload) -> T::Output>,
     pub(crate) dead_letter_policy: Option<DeadLetterPolicy>,
     pub(super) last_message_received: Option<DateTime<Utc>>,
@@ -62,6 +64,8 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
             unacked_message_redelivery_delay,
             options,
             dead_letter_policy,
+            nack_redelivery_delay,
+            negative_ack_backoff,
         } = config.clone();
         let consumer_id =
             consumer_id.unwrap_or_else(|| CONSUMER_ID_GENERATOR.fetch_add(1, Ordering::SeqCst));
@@ -90,7 +94,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
             let res = client.executor.spawn(Box::pin(async move {
                 while interval.next().await.is_some() {
                     if redelivery_tx
-                        .send(EngineMessage::UnackedRedelivery)
+                        .send(InternalEngineMessage::UnackedRedelivery)
                         .await
                         .is_err()
                     {
@@ -118,6 +122,8 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
             engine_rx,
             batch_size,
             unacked_message_redelivery_delay,
+            nack_redelivery_delay,
+            negative_ack_backoff,
             dead_letter_policy.clone(),
             options.clone(),
         );
@@ -154,7 +160,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
     pub async fn connection(&mut self) -> Result<Arc<Connection<Exe>>, Error> {
         let (resolver, response) = oneshot::channel();
         self.engine_tx
-            .send(EngineMessage::GetConnection(resolver))
+            .send(InternalEngineMessage::GetConnection(resolver))
             .await
             .map_err(|_| ConsumerError::Connection(ConnectionError::Disconnected))?;
 
@@ -183,7 +189,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         self.engine_tx
-            .send(EngineMessage::Ack(msg.message_id().clone(), false))
+            .send(InternalEngineMessage::Ack(msg.message_id().clone(), false))
             .await?;
         Ok(())
     }
@@ -191,20 +197,20 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn ack_with_id(&mut self, msg_id: MessageIdData) -> Result<(), ConsumerError> {
         self.engine_tx
-            .send(EngineMessage::Ack(msg_id, false))
+            .send(InternalEngineMessage::Ack(msg_id, false))
             .await?;
         Ok(())
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub(crate) fn acker(&self) -> mpsc::UnboundedSender<EngineMessage<Exe>> {
+    pub(crate) fn acker(&self) -> mpsc::UnboundedSender<InternalEngineMessage<Exe>> {
         self.engine_tx.clone()
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn cumulative_ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         self.engine_tx
-            .send(EngineMessage::Ack(msg.message_id().clone(), true))
+            .send(InternalEngineMessage::Ack(msg.message_id().clone(), true))
             .await?;
         Ok(())
     }
@@ -215,7 +221,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         msg_id: MessageIdData,
     ) -> Result<(), ConsumerError> {
         self.engine_tx
-            .send(EngineMessage::Ack(msg_id, true))
+            .send(InternalEngineMessage::Ack(msg_id, true))
             .await?;
         Ok(())
     }
@@ -223,14 +229,19 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn nack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         self.engine_tx
-            .send(EngineMessage::Nack(msg.message_id().clone()))
+            .send(InternalEngineMessage::Nack(
+                msg.message_id().clone(),
+                Some(msg.redelivery_count()),
+            ))
             .await?;
         Ok(())
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn nack_with_id(&mut self, msg_id: MessageIdData) -> Result<(), ConsumerError> {
-        self.engine_tx.send(EngineMessage::Nack(msg_id)).await?;
+        self.engine_tx
+            .send(InternalEngineMessage::Nack(msg_id, None))
+            .await?;
         Ok(())
     }
 
@@ -263,6 +274,9 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn close(&mut self) -> Result<(), Error> {
         let consumer_id = self.consumer_id;
+        let _ = self
+            .engine_tx
+            .unbounded_send(InternalEngineMessage::ClearNegativeAcks);
         self.connection()
             .await?
             .sender()
@@ -295,12 +309,17 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    fn create_message(&self, message_id: MessageIdData, payload: Payload) -> Message<T> {
+    fn create_message(
+        &self,
+        message_id: MessageIdData,
+        payload: Payload,
+        redelivery_count: Option<u32>,
+    ) -> Message<T> {
         let message_id = MessageData {
             id: message_id,
             batch_size: payload.metadata.num_messages_in_batch,
         };
-        Message::new(&self.topic, message_id, payload)
+        Message::new_with_redelivery_count(&self.topic, message_id, payload, redelivery_count)
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
@@ -322,15 +341,104 @@ impl<T: DeserializeMessage, Exe: Executor> Stream for TopicConsumer<T, Exe> {
         match self.messages.as_mut().poll_next(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(None) => Poll::Ready(None),
-            Poll::Ready(Some(Ok((id, payload)))) => {
+            Poll::Ready(Some(Ok((id, payload, redelivery_count)))) => {
                 self.last_message_received = Some(Utc::now());
                 self.messages_received += 1;
-                Poll::Ready(Some(Ok(self.create_message(id, payload))))
+                Poll::Ready(Some(Ok(self.create_message(id, payload, redelivery_count))))
             }
             Poll::Ready(Some(Err(e))) => {
                 error!("we are using in the single-consumer and we got an error, {e}");
                 Poll::Ready(Some(Err(e)))
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures::{channel::mpsc, executor::block_on, StreamExt};
+
+    use super::*;
+    use crate::{
+        executor::TokioExecutor,
+        message::{proto::MessageIdData, Metadata},
+    };
+
+    fn message_id() -> MessageIdData {
+        MessageIdData {
+            ledger_id: 1,
+            entry_id: 2,
+            partition: None,
+            batch_index: None,
+            ack_set: vec![],
+            batch_size: None,
+            first_chunk_message_id: None,
+        }
+    }
+
+    fn message(redelivery_count: Option<u32>) -> Message<Vec<u8>> {
+        Message::new_with_redelivery_count(
+            "persistent://public/default/topic",
+            MessageData {
+                id: message_id(),
+                batch_size: None,
+            },
+            Payload {
+                metadata: Metadata::default(),
+                data: vec![],
+            },
+            redelivery_count,
+        )
+    }
+
+    fn topic_consumer() -> (
+        TopicConsumer<Vec<u8>, TokioExecutor>,
+        mpsc::UnboundedReceiver<InternalEngineMessage<TokioExecutor>>,
+    ) {
+        let (_messages_tx, messages_rx) = mpsc::channel(1);
+        let (engine_tx, engine_rx) = mpsc::unbounded();
+
+        (
+            TopicConsumer {
+                consumer_id: 1,
+                config: ConsumerConfig::default(),
+                topic: "persistent://public/default/topic".to_string(),
+                messages: Box::pin(messages_rx),
+                engine_tx,
+                data_type: PhantomData,
+                dead_letter_policy: None,
+                last_message_received: None,
+                messages_received: 0,
+            },
+            engine_rx,
+        )
+    }
+
+    #[test]
+    fn nack_first_delivery_uses_zero_redelivery_count_for_backoff() {
+        let (mut consumer, mut engine_rx) = topic_consumer();
+
+        block_on(consumer.nack(&message(None))).unwrap();
+
+        match block_on(engine_rx.next()).expect("nack event") {
+            InternalEngineMessage::Nack(_, redelivery_count) => {
+                assert_eq!(redelivery_count, Some(0));
+            }
+            _ => panic!("expected nack engine message"),
+        }
+    }
+
+    #[test]
+    fn nack_redelivery_uses_broker_redelivery_count_for_backoff() {
+        let (mut consumer, mut engine_rx) = topic_consumer();
+
+        block_on(consumer.nack(&message(Some(3)))).unwrap();
+
+        match block_on(engine_rx.next()).expect("nack event") {
+            InternalEngineMessage::Nack(_, redelivery_count) => {
+                assert_eq!(redelivery_count, Some(3));
+            }
+            _ => panic!("expected nack engine message"),
         }
     }
 }

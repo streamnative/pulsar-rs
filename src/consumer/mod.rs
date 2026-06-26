@@ -8,6 +8,8 @@ mod engine;
 pub(crate) mod initial_position;
 pub mod message;
 mod multi;
+pub mod negative_ack_backoff;
+mod negative_ack_tracker;
 pub mod options;
 pub mod topic;
 
@@ -28,6 +30,9 @@ use futures::{
 pub use initial_position::InitialPosition;
 pub use message::Message;
 use multi::MultiTopicConsumer;
+pub use negative_ack_backoff::{
+    MultiplierRedeliveryBackoff, MultiplierRedeliveryBackoffBuilder, NegativeAckBackoff,
+};
 pub use options::ConsumerOptions;
 pub use topic::TopicConsumer;
 use url::Url;
@@ -152,9 +157,12 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         }
     }
 
-    /// negative acknowledgement
+    /// Negative acknowledgement.
     ///
-    /// the message will be sent again on the subscription
+    /// The message will be redelivered on the subscription after the configured negative-ack
+    /// redelivery delay (60 seconds by default). If a backoff policy is configured via
+    /// [`ConsumerBuilder::with_negative_ack_backoff`], the delay is computed from the message's
+    /// redelivery count instead.
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn nack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         match &mut self.inner {
@@ -163,9 +171,11 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
         }
     }
 
-    /// negative acknowledgement
+    /// Negative acknowledgement by message ID.
     ///
-    /// the message with the given ID will be sent again on the subscription
+    /// The message with the given ID will be redelivered on the subscription after the configured
+    /// negative-ack redelivery delay (60 seconds by default). Because no redelivery count is
+    /// available, a backoff policy is not applied.
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn nack_with_id(
         &mut self,
@@ -886,6 +896,7 @@ mod tests {
             .with_subscription("nack")
             .with_subscription_type(SubType::Shared)
             .with_dead_letter_policy(dead_letter_policy)
+            .with_nack_redelivery_delay(Duration::from_millis(1))
             .build()
             .await
             .unwrap();
@@ -1005,6 +1016,7 @@ mod tests {
             .with_subscription("nack")
             .with_subscription_type(SubType::Shared)
             .with_dead_letter_policy(dead_letter_policy)
+            .with_nack_redelivery_delay(Duration::from_millis(1))
             .build()
             .await
             .unwrap();

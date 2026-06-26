@@ -192,7 +192,10 @@ pub use connection::Authentication;
 pub use connection_manager::{
     BrokerAddress, ConnectionRetryOptions, OperationRetryOptions, TlsOptions,
 };
-pub use consumer::{Consumer, ConsumerBuilder, ConsumerOptions};
+pub use consumer::{
+    Consumer, ConsumerBuilder, ConsumerOptions, MultiplierRedeliveryBackoff,
+    MultiplierRedeliveryBackoffBuilder, NegativeAckBackoff,
+};
 pub use error::Error;
 #[cfg(any(
     feature = "async-std-runtime",

@@ -10,7 +10,9 @@ use url::Url;
 
 use crate::{
     client::DeserializeMessage,
-    consumer::{ConsumerOptions, DeadLetterPolicy, EngineMessage, Message, TopicConsumer},
+    consumer::{
+        data::InternalEngineMessage, ConsumerOptions, DeadLetterPolicy, Message, TopicConsumer,
+    },
     error::Error,
     executor::Executor,
     message::proto::{command_subscribe::SubType, MessageIdData},
@@ -55,9 +57,11 @@ impl<T: DeserializeMessage + 'static, Exe: Executor> Stream for Reader<T, Exe> {
                     let message_id = msg.message_id().clone();
                     this.state = Some(State::PollingAck(
                         msg,
-                        Box::pin(
-                            async move { acker.send(EngineMessage::Ack(message_id, false)).await },
-                        ),
+                        Box::pin(async move {
+                            acker
+                                .send(InternalEngineMessage::Ack(message_id, false))
+                                .await
+                        }),
                     ));
                     Pin::new(this).poll_next(cx)
                 }
