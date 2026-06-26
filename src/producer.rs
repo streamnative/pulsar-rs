@@ -1,7 +1,6 @@
 //! Message publication
 use std::{
     collections::{btree_map::Entry, BTreeMap, HashMap, VecDeque},
-    io::Write,
     pin::Pin,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -832,9 +831,19 @@ impl<Exe: Executor> TopicProducer<Exe> {
 
 #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
 fn compress_message(
-    mut message: ProducerMessage,
+    message: ProducerMessage,
     compression: &Option<Compression>,
 ) -> Result<ProducerMessage, Error> {
+    // Only the compression arms below mutate `message`; without any of those
+    // features the binding stays immutable, so gate the `mut` to avoid an
+    // `unused_mut` warning.
+    #[cfg(any(
+        feature = "lz4",
+        feature = "flate2",
+        feature = "zstd",
+        feature = "snap"
+    ))]
+    let mut message = message;
     let compressed_message = match compression {
         None | Some(Compression::None) => message,
         #[cfg(feature = "lz4")]
@@ -850,6 +859,8 @@ fn compress_message(
         }
         #[cfg(feature = "flate2")]
         Some(Compression::Zlib(compression)) => {
+            use std::io::Write;
+
             let mut e = flate2::write::ZlibEncoder::new(Vec::new(), compression.level);
             e.write_all(&message.payload[..])
                 .map_err(ProducerError::Io)?;
@@ -871,6 +882,8 @@ fn compress_message(
         }
         #[cfg(feature = "snap")]
         Some(Compression::Snappy(..)) => {
+            use std::io::Write;
+
             let mut compressed_payload = Vec::new();
             {
                 let mut encoder = snap::write::FrameEncoder::new(&mut compressed_payload);

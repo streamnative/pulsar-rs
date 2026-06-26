@@ -437,8 +437,18 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
     async fn process_payload(
         &mut self,
         message: CommandMessage,
-        mut payload: Payload,
+        payload: Payload,
     ) -> Result<(), Error> {
+        // Only the compression arms below mutate `payload`; without any of those
+        // features the binding stays immutable, so gate the `mut` to avoid an
+        // `unused_mut` warning.
+        #[cfg(any(
+            feature = "lz4",
+            feature = "flate2",
+            feature = "zstd",
+            feature = "snap"
+        ))]
+        let mut payload = payload;
         let compression = match payload.metadata.compression {
             None => proto::CompressionType::None,
             Some(compression) => proto::CompressionType::try_from(compression).map_err(|err| {
