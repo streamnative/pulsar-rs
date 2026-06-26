@@ -487,6 +487,10 @@ pub enum AdminError {
     Request(reqwest::Error),
     /// The Pulsar admin API returned a non-2xx HTTP status
     Http { status: u16, body: String },
+    /// The Pulsar admin API returned schema JSON this client could not parse
+    SchemaDecode(String),
+    /// The Pulsar admin API returned an unknown schema type
+    InvalidSchemaType(String),
     /// The topic string could not be parsed
     InvalidTopic(String),
     /// TLS configuration failed (e.g. certificate chain could not be parsed)
@@ -500,6 +504,13 @@ impl fmt::Display for AdminError {
             AdminError::Request(e) => write!(f, "HTTP request failed: {e}"),
             AdminError::Http { status, body } => {
                 write!(f, "admin API returned HTTP {status}: {body}")
+            }
+            AdminError::SchemaDecode(msg) => write!(f, "failed to decode schema response: {msg}"),
+            AdminError::InvalidSchemaType(schema_type) => {
+                write!(
+                    f,
+                    "invalid schema type returned by admin API: {schema_type}"
+                )
             }
             AdminError::InvalidTopic(t) => write!(f, "invalid topic URL: {t}"),
             AdminError::TlsConfig(msg) => write!(f, "TLS configuration error: {msg}"),
