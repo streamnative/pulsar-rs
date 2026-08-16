@@ -500,6 +500,19 @@ impl<Exe: Executor> ConnectionManager<Exe> {
                         "connection {} is not valid anymore, stopping keepalive task",
                         connection_id
                     );
+
+                    // The failure was actually detected one keep_alive interval ago
+                    // (send_ping() set is_valid() = false then). By the time we reach this
+                    // check and stop monitoring, a producer can already be stuck like this:
+                    // - producer.send_message() checked is_valid() while it was still true,
+                    //   and dispatched a message on this connection
+                    // - the connection died sometime after that; the next scheduled
+                    //   send_ping() (last interval) detected it and marked is_valid() = false
+                    // - the producer still holds its own Arc<Connection>, so Connection::drop()
+                    //   (which would also call force_disconnect()) never runs
+                    // - the producer is left waiting for a response that will never come
+                    // force_disconnect() cancels every pending request now, unblocking it.
+                    strong_conn.sender().force_disconnect();
                     break;
                 }
                 if let Some(url) = proxy_to_broker_url.as_ref() {
