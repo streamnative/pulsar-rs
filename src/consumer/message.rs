@@ -9,6 +9,7 @@ use crate::{
 /// a message received by a consumer
 ///
 /// it is generic over the type it can be deserialized to
+#[derive(Debug)]
 pub struct Message<T> {
     /// origin topic of the message
     pub topic: String,
@@ -20,6 +21,15 @@ pub struct Message<T> {
 }
 
 impl<T> Message<T> {
+    pub fn new(topic: &str, message_id: MessageData, payload: Payload) -> Self {
+        Message {
+            topic: topic.to_string(),
+            message_id,
+            payload,
+            _phantom: PhantomData,
+        }
+    }
+
     /// Pulsar metadata for the message
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn metadata(&self) -> &MessageMetadata {

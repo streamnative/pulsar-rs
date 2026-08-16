@@ -14,7 +14,7 @@ use regex::Regex;
 use crate::{
     consumer::{config::ConsumerConfig, message::Message, topic::TopicConsumer},
     error::{ConnectionError, ConsumerError},
-    message::proto::MessageIdData,
+    message::proto::{MessageIdData, Schema},
     proto,
     proto::CommandConsumerStatsResponse,
     DeserializeMessage, Error, Executor, Pulsar,
@@ -30,9 +30,10 @@ pub struct MultiTopicConsumer<T: DeserializeMessage, Exe: Executor> {
     pub(super) topics: VecDeque<String>,
     pub(super) existing_topics: VecDeque<String>,
     #[allow(clippy::type_complexity)]
-    pub(super) new_consumers:
-        Option<Pin<Box<dyn Future<Output = Result<Vec<TopicConsumer<T, Exe>>, Error>> + Send>>>,
-    pub(super) refresh: Pin<Box<dyn Stream<Item = ()> + Send>>,
+    pub(super) new_consumers: Option<
+        Pin<Box<dyn Future<Output = Result<Vec<TopicConsumer<T, Exe>>, Error>> + Send + Sync>>,
+    >,
+    pub(super) refresh: Pin<Box<dyn Stream<Item = ()> + Send + Sync>>,
     pub(super) config: ConsumerConfig,
     // Stats on disconnected consumers to keep metrics correct
     pub(super) disc_messages_received: u64,
@@ -193,7 +194,14 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
                     }),
             )
             .await?;
-            trace!("created {} consumers", consumers.len());
+            if !consumers.is_empty() {
+                let topics: Vec<String> = consumers.iter().map(|c| c.topic()).collect();
+                info!(
+                    "recreated {} consumers for topics: {:?}",
+                    consumers.len(),
+                    topics
+                );
+            }
             Ok(consumers)
         }));
     }
@@ -303,6 +311,19 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn config(&self) -> &ConsumerConfig {
         &self.config
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub(crate) async fn get_schema(
+        &mut self,
+        topic: &str,
+        version: Option<Vec<u8>>,
+    ) -> Result<Option<Schema>, Error> {
+        if let Some(c) = self.consumers.get_mut(topic) {
+            c.get_schema(version).await
+        } else {
+            Err(ConnectionError::Unexpected(format!("no consumer for topic {topic}")).into())
+        }
     }
 }
 

@@ -51,6 +51,7 @@ impl Iterator for BatchedMessageIterator {
             let metadata = Metadata {
                 properties: batched_message.metadata.properties,
                 partition_key: batched_message.metadata.partition_key,
+                ordering_key: batched_message.metadata.ordering_key,
                 event_time: batched_message.metadata.event_time,
                 ..self.metadata.clone()
             };

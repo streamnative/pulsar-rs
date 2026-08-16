@@ -71,11 +71,17 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
                     == Some(command_lookup_topic_response::LookupType::Failed as i32)
             {
                 let error = response.error.and_then(crate::error::server_error);
-                if error == Some(crate::message::proto::ServerError::ServiceNotReady) {
+                if matches!(
+                    error,
+                    Some(
+                        crate::message::proto::ServerError::ServiceNotReady
+                            | crate::message::proto::ServerError::MetadataError,
+                    )
+                ) {
                     if operation_retry_options.max_retries.is_none()
                         || operation_retry_options.max_retries.unwrap() > current_retries
                     {
-                        error!("lookup({}) answered ServiceNotReady, retrying request after {}ms (max_retries = {:?})", topic, operation_retry_options.retry_delay.as_millis(), operation_retry_options.max_retries);
+                        error!("lookup({}) failed with {:?}, retrying request after {}ms (max_retries = {:?})", topic, error, operation_retry_options.retry_delay.as_millis(), operation_retry_options.max_retries);
                         current_retries += 1;
                         self.manager
                             .executor
@@ -116,11 +122,25 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
             } = convert_lookup_response(&response)?;
             is_authoritative = authoritative;
 
-            // use the TLS connection if available
-            let connection_url = if let Some(u) = &broker_url_tls {
-                u.clone()
-            } else if let Some(u) = &broker_url {
-                u.clone()
+            // Use broker url with the same schema of url in setting
+            let (broker_url_maybe_none, broker_port) = match base_url.scheme() {
+                "pulsar+ssl" => (&broker_url_tls, 6651),
+                "pulsar" => (&broker_url, 6650),
+                other => {
+                    error!("invalid scheme: {}", other);
+                    return Err(ServiceDiscoveryError::NotFound);
+                }
+            };
+
+            let (connection_url, broker_url) = if let Some(u) = broker_url_maybe_none {
+                (
+                    u.clone(),
+                    format!(
+                        "{}:{}",
+                        u.host_str().unwrap(),
+                        u.port().unwrap_or(broker_port)
+                    ),
+                )
             } else {
                 return Err(ServiceDiscoveryError::NotFound);
             };
@@ -130,19 +150,6 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
                 base_url.clone()
             } else {
                 connection_url.clone()
-            };
-
-            let broker_url = if let Some(u) = broker_url_tls {
-                format!("{}:{}", u.host_str().unwrap(), u.port().unwrap_or(6651))
-            } else if let Some(u) = broker_url {
-                format!("{}:{}", u.host_str().unwrap(), u.port().unwrap_or(6650))
-            } else {
-                error!(
-                    "tried to lookup a topic but error occured[{:?}]: {:?}",
-                    line!(),
-                    ServiceDiscoveryError::NotFound
-                );
-                return Err(ServiceDiscoveryError::NotFound);
             };
 
             broker_address = BrokerAddress {
@@ -175,9 +182,23 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
         &self,
         topic: S,
     ) -> Result<u32, ServiceDiscoveryError> {
-        let mut connection = self.manager.get_base_connection().await?;
         let topic = topic.into();
 
+        // This is a fast path to reduce the number of lookup requests for topic partition metadata
+        // and as a side effect reduce amplification on zookeeper.
+        // For example, for a topic with 12 partitions, before this patch we did 13 lookup requests
+        // and now, we only did once.
+        // There are some cases where we ask if a partition of a topic is partitioned which could
+        // not be the case. We are able to detect those requests as the topic name is ending
+        // with '...-partition-<number>'. So, to be effective and avoid a regex here, we use
+        // the `contains` method to detect the pattern '-partition-'. if it matches the
+        // pattern as there is no partition in a partitioned topic, we could safely return that the
+        // partition number is 0, that implicitly say that there is only 1 topic and the index is 0.
+        if topic.contains("-partition-") {
+            return Ok(0);
+        }
+
+        let mut connection = self.manager.get_base_connection().await?;
         let mut current_retries = 0u32;
         let start = std::time::Instant::now();
         let operation_retry_options = self.manager.operation_retry_options.clone();
@@ -256,6 +277,7 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
     ) -> Result<Vec<(String, BrokerAddress)>, ServiceDiscoveryError> {
         let topic = topic.into();
         let partitions = self.lookup_partitioned_topic_number(&topic).await?;
+
         trace!("Partitions for topic {}: {}", &topic, &partitions);
         let topics = match partitions {
             0 => vec![topic],

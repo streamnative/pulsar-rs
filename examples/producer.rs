@@ -3,8 +3,9 @@ extern crate serde;
 use std::env;
 
 use pulsar::{
-    authentication::oauth2::OAuth2Authentication, message::proto, producer, Authentication,
-    Error as PulsarError, Pulsar, SerializeMessage, TokioExecutor,
+    authentication::{basic::BasicAuthentication, oauth2::OAuth2Authentication},
+    message::proto,
+    producer, Authentication, Error as PulsarError, Pulsar, SerializeMessage, TokioExecutor,
 };
 
 #[derive(Serialize, Deserialize)]
@@ -47,6 +48,11 @@ async fn main() -> Result<(), pulsar::Error> {
             serde_json::from_str(oauth2_cfg.as_str())
                 .unwrap_or_else(|_| panic!("invalid oauth2 config [{}]", oauth2_cfg.as_str())),
         ));
+    } else if let (Ok(username), Ok(password)) = (
+        env::var("PULSAR_BASIC_USERNAME"),
+        env::var("PULSAR_BASIC_PASSWORD"),
+    ) {
+        builder = builder.with_auth_provider(BasicAuthentication::new(&username, &password))
     }
 
     let pulsar: Pulsar<_> = builder.build().await?;
@@ -67,7 +73,7 @@ async fn main() -> Result<(), pulsar::Error> {
     let mut counter = 0usize;
     loop {
         producer
-            .send(TestData {
+            .send_non_blocking(TestData {
                 data: "data".to_string(),
             })
             .await?

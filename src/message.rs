@@ -204,10 +204,10 @@ impl Message {
                             type_
                         );
                     }
-                    Err(()) => {
+                    Err(unknown_enum) => {
                         warn!(
-                            "Received BaseCommand of unexpected type: {}",
-                            self.command.r#type
+                            "Received BaseCommand of unexpected type {}: {}",
+                            self.command.r#type, unknown_enum
                         );
                     }
                 }
@@ -220,7 +220,11 @@ impl Message {
 /// tokio and async-std codec for Pulsar messages
 pub struct Codec;
 
-#[cfg(feature = "tokio-runtime")]
+#[cfg(any(
+    feature = "tokio-runtime",
+    feature = "tokio-rustls-runtime-aws-lc-rs",
+    feature = "tokio-rustls-runtime-ring"
+))]
 impl tokio_util::codec::Encoder<Message> for Codec {
     type Error = ConnectionError;
 
@@ -250,13 +254,13 @@ impl tokio_util::codec::Encoder<Message> for Codec {
             let crc_offset = buf.len();
             buf.put_u32(0); // NOTE: Checksum (CRC32c). Overrwritten later to avoid copying.
 
-            let metdata_offset = buf.len();
+            let metadata_offset = buf.len();
             buf.put_u32(metadata_size as u32);
             payload.metadata.encode(&mut buf)?;
             buf.put(&payload.data[..]);
 
-            let crc = CRC_CASTAGNOLI.checksum(&buf[metdata_offset..]);
-            let mut crc_buf: &mut [u8] = &mut buf[crc_offset..metdata_offset];
+            let crc = CRC_CASTAGNOLI.checksum(&buf[metadata_offset..]);
+            let mut crc_buf: &mut [u8] = &mut buf[crc_offset..metadata_offset];
             crc_buf.put_u32(crc);
         }
         if dst.remaining_mut() < buf.len() {
@@ -269,7 +273,11 @@ impl tokio_util::codec::Encoder<Message> for Codec {
     }
 }
 
-#[cfg(feature = "tokio-runtime")]
+#[cfg(any(
+    feature = "tokio-runtime",
+    feature = "tokio-rustls-runtime-aws-lc-rs",
+    feature = "tokio-rustls-runtime-ring"
+))]
 impl tokio_util::codec::Decoder for Codec {
     type Item = Message;
     type Error = ConnectionError;
@@ -300,13 +308,27 @@ impl tokio_util::codec::Decoder for Codec {
                             ))
                         })?;
 
-                        // TODO: Check crc32 of payload data
-
                         let metadata = Metadata::decode(payload_frame.metadata)?;
-                        Some(Payload {
-                            metadata,
-                            data: buf.to_vec(),
-                        })
+
+                        //computing crc from metadata using the CRC_CASTAGNOLI checksum
+                        let mut reconstructed_crc_data = Vec::new();
+                        reconstructed_crc_data.put_u32(payload_frame.metadata_size);
+                        reconstructed_crc_data.extend_from_slice(payload_frame.metadata);
+                        reconstructed_crc_data.extend_from_slice(buf);
+
+                        let computed_crc_32 = CRC_CASTAGNOLI.checksum(&reconstructed_crc_data);
+
+                        let checksum32 = payload_frame.checksum;
+                        if checksum32 == computed_crc_32 {
+                            Some(Payload {
+                                metadata,
+                                data: buf.to_vec(),
+                            })
+                        } else {
+                            return Err(ConnectionError::Decoding(
+                                "Checksum mismatch, invalid payload".to_string(),
+                            ));
+                        }
                     } else {
                         None
                     };
@@ -324,9 +346,13 @@ impl tokio_util::codec::Decoder for Codec {
     }
 }
 
-#[cfg(feature = "async-std-runtime")]
+#[cfg(any(
+    feature = "async-std-runtime",
+    feature = "async-std-rustls-runtime-aws-lc-rs",
+    feature = "async-std-rustls-runtime-ring"
+))]
 impl asynchronous_codec::Encoder for Codec {
-    type Item = Message;
+    type Item<'a> = Message;
     type Error = ConnectionError;
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
@@ -355,13 +381,13 @@ impl asynchronous_codec::Encoder for Codec {
             let crc_offset = buf.len();
             buf.put_u32(0); // NOTE: Checksum (CRC32c). Overrwritten later to avoid copying.
 
-            let metdata_offset = buf.len();
+            let metadata_offset = buf.len();
             buf.put_u32(metadata_size as u32);
             payload.metadata.encode(&mut buf)?;
             buf.put(&payload.data[..]);
 
-            let crc = CRC_CASTAGNOLI.checksum(&buf[metdata_offset..]);
-            let mut crc_buf: &mut [u8] = &mut buf[crc_offset..metdata_offset];
+            let crc = CRC_CASTAGNOLI.checksum(&buf[metadata_offset..]);
+            let mut crc_buf: &mut [u8] = &mut buf[crc_offset..metadata_offset];
             crc_buf.put_u32(crc);
         }
         if dst.remaining_mut() < buf.len() {
@@ -374,7 +400,11 @@ impl asynchronous_codec::Encoder for Codec {
     }
 }
 
-#[cfg(feature = "async-std-runtime")]
+#[cfg(any(
+    feature = "async-std-runtime",
+    feature = "async-std-rustls-runtime-aws-lc-rs",
+    feature = "async-std-rustls-runtime-ring"
+))]
 impl asynchronous_codec::Decoder for Codec {
     type Item = Message;
     type Error = ConnectionError;
@@ -405,13 +435,27 @@ impl asynchronous_codec::Decoder for Codec {
                             ))
                         })?;
 
-                        // TODO: Check crc32 of payload data
-
                         let metadata = Metadata::decode(payload_frame.metadata)?;
-                        Some(Payload {
-                            metadata,
-                            data: buf.to_vec(),
-                        })
+
+                        //computing crc from metadata using the CRC_CASTAGNOLI checksum
+                        let mut reconstructed_crc_data = Vec::new();
+                        reconstructed_crc_data.put_u32(payload_frame.metadata_size);
+                        reconstructed_crc_data.extend_from_slice(payload_frame.metadata);
+                        reconstructed_crc_data.extend_from_slice(buf);
+
+                        let computed_crc_32 = CRC_CASTAGNOLI.checksum(&reconstructed_crc_data);
+
+                        let checksum32 = payload_frame.checksum;
+                        if checksum32 == computed_crc_32 {
+                            Some(Payload {
+                                metadata,
+                                data: buf.to_vec(),
+                            })
+                        } else {
+                            return Err(ConnectionError::Decoding(
+                                "Checksum mismatch, invalid payload".to_string(),
+                            ));
+                        }
                     } else {
                         None
                     };
@@ -447,7 +491,7 @@ struct CommandFrame<'a> {
 }
 
 #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-fn command_frame(i: &[u8]) -> IResult<&[u8], CommandFrame> {
+fn command_frame<'a>(i: &'a [u8]) -> IResult<&'a [u8], CommandFrame<'a>> {
     let (i, total_size) = be_u32(i)?;
     let (i, command_size) = be_u32(i)?;
     let (i, command) = take(command_size)(i)?;
@@ -473,7 +517,7 @@ struct PayloadFrame<'a> {
 }
 
 #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-fn payload_frame(i: &[u8]) -> IResult<&[u8], PayloadFrame> {
+fn payload_frame<'a>(i: &'a [u8]) -> IResult<&'a [u8], PayloadFrame<'a>> {
     let (i, magic_number) = be_u16(i)?;
     let (i, checksum) = be_u32(i)?;
     let (i, metadata_size) = be_u32(i)?;
@@ -554,52 +598,9 @@ pub mod proto {
             self.batch_size.hash(state);
         }
     }
-}
 
-impl TryFrom<i32> for base_command::Type {
-    type Error = ();
-
-    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    fn try_from(value: i32) -> Result<Self, ()> {
-        match value {
-            2 => Ok(base_command::Type::Connect),
-            3 => Ok(base_command::Type::Connected),
-            4 => Ok(base_command::Type::Subscribe),
-            5 => Ok(base_command::Type::Producer),
-            6 => Ok(base_command::Type::Send),
-            7 => Ok(base_command::Type::SendReceipt),
-            8 => Ok(base_command::Type::SendError),
-            9 => Ok(base_command::Type::Message),
-            10 => Ok(base_command::Type::Ack),
-            11 => Ok(base_command::Type::Flow),
-            12 => Ok(base_command::Type::Unsubscribe),
-            13 => Ok(base_command::Type::Success),
-            14 => Ok(base_command::Type::Error),
-            15 => Ok(base_command::Type::CloseProducer),
-            16 => Ok(base_command::Type::CloseConsumer),
-            17 => Ok(base_command::Type::ProducerSuccess),
-            18 => Ok(base_command::Type::Ping),
-            19 => Ok(base_command::Type::Pong),
-            20 => Ok(base_command::Type::RedeliverUnacknowledgedMessages),
-            21 => Ok(base_command::Type::PartitionedMetadata),
-            22 => Ok(base_command::Type::PartitionedMetadataResponse),
-            23 => Ok(base_command::Type::Lookup),
-            24 => Ok(base_command::Type::LookupResponse),
-            25 => Ok(base_command::Type::ConsumerStats),
-            26 => Ok(base_command::Type::ConsumerStatsResponse),
-            27 => Ok(base_command::Type::ReachedEndOfTopic),
-            28 => Ok(base_command::Type::Seek),
-            29 => Ok(base_command::Type::GetLastMessageId),
-            30 => Ok(base_command::Type::GetLastMessageIdResponse),
-            31 => Ok(base_command::Type::ActiveConsumerChange),
-            32 => Ok(base_command::Type::GetTopicsOfNamespace),
-            33 => Ok(base_command::Type::GetTopicsOfNamespaceResponse),
-            34 => Ok(base_command::Type::GetSchema),
-            35 => Ok(base_command::Type::GetSchemaResponse),
-            36 => Ok(base_command::Type::AuthChallenge),
-            37 => Ok(base_command::Type::AuthResponse),
-            _ => Err(()),
-        }
+    pub fn client_version() -> String {
+        format!("{}-v{}", "pulsar-rs", env!("CARGO_PKG_VERSION"))
     }
 }
 
@@ -619,8 +620,6 @@ impl From<prost::DecodeError> for ConnectionError {
 
 #[cfg(test)]
 mod tests {
-    use std::convert::TryFrom;
-
     use bytes::BytesMut;
     use tokio_util::codec::{Decoder, Encoder};
 
@@ -629,16 +628,15 @@ mod tests {
     #[test]
     fn parse_simple_command() {
         let input: &[u8] = &[
-            0x00, 0x00, 0x00, 0x22, 0x00, 0x00, 0x00, 0x1E, 0x08, 0x02, 0x12, 0x1A, 0x0A, 0x10,
-            0x32, 0x2E, 0x30, 0x2E, 0x31, 0x2D, 0x69, 0x6E, 0x63, 0x75, 0x62, 0x61, 0x74, 0x69,
-            0x6E, 0x67, 0x20, 0x0C, 0x2A, 0x04, 0x6E, 0x6F, 0x6E, 0x65,
+            0, 0, 0, 34, 0, 0, 0, 30, 8, 2, 18, 26, 10, 16, 112, 117, 108, 115, 97, 114, 45, 114,
+            115, 45, 118, 54, 46, 48, 46, 48, 32, 12, 42, 4, 110, 111, 110, 101,
         ];
 
         let message = Codec.decode(&mut input.into()).unwrap().unwrap();
 
         {
             let connect = message.command.connect.as_ref().unwrap();
-            assert_eq!(connect.client_version, "2.0.1-incubating");
+            assert_eq!(connect.client_version, "pulsar-rs-v6.0.0");
             assert_eq!(connect.auth_method_name.as_ref().unwrap(), "none");
             assert_eq!(connect.protocol_version.as_ref().unwrap(), &12);
         }
@@ -675,18 +673,5 @@ mod tests {
         let mut output = BytesMut::with_capacity(65);
         Codec.encode(message, &mut output).unwrap();
         assert_eq!(&output, input);
-    }
-
-    #[test]
-    fn base_command_type_parsing() {
-        use super::base_command::Type;
-        let mut successes = 0;
-        for i in 0..40 {
-            if let Ok(type_) = Type::try_from(i) {
-                successes += 1;
-                assert_eq!(type_ as i32, i);
-            }
-        }
-        assert_eq!(successes, 36);
     }
 }

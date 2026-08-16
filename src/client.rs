@@ -71,7 +71,7 @@ impl SerializeMessage for () {
     }
 }
 
-impl<'a> SerializeMessage for &'a [u8] {
+impl SerializeMessage for &[u8] {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn serialize_message(input: Self) -> Result<producer::Message, Error> {
         Ok(producer::Message {
@@ -102,7 +102,7 @@ impl SerializeMessage for String {
     }
 }
 
-impl<'a> SerializeMessage for &'a String {
+impl SerializeMessage for &String {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn serialize_message(input: Self) -> Result<producer::Message, Error> {
         let payload = input.as_bytes().to_vec();
@@ -113,7 +113,7 @@ impl<'a> SerializeMessage for &'a String {
     }
 }
 
-impl<'a> SerializeMessage for &'a str {
+impl SerializeMessage for &str {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn serialize_message(input: Self) -> Result<producer::Message, Error> {
         let payload = input.as_bytes().to_vec();
@@ -179,17 +179,20 @@ impl<Exe: Executor> Pulsar<Exe> {
         connection_retry_parameters: Option<ConnectionRetryOptions>,
         operation_retry_parameters: Option<OperationRetryOptions>,
         tls_options: Option<TlsOptions>,
+        outbound_channel_size: Option<usize>,
         executor: Exe,
     ) -> Result<Self, Error> {
         let url: String = url.into();
         let executor = Arc::new(executor);
         let operation_retry_options = operation_retry_parameters.unwrap_or_default();
+        let outbound_channel_size = outbound_channel_size.unwrap_or(100);
         let manager = ConnectionManager::new(
             url,
             auth,
             connection_retry_parameters,
             operation_retry_options.clone(),
             tls_options,
+            outbound_channel_size,
             executor.clone(),
         )
         .await?;
@@ -252,6 +255,7 @@ impl<Exe: Executor> Pulsar<Exe> {
             connection_retry_options: None,
             operation_retry_options: None,
             tls_options: None,
+            outbound_channel_size: None,
             executor,
         }
     }
@@ -443,6 +447,40 @@ impl<Exe: Executor> Pulsar<Exe> {
             .map_err(|_| Error::Custom("producer unexpectedly disconnected".into()))?;
         Ok(SendFuture(future))
     }
+
+    /// Creates an [`AdminClient`][crate::AdminClient] for this cluster.
+    ///
+    /// The admin client reuses the TLS and authentication configuration
+    /// already present on this `Pulsar` instance. Requires one of the
+    /// `admin-api` feature flags and a tokio runtime.
+    ///
+    /// # Arguments
+    ///
+    /// * `admin_url` — base URL of the Pulsar admin HTTP endpoint, e.g.
+    ///   `"http://pulsar-proxy"`.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # async fn run(pulsar: pulsar::Pulsar<pulsar::TokioExecutor>) -> Result<(), pulsar::Error> {
+    /// let admin = pulsar.admin("http://pulsar-proxy")?;
+    /// admin
+    ///     .set_max_unacked_messages_per_consumer(
+    ///         "persistent://public/default/my-topic",
+    ///         500,
+    ///     )
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "admin-api")]
+    pub fn admin(&self, admin_url: impl Into<String>) -> Result<crate::AdminClient, Error> {
+        crate::admin::AdminClient::new(
+            admin_url.into(),
+            &self.manager.tls_options,
+            self.manager.auth.clone(),
+        )
+    }
 }
 
 /// Helper structure to generate a [Pulsar] client
@@ -452,6 +490,7 @@ pub struct PulsarBuilder<Exe: Executor> {
     connection_retry_options: Option<ConnectionRetryOptions>,
     operation_retry_options: Option<OperationRetryOptions>,
     tls_options: Option<TlsOptions>,
+    outbound_channel_size: Option<usize>,
     executor: Exe,
 }
 
@@ -549,6 +588,13 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
         Ok(self.with_certificate_chain(v))
     }
 
+    /// The internal pending queue size for each producer on a topic partition. (default: 100)
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn with_outbound_channel_size(mut self, size: usize) -> Self {
+        self.outbound_channel_size = Some(size);
+        self
+    }
+
     /// creates the Pulsar client and connects it
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn build(self) -> Result<Pulsar<Exe>, Error> {
@@ -558,18 +604,22 @@ impl<Exe: Executor> PulsarBuilder<Exe> {
             connection_retry_options,
             operation_retry_options,
             tls_options,
+            outbound_channel_size,
             executor,
         } = self;
 
-        Pulsar::new(
+        let pulsar = Pulsar::new(
             url,
             auth_provider.map(|p| Arc::new(Mutex::new(p))),
             connection_retry_options,
             operation_retry_options,
             tls_options,
+            outbound_channel_size,
             executor,
         )
-        .await
+        .await?;
+
+        Ok(pulsar)
     }
 }
 
@@ -591,7 +641,7 @@ async fn run_producer<Exe: Executor>(
         resolver,
     }) = messages.next().await
     {
-        match producer.send(topic, payload).await {
+        match producer.send_non_blocking(topic, payload).await {
             Ok(send_f) => {
                 let delay_f = client
                     .executor

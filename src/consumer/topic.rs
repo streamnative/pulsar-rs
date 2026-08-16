@@ -24,7 +24,7 @@ use crate::{
         message::Message,
     },
     error::{ConnectionError, ConsumerError},
-    message::proto::MessageIdData,
+    message::proto::{MessageIdData, Schema},
     proto::CommandConsumerStatsResponse,
     retry_op::retry_subscribe_consumer,
     BrokerAddress, DeserializeMessage, Error, Executor, Payload, Pulsar,
@@ -103,7 +103,8 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
                 return Err(Error::Executor);
             }
         }
-        let (tx, rx) = mpsc::channel(1000);
+        let receiver_queue_size = options.receiver_queue_size.unwrap_or(1000);
+        let (tx, rx) = mpsc::channel(receiver_queue_size as usize);
         let mut c = ConsumerEngine::new(
             client.clone(),
             connection.clone(),
@@ -262,7 +263,6 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn close(&mut self) -> Result<(), Error> {
         let consumer_id = self.consumer_id;
-        self.unsubscribe().await?;
         self.connection()
             .await?
             .sender()
@@ -296,15 +296,21 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn create_message(&self, message_id: MessageIdData, payload: Payload) -> Message<T> {
-        Message {
-            topic: self.topic.clone(),
-            message_id: MessageData {
-                id: message_id,
-                batch_size: payload.metadata.num_messages_in_batch,
-            },
-            payload,
-            _phantom: PhantomData,
-        }
+        let message_id = MessageData {
+            id: message_id,
+            batch_size: payload.metadata.num_messages_in_batch,
+        };
+        Message::new(&self.topic, message_id, payload)
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub(crate) async fn get_schema(
+        &mut self,
+        version: Option<Vec<u8>>,
+    ) -> Result<Option<Schema>, Error> {
+        let conn = self.connection().await?;
+        let schema_response = conn.sender().get_schema(&self.topic, version).await?;
+        Ok(schema_response.schema)
     }
 }
 
@@ -321,7 +327,10 @@ impl<T: DeserializeMessage, Exe: Executor> Stream for TopicConsumer<T, Exe> {
                 self.messages_received += 1;
                 Poll::Ready(Some(Ok(self.create_message(id, payload))))
             }
-            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
+            Poll::Ready(Some(Err(e))) => {
+                error!("we are using in the single-consumer and we got an error, {e}");
+                Poll::Ready(Some(Err(e)))
+            }
         }
     }
 }

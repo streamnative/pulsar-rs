@@ -20,7 +20,6 @@ use futures::{
     task::{Context, Poll},
     Future, FutureExt, Sink, SinkExt, Stream, StreamExt,
 };
-use native_tls::Certificate;
 use proto::MessageIdData;
 use rand::{seq::SliceRandom, thread_rng};
 use url::Url;
@@ -35,6 +34,7 @@ use crate::{
         BaseCommand, Codec, Message,
     },
     producer::{self, ProducerOptions},
+    Certificate,
 };
 
 pub(crate) enum Register {
@@ -93,7 +93,7 @@ impl crate::authentication::Authentication for Authentication {
 
 pub(crate) struct Receiver<S: Stream<Item = Result<Message, ConnectionError>>> {
     inbound: Pin<Box<S>>,
-    outbound: mpsc::UnboundedSender<Message>,
+    control_tx: async_channel::Sender<Message>,
     error: SharedError,
     pending_requests: BTreeMap<RequestKey, oneshot::Sender<Message>>,
     consumers: BTreeMap<u64, mpsc::UnboundedSender<Message>>,
@@ -108,7 +108,7 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Receiver<S> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn new(
         inbound: S,
-        outbound: mpsc::UnboundedSender<Message>,
+        control_tx: async_channel::Sender<Message>,
         error: SharedError,
         registrations: mpsc::UnboundedReceiver<Register>,
         shutdown: oneshot::Receiver<()>,
@@ -116,7 +116,7 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Receiver<S> {
     ) -> Receiver<S> {
         Receiver {
             inbound: Box::pin(inbound),
-            outbound,
+            control_tx,
             error,
             pending_requests: BTreeMap::new(),
             received_messages: BTreeMap::new(),
@@ -132,6 +132,7 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Receiver<S> {
 impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> {
     type Output = Result<(), ()>;
 
+    #[allow(clippy::result_large_err)]
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match self.shutdown.as_mut().poll(cx) {
@@ -176,73 +177,78 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> 
 
         loop {
             match self.inbound.as_mut().poll_next(cx) {
-                Poll::Ready(Some(Ok(msg))) => match msg {
-                    Message {
-                        command: BaseCommand { ping: Some(_), .. },
-                        ..
-                    } => {
-                        let _ = self.outbound.unbounded_send(messages::pong());
-                    }
-                    Message {
-                        command: BaseCommand { pong: Some(_), .. },
-                        ..
-                    } => {
-                        if let Some(sender) = self.ping.take() {
-                            let _ = sender.send(());
-                        }
-                    }
-                    msg => match msg.request_key() {
-                        Some(key @ RequestKey::RequestId(_))
-                        | Some(key @ RequestKey::ProducerSend { .. }) => {
-                            trace!("received this message: {:?}", msg);
-                            if let Some(resolver) = self.pending_requests.remove(&key) {
-                                // We don't care if the receiver has dropped their future
-                                let _ = resolver.send(msg);
-                            } else {
-                                self.received_messages.insert(key, msg);
+                Poll::Ready(Some(Ok(msg))) => {
+                    match msg {
+                        Message {
+                            command: BaseCommand { ping: Some(_), .. },
+                            ..
+                        } => {
+                            if self.control_tx.try_send(messages::pong()).is_err() {
+                                error!("failed to send pong: control channel closed");
+                                self.error.set(ConnectionError::Disconnected);
                             }
                         }
-                        Some(RequestKey::Consumer { consumer_id }) => {
-                            let _ = self
-                                .consumers
-                                .get_mut(&consumer_id)
-                                .map(move |consumer| consumer.unbounded_send(msg));
+                        Message {
+                            command: BaseCommand { pong: Some(_), .. },
+                            ..
+                        } => {
+                            if let Some(sender) = self.ping.take() {
+                                let _ = sender.send(());
+                            }
                         }
-                        Some(RequestKey::CloseConsumer {
-                            consumer_id,
-                            request_id,
-                        }) => {
-                            // FIXME: could the registration still be in queue while we get the
-                            // CloseConsumer message?
-                            if let Some(resolver) = self
-                                .pending_requests
-                                .remove(&RequestKey::RequestId(request_id))
-                            {
-                                // We don't care if the receiver has dropped their future
-                                let _ = resolver.send(msg);
-                            } else {
-                                let res = self
+                        msg => match msg.request_key() {
+                            Some(key @ RequestKey::RequestId(_))
+                            | Some(key @ RequestKey::ProducerSend { .. }) => {
+                                trace!("received this message: {:?}", msg);
+                                if let Some(resolver) = self.pending_requests.remove(&key) {
+                                    // We don't care if the receiver has dropped their future
+                                    let _ = resolver.send(msg);
+                                } else {
+                                    self.received_messages.insert(key, msg);
+                                }
+                            }
+                            Some(RequestKey::Consumer { consumer_id }) => {
+                                let _ = self
                                     .consumers
                                     .get_mut(&consumer_id)
                                     .map(move |consumer| consumer.unbounded_send(msg));
+                            }
+                            Some(RequestKey::CloseConsumer {
+                                consumer_id,
+                                request_id,
+                            }) => {
+                                // FIXME: could the registration still be in queue while we get the
+                                // CloseConsumer message?
+                                if let Some(resolver) = self
+                                    .pending_requests
+                                    .remove(&RequestKey::RequestId(request_id))
+                                {
+                                    // We don't care if the receiver has dropped their future
+                                    let _ = resolver.send(msg);
+                                } else {
+                                    let res = self
+                                        .consumers
+                                        .get_mut(&consumer_id)
+                                        .map(move |consumer| consumer.unbounded_send(msg));
 
-                                if !res.as_ref().map(|r| r.is_ok()).unwrap_or(false) {
-                                    error!("ConnectionReceiver: error transmitting message to consumer: {:?}", res);
+                                    if !res.as_ref().map(|r| r.is_ok()).unwrap_or(false) {
+                                        error!("ConnectionReceiver: error transmitting message to consumer: {:?}", res);
+                                    }
                                 }
                             }
-                        }
-                        Some(RequestKey::AuthChallenge) => {
-                            debug!("Received AuthChallenge");
-                            let _ = self.auth_challenge.unbounded_send(());
-                        }
-                        None => {
-                            warn!(
-                                "Received unexpected message; dropping. Message {:?}",
-                                msg.command
-                            )
-                        }
-                    },
-                },
+                            Some(RequestKey::AuthChallenge) => {
+                                debug!("Received AuthChallenge");
+                                let _ = self.auth_challenge.unbounded_send(());
+                            }
+                            None => {
+                                warn!(
+                                    "Received unexpected message; dropping. Message {:?}",
+                                    msg.command
+                                )
+                            }
+                        },
+                    }
+                }
                 Poll::Ready(None) => {
                     self.error.set(ConnectionError::Disconnected);
                     return Poll::Ready(Err(()));
@@ -279,11 +285,30 @@ impl SerialId {
     }
 }
 
+/// Which outbound channel a message should travel on, and the backpressure
+/// behavior to apply.
+#[derive(Debug, Clone, Copy)]
+enum SendChannel {
+    /// Unbounded control plane. Used for every command other than producer
+    /// `Send` (Ping, Pong, Ack, Flow, Lookup, AuthChallenge, Subscribe and
+    /// its close, GetTopicsOfNamespace, etc.). Never blocks; only fails if
+    /// the sink task has exited.
+    Control,
+    /// Bounded data plane: wait until there is room. Used by `Connection::send`
+    /// when the caller opts into producer-side backpressure.
+    DataBlocking,
+    /// Bounded data plane: return `ConnectionError::SlowDown` if the channel
+    /// is full. Used by `Connection::send` when the caller wants to react to
+    /// backpressure rather than block.
+    DataTrySend,
+}
+
 /// An owned type that can send messages like a connection
 //#[derive(Clone)]
 pub struct ConnectionSender<Exe: Executor> {
     connection_id: Uuid,
-    tx: mpsc::UnboundedSender<Message>,
+    data_tx: async_channel::Sender<Message>,
+    control_tx: async_channel::Sender<Message>,
     registrations: mpsc::UnboundedSender<Register>,
     receiver_shutdown: Option<oneshot::Sender<()>>,
     request_id: SerialId,
@@ -296,7 +321,8 @@ impl<Exe: Executor> ConnectionSender<Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub(crate) fn new(
         connection_id: Uuid,
-        tx: mpsc::UnboundedSender<Message>,
+        data_tx: async_channel::Sender<Message>,
+        control_tx: async_channel::Sender<Message>,
         registrations: mpsc::UnboundedSender<Register>,
         receiver_shutdown: oneshot::Sender<()>,
         request_id: SerialId,
@@ -306,7 +332,8 @@ impl<Exe: Executor> ConnectionSender<Exe> {
     ) -> ConnectionSender<Exe> {
         ConnectionSender {
             connection_id,
-            tx,
+            data_tx,
+            control_tx,
             registrations,
             receiver_shutdown: Some(receiver_shutdown),
             request_id,
@@ -323,13 +350,22 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         producer_name: String,
         sequence_id: u64,
         message: producer::ProducerMessage,
-    ) -> Result<proto::CommandSendReceipt, ConnectionError> {
+        block_if_queue_full: bool,
+    ) -> Result<
+        impl Future<Output = Result<proto::CommandSendReceipt, ConnectionError>>,
+        ConnectionError,
+    > {
         let key = RequestKey::ProducerSend {
             producer_id,
             sequence_id,
         };
         let msg = messages::send(producer_id, producer_name, sequence_id, message);
-        self.send_message(msg, key, |resp| resp.command.send_receipt)
+        let via = if block_if_queue_full {
+            SendChannel::DataBlocking
+        } else {
+            SendChannel::DataTrySend
+        };
+        self.send_message_non_blocking(msg, key, |resp| resp.command.send_receipt, via)
             .await
     }
 
@@ -341,9 +377,10 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         match (
             self.registrations
                 .unbounded_send(Register::Ping { resolver }),
-            self.tx.unbounded_send(messages::ping()),
+            self.control_tx.send(messages::ping()).await?,
         ) {
-            (Ok(_), Ok(_)) => {
+            (Ok(_), ()) => {
+                debug!("set timeout to {:?} for ping-pong", self.operation_timeout);
                 let delay_f = self.executor.delay(self.operation_timeout);
                 pin_mut!(response);
                 pin_mut!(delay_f);
@@ -351,11 +388,13 @@ impl<Exe: Executor> ConnectionSender<Exe> {
                 match select(response, delay_f).await {
                     Either::Left((res, _)) => res
                         .map_err(|oneshot::Canceled| {
+                            error!("connection-sender: send ping, we have been canceled");
                             self.error.set(ConnectionError::Disconnected);
                             ConnectionError::Disconnected
                         })
                         .map(move |_| trace!("received pong from {}", self.connection_id)),
                     Either::Right(_) => {
+                        error!("connection-sender: send ping, we did not received pong inside the timed out");
                         self.error.set(ConnectionError::Io(std::io::Error::new(
                             std::io::ErrorKind::TimedOut,
                             "timeout when sending ping to the Pulsar server",
@@ -431,11 +470,9 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         producer_id: u64,
         producer_name: Option<String>,
         options: ProducerOptions,
-        epoch: u64,
-        user_provided_producer_name: bool,
     ) -> Result<proto::CommandProducerSuccess, ConnectionError> {
         let request_id = self.request_id.get();
-        let msg = messages::create_producer(topic, producer_name, producer_id, request_id, options, epoch, user_provided_producer_name);
+        let msg = messages::create_producer(topic, producer_name, producer_id, request_id, options);
         self.send_message(msg, RequestKey::RequestId(request_id), |resp| {
             resp.command.producer_success
         })
@@ -518,36 +555,43 @@ impl<Exe: Executor> ConnectionSender<Exe> {
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub fn send_flow(&self, consumer_id: u64, message_permits: u32) -> Result<(), ConnectionError> {
-        self.tx
-            .unbounded_send(messages::flow(consumer_id, message_permits))
-            .map_err(|_| ConnectionError::Disconnected)
+    pub async fn send_flow(
+        &self,
+        consumer_id: u64,
+        message_permits: u32,
+    ) -> Result<(), ConnectionError> {
+        self.control_tx
+            .send(messages::flow(consumer_id, message_permits))
+            .await?;
+        Ok(())
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub fn send_ack(
+    pub async fn send_ack(
         &self,
         consumer_id: u64,
         message_ids: Vec<proto::MessageIdData>,
         cumulative: bool,
     ) -> Result<(), ConnectionError> {
-        self.tx
-            .unbounded_send(messages::ack(consumer_id, message_ids, cumulative))
-            .map_err(|_| ConnectionError::Disconnected)
+        self.control_tx
+            .send(messages::ack(consumer_id, message_ids, cumulative))
+            .await?;
+        Ok(())
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub fn send_redeliver_unacknowleged_messages(
+    pub async fn send_redeliver_unacknowleged_messages(
         &self,
         consumer_id: u64,
         message_ids: Vec<proto::MessageIdData>,
     ) -> Result<(), ConnectionError> {
-        self.tx
-            .unbounded_send(messages::redeliver_unacknowleged_messages(
+        self.control_tx
+            .send(messages::redeliver_unacknowleged_messages(
                 consumer_id,
                 message_ids,
             ))
-            .map_err(|_| ConnectionError::Disconnected)
+            .await?;
+        Ok(())
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
@@ -619,17 +663,40 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         extract: F,
     ) -> Result<R, ConnectionError>
     where
-        F: FnOnce(Message) -> Option<R>,
+        F: FnOnce(Message) -> Option<R> + 'static,
+    {
+        // RPCs other than CommandSend go through the unbounded control channel so they are
+        // never throttled by producer-side backpressure on the bounded data channel.
+        self.send_message_non_blocking(msg, key, extract, SendChannel::Control)
+            .await?
+            .await
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    async fn send_message_non_blocking<R: Debug, F>(
+        &self,
+        msg: Message,
+        key: RequestKey,
+        extract: F,
+        via: SendChannel,
+    ) -> Result<impl Future<Output = Result<R, ConnectionError>>, ConnectionError>
+    where
+        F: FnOnce(Message) -> Option<R> + 'static,
     {
         let (resolver, response) = oneshot::channel();
         trace!("sending message(key = {:?}): {:?}", key, msg);
 
         let k = key.clone();
-        let response = async {
+        let error = self.error.clone();
+        let response = async move {
             response
                 .await
                 .map_err(|oneshot::Canceled| {
-                    self.error.set(ConnectionError::Disconnected);
+                    error!(
+                        "response has been canceled (key = {:?}), we are disconnected",
+                        k
+                    );
+                    error.set(ConnectionError::Disconnected);
                     ConnectionError::Disconnected
                 })
                 .map(move |message: Message| {
@@ -638,52 +705,88 @@ impl<Exe: Executor> ConnectionSender<Exe> {
                 })?
         };
 
-        match (
-            self.registrations
-                .unbounded_send(Register::Request { key, resolver }),
-            self.tx.unbounded_send(msg),
-        ) {
-            (Ok(_), Ok(_)) => {
-                let delay_f = self.executor.delay(self.operation_timeout);
-                pin_mut!(response);
-                pin_mut!(delay_f);
-
-                match select(response, delay_f).await {
-                    Either::Left((res, _)) => {
-                        // println!("recv msg: {:?}", res);
-                        res
-                    }
-                    Either::Right(_) => {
+        self.registrations
+            .unbounded_send(Register::Request { key, resolver })
+            .map_err(|e| {
+                warn!(
+                    "connection {} disconnected when sending the Request: {}",
+                    self.connection_id, e
+                );
+                ConnectionError::Disconnected
+            })?;
+        match via {
+            SendChannel::Control => {
+                self.control_tx.try_send(msg).map_err(|e| {
+                    warn!(
+                        "connection {} disconnected when sending the message: {}",
+                        self.connection_id, e
+                    );
+                    ConnectionError::Disconnected
+                })?;
+            }
+            SendChannel::DataBlocking => {
+                self.data_tx.send(msg).await.map_err(|e| {
+                    warn!(
+                        "connection {} disconnected when sending the message: {}",
+                        self.connection_id, e
+                    );
+                    ConnectionError::Disconnected
+                })?;
+            }
+            SendChannel::DataTrySend => {
+                self.data_tx.try_send(msg).map_err(|e| {
+                    if e.is_full() {
+                        ConnectionError::SlowDown
+                    } else {
                         warn!(
-                            "connection {} timedout sending message to the Pulsar server",
-                            self.connection_id
+                            "connection {} disconnected when sending the message: {}",
+                            self.connection_id, e
                         );
-                        self.error.set(ConnectionError::Io(std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            format!(
-                                " connection {} timedout sending message to the Pulsar server",
-                                self.connection_id
-                            ),
-                        )));
-                        Err(ConnectionError::Io(std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            format!(
-                                " connection {} timedout sending message to the Pulsar server",
-                                self.connection_id
-                            ),
-                        )))
+                        ConnectionError::Disconnected
                     }
+                })?;
+            }
+        };
+
+        let connection_id = self.connection_id;
+        let error = self.error.clone();
+        let delay_f = self.executor.delay(self.operation_timeout);
+        trace!(
+            "Create timeout futures with operation timeout at {:?}",
+            self.operation_timeout
+        );
+        let fut = async move {
+            pin_mut!(response);
+            pin_mut!(delay_f);
+            match select(response, delay_f).await {
+                Either::Left((res, _)) => {
+                    debug!("Received response: {:?}", res);
+                    res
+                }
+                Either::Right(_) => {
+                    warn!(
+                        "connection {} timedout sending message to the Pulsar server",
+                        connection_id
+                    );
+                    error.set(ConnectionError::Io(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!(
+                            " connection {} timedout sending message to the Pulsar server",
+                            connection_id
+                        ),
+                    )));
+                    Err(ConnectionError::Io(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!(
+                            " connection {} timedout sending message to the Pulsar server",
+                            connection_id
+                        ),
+                    )))
                 }
             }
-            _ => {
-                warn!(
-                    "connection {} disconnected sending message to the Pulsar server",
-                    self.connection_id
-                );
-                self.error.set(ConnectionError::Disconnected);
-                Err(ConnectionError::Disconnected)
-            }
-        }
+        };
+
+        Ok(fut)
     }
 
     /// wait for desired message(commandproducersuccess with ready field true)
@@ -724,6 +827,19 @@ impl<Exe: Executor> ConnectionSender<Exe> {
             _ => Err(ConnectionError::Disconnected),
         }
     }
+
+    pub(crate) async fn get_schema(
+        &self,
+        topic: &str,
+        version: Option<Vec<u8>>,
+    ) -> Result<proto::CommandGetSchemaResponse, ConnectionError> {
+        let request_id = self.request_id.get();
+        let msg = messages::get_schema(request_id, topic, version);
+        self.send_message(msg, RequestKey::RequestId(request_id), |resp| {
+            resp.command.get_schema_response
+        })
+        .await
+    }
 }
 
 pub struct Connection<Exe: Executor> {
@@ -743,6 +859,7 @@ impl<Exe: Executor> Connection<Exe> {
         tls_hostname_verification_enabled: bool,
         connection_timeout: Duration,
         operation_timeout: Duration,
+        outbound_channel_size: usize,
         executor: Arc<Exe>,
     ) -> Result<Connection<Exe>, ConnectionError> {
         if url.scheme() != "pulsar" && url.scheme() != "pulsar+ssl" {
@@ -801,6 +918,7 @@ impl<Exe: Executor> Connection<Exe> {
                 tls_hostname_verification_enabled,
                 executor.clone(),
                 operation_timeout,
+                outbound_channel_size,
             );
             let delay_f = executor.delay(connection_timeout);
 
@@ -837,8 +955,7 @@ impl<Exe: Executor> Connection<Exe> {
 
         if retryable_errors.is_empty() {
             error!("connection error, not retryable: {:?}", fatal_errors);
-            Err(ConnectionError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            Err(ConnectionError::Io(std::io::Error::other(
                 "fatal error when connecting to the Pulsar server",
             )))
         } else {
@@ -854,16 +971,18 @@ impl<Exe: Executor> Connection<Exe> {
         match auth {
             Some(m_auth) => {
                 let mut auth_guard = m_auth.lock().await;
-                Ok(Some(Authentication {
-                    name: auth_guard.auth_method_name(),
-                    data: auth_guard.auth_data().await?,
-                }))
+                let name = auth_guard.auth_method_name();
+                // wrap the future of auth_data() with Shared so that it implements Sync
+                let data_fut = auth_guard.auth_data().shared();
+                let data = data_fut.await?;
+                Ok(Some(Authentication { name, data }))
             }
             None => Ok(None),
         }
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    #[allow(unused_variables)] // allow_insecure_connection and tls_hostname_verification_enabled are native-tls only
     async fn prepare_stream(
         connection_id: Uuid,
         address: SocketAddr,
@@ -876,6 +995,7 @@ impl<Exe: Executor> Connection<Exe> {
         tls_hostname_verification_enabled: bool,
         executor: Arc<Exe>,
         operation_timeout: Duration,
+        outbound_channel_size: usize,
     ) -> Result<ConnectionSender<Exe>, ConnectionError> {
         match executor.kind() {
             #[cfg(feature = "tokio-runtime")]
@@ -888,7 +1008,7 @@ impl<Exe: Executor> Connection<Exe> {
                         builder.add_root_certificate(certificate.clone());
                     }
                     builder.danger_accept_invalid_hostnames(
-                        allow_insecure_connection && !tls_hostname_verification_enabled,
+                        allow_insecure_connection || !tls_hostname_verification_enabled,
                     );
                     builder.danger_accept_invalid_certs(allow_insecure_connection);
                     let cx = builder.build()?;
@@ -905,6 +1025,7 @@ impl<Exe: Executor> Connection<Exe> {
                         proxy_to_broker_url,
                         executor,
                         operation_timeout,
+                        outbound_channel_size,
                     )
                     .await
                 } else {
@@ -919,11 +1040,73 @@ impl<Exe: Executor> Connection<Exe> {
                         proxy_to_broker_url,
                         executor,
                         operation_timeout,
+                        outbound_channel_size,
                     )
                     .await
                 }
             }
-            #[cfg(not(feature = "tokio-runtime"))]
+            #[cfg(all(
+                any(
+                    feature = "tokio-rustls-runtime-aws-lc-rs",
+                    feature = "tokio-rustls-runtime-ring"
+                ),
+                not(feature = "tokio-runtime")
+            ))]
+            ExecutorKind::Tokio => {
+                if tls {
+                    let stream = tokio::net::TcpStream::connect(&address).await?;
+                    let mut root_store = rustls::RootCertStore::empty();
+
+                    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+                    for certificate in certificate_chain {
+                        root_store.add(certificate.clone())?;
+                    }
+
+                    let config = rustls::ClientConfig::builder()
+                        .with_root_certificates(root_store)
+                        .with_no_client_auth();
+
+                    let cx = tokio_rustls::TlsConnector::from(Arc::new(config));
+                    let stream = cx
+                        .connect(
+                            rustls::pki_types::ServerName::try_from(hostname.as_str())?.to_owned(),
+                            stream,
+                        )
+                        .await
+                        .map(|stream| tokio_util::codec::Framed::new(stream, Codec))?;
+
+                    Connection::connect(
+                        connection_id,
+                        stream,
+                        auth,
+                        proxy_to_broker_url,
+                        executor,
+                        operation_timeout,
+                        outbound_channel_size,
+                    )
+                    .await
+                } else {
+                    let stream = tokio::net::TcpStream::connect(&address)
+                        .await
+                        .map(|stream| tokio_util::codec::Framed::new(stream, Codec))?;
+
+                    Connection::connect(
+                        connection_id,
+                        stream,
+                        auth,
+                        proxy_to_broker_url,
+                        executor,
+                        operation_timeout,
+                        outbound_channel_size,
+                    )
+                    .await
+                }
+            }
+            #[cfg(all(
+                not(feature = "tokio-runtime"),
+                not(feature = "tokio-rustls-runtime-aws-lc-rs"),
+                not(feature = "tokio-rustls-runtime-ring")
+            ))]
             ExecutorKind::Tokio => {
                 unimplemented!("the tokio-runtime cargo feature is not active");
             }
@@ -936,7 +1119,7 @@ impl<Exe: Executor> Connection<Exe> {
                         connector = connector.add_root_certificate(certificate.clone());
                     }
                     connector = connector.danger_accept_invalid_hostnames(
-                        allow_insecure_connection && !tls_hostname_verification_enabled,
+                        allow_insecure_connection || !tls_hostname_verification_enabled,
                     );
                     connector = connector.danger_accept_invalid_certs(allow_insecure_connection);
                     let stream = connector
@@ -951,6 +1134,7 @@ impl<Exe: Executor> Connection<Exe> {
                         proxy_to_broker_url,
                         executor,
                         operation_timeout,
+                        outbound_channel_size,
                     )
                     .await
                 } else {
@@ -965,11 +1149,74 @@ impl<Exe: Executor> Connection<Exe> {
                         proxy_to_broker_url,
                         executor,
                         operation_timeout,
+                        outbound_channel_size,
                     )
                     .await
                 }
             }
-            #[cfg(not(feature = "async-std-runtime"))]
+            #[cfg(all(
+                any(
+                    feature = "async-std-rustls-runtime-aws-lc-rs",
+                    feature = "async-std-rustls-runtime-ring"
+                ),
+                not(feature = "async-std-runtime")
+            ))]
+            #[allow(deprecated)]
+            ExecutorKind::AsyncStd => {
+                if tls {
+                    let stream = async_std::net::TcpStream::connect(&address).await?;
+                    let mut root_store = rustls::RootCertStore::empty();
+
+                    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+                    for certificate in certificate_chain {
+                        root_store.add(certificate.clone())?;
+                    }
+
+                    let config = rustls::ClientConfig::builder()
+                        .with_root_certificates(root_store)
+                        .with_no_client_auth();
+
+                    let connector = futures_rustls::TlsConnector::from(Arc::new(config));
+                    let stream = connector
+                        .connect(
+                            rustls::pki_types::ServerName::try_from(hostname.as_str())?.to_owned(),
+                            stream,
+                        )
+                        .await
+                        .map(|stream| asynchronous_codec::Framed::new(stream, Codec))?;
+
+                    Connection::connect(
+                        connection_id,
+                        stream,
+                        auth,
+                        proxy_to_broker_url,
+                        executor,
+                        operation_timeout,
+                        outbound_channel_size,
+                    )
+                    .await
+                } else {
+                    let stream = async_std::net::TcpStream::connect(&address)
+                        .await
+                        .map(|stream| asynchronous_codec::Framed::new(stream, Codec))?;
+
+                    Connection::connect(
+                        connection_id,
+                        stream,
+                        auth,
+                        proxy_to_broker_url,
+                        executor,
+                        operation_timeout,
+                        outbound_channel_size,
+                    )
+                    .await
+                }
+            }
+            #[cfg(all(
+                not(feature = "async-std-runtime"),
+                not(feature = "async-std-rustls-runtime-aws-lc-rs"),
+                not(feature = "async-std-rustls-runtime-ring")
+            ))]
             ExecutorKind::AsyncStd => {
                 unimplemented!("the async-std-runtime cargo feature is not active");
             }
@@ -984,6 +1231,7 @@ impl<Exe: Executor> Connection<Exe> {
         proxy_to_broker_url: Option<String>,
         executor: Arc<Exe>,
         operation_timeout: Duration,
+        outbound_channel_size: usize,
     ) -> Result<ConnectionSender<Exe>, ConnectionError>
     where
         S: Stream<Item = Result<Message, ConnectionError>>,
@@ -1012,18 +1260,27 @@ impl<Exe: Executor> Connection<Exe> {
                 Some(error.message),
             )),
             Some(Ok(msg)) => {
-                let cmd = msg.command.clone();
-                trace!("received connection response: {:?}", msg);
-                msg.command.connected.ok_or_else(|| {
-                    ConnectionError::Unexpected(format!("Unexpected message from pulsar: {cmd:?}"))
-                })
+                trace!("received connection response: {:?}", &msg);
+                let Some(c) = msg.command.connected else {
+                    return Err(ConnectionError::Unexpected(format!(
+                        "Unexpected message from pulsar: {:?}",
+                        &msg.command
+                    )));
+                };
+
+                Ok(c)
             }
             Some(Err(e)) => Err(e),
             None => Err(ConnectionError::Disconnected),
         }?;
 
         let (mut sink, stream) = stream.split();
-        let (tx, mut rx) = mpsc::unbounded();
+        // Data plane: bounded so that producer Send commands experience natural
+        // backpressure when the broker can't keep up.
+        let (data_tx, data_rx) = async_channel::bounded(outbound_channel_size);
+        // Control plane: unbounded so that Ping/Pong/Ack/Flow/AuthChallenge/etc.
+        // can never be throttled by producer queue depth.
+        let (control_tx, control_rx) = async_channel::unbounded();
         let (registrations_tx, registrations_rx) = mpsc::unbounded();
         let error = SharedError::new();
         let (receiver_shutdown_tx, receiver_shutdown_rx) = oneshot::channel();
@@ -1033,7 +1290,7 @@ impl<Exe: Executor> Connection<Exe> {
             .spawn(Box::pin(
                 Receiver::new(
                     stream,
-                    tx.clone(),
+                    control_tx.clone(),
                     error.clone(),
                     registrations_rx,
                     receiver_shutdown_rx,
@@ -1049,8 +1306,20 @@ impl<Exe: Executor> Connection<Exe> {
 
         let err = error.clone();
         let res = executor.spawn(Box::pin(async move {
-            while let Some(msg) = rx.next().await {
-                // println!("real sent msg: {:?}", msg);
+            loop {
+                // Drain the control plane ahead of the data plane so that broker
+                // keepalive pongs and other RPCs are flushed promptly even when
+                // producer fan-in has saturated the data channel.
+                let msg = futures::select_biased! {
+                    msg = control_rx.recv().fuse() => match msg {
+                        Ok(msg) => msg,
+                        Err(_) => break,
+                    },
+                    msg = data_rx.recv().fuse() => match msg {
+                        Ok(msg) => msg,
+                        Err(_) => break,
+                    },
+                };
                 if let Err(e) = sink.send(msg).await {
                     err.set(e);
                     break;
@@ -1065,13 +1334,13 @@ impl<Exe: Executor> Connection<Exe> {
         if auth.is_some() {
             let auth_challenge_res = executor.spawn({
                 let err = error.clone();
-                let mut tx = tx.clone();
+                let control_tx = control_tx.clone();
                 let auth = auth.clone();
                 Box::pin(async move {
                     while auth_challenge_rx.next().await.is_some() {
                         match Self::prepare_auth_data(auth.clone()).await {
                             Ok(Some(auth_data)) => {
-                                let _ = tx.send(messages::auth_challenge(auth_data)).await;
+                                let _ = control_tx.send(messages::auth_challenge(auth_data)).await;
                             }
                             Ok(None) => (),
                             Err(e) => {
@@ -1090,7 +1359,8 @@ impl<Exe: Executor> Connection<Exe> {
 
         let sender = ConnectionSender::new(
             connection_id,
-            tx,
+            data_tx,
+            control_tx,
             registrations_tx,
             receiver_shutdown_tx,
             SerialId::new(),
@@ -1188,7 +1458,7 @@ pub(crate) mod messages {
                     auth_method_name,
                     auth_data,
                     proxy_to_broker_url,
-                    client_version: String::from("2.0.1-incubating"),
+                    client_version: proto::client_version(),
                     protocol_version: Some(12),
                     ..Default::default()
                 }),
@@ -1229,8 +1499,6 @@ pub(crate) mod messages {
         producer_id: u64,
         request_id: u64,
         options: ProducerOptions,
-        epoch: u64,
-        user_provided_producer_name: bool,
     ) -> Message {
         Message {
             command: proto::BaseCommand {
@@ -1239,7 +1507,6 @@ pub(crate) mod messages {
                     topic,
                     producer_id,
                     request_id,
-                    user_provided_producer_name: Some(user_provided_producer_name),
                     producer_name,
                     encrypted: options.encrypted,
                     metadata: options
@@ -1252,7 +1519,6 @@ pub(crate) mod messages {
                         .collect(),
                     schema: options.schema,
                     producer_access_mode: options.access_mode,
-                    epoch: Some(epoch),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -1275,6 +1541,22 @@ pub(crate) mod messages {
                     namespace,
                     mode: Some(mode as i32),
                     ..Default::default()
+                }),
+                ..Default::default()
+            },
+            payload: None,
+        }
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn get_schema(request_id: u64, topic: &str, version: Option<Vec<u8>>) -> Message {
+        Message {
+            command: proto::BaseCommand {
+                r#type: CommandType::GetSchema as i32,
+                get_schema: Some(proto::CommandGetSchema {
+                    request_id,
+                    topic: topic.to_string(),
+                    schema_version: version,
                 }),
                 ..Default::default()
             },
@@ -1314,6 +1596,7 @@ pub(crate) mod messages {
                     publish_time: Utc::now().timestamp_millis() as u64,
                     replicated_from: None,
                     partition_key: message.partition_key,
+                    ordering_key: message.ordering_key,
                     replicate_to: message.replicate_to,
                     compression: message.compression,
                     uncompressed_size: message.uncompressed_size,
@@ -1600,19 +1883,28 @@ mod tests {
     use uuid::Uuid;
 
     use super::{Connection, Receiver};
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
+    use crate::TokioExecutor;
     use crate::{
         authentication::Authentication,
         error::{AuthenticationError, SharedError},
         message::{BaseCommand, Codec, Message},
         proto::{AuthData, CommandAuthChallenge, CommandAuthResponse, CommandConnected},
-        TokioExecutor,
     };
 
     #[tokio::test]
-    #[cfg(feature = "tokio-runtime")]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
     async fn receiver_auth_challenge_test() {
         let (message_tx, message_rx) = mpsc::unbounded();
-        let (tx, _) = mpsc::unbounded();
+        let (control_tx, _control_rx) = async_channel::unbounded();
         let (_registrations_tx, registrations_rx) = mpsc::unbounded();
         let error = SharedError::new();
         let (_receiver_shutdown_tx, receiver_shutdown_rx) = oneshot::channel();
@@ -1631,7 +1923,7 @@ mod tests {
 
         tokio::spawn(Box::pin(Receiver::new(
             message_rx,
-            tx,
+            control_tx,
             error.clone(),
             registrations_rx,
             receiver_shutdown_rx,
@@ -1646,6 +1938,46 @@ mod tests {
             Ok(auth) => assert!(auth.is_some()),
             _ => panic!("operation timeout"),
         };
+    }
+
+    #[tokio::test]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
+    async fn receiver_routes_ping_to_control_channel() {
+        let (message_tx, message_rx) = mpsc::unbounded();
+        let (control_tx, control_rx) = async_channel::unbounded();
+        let (_registrations_tx, registrations_rx) = mpsc::unbounded();
+        let error = SharedError::new();
+        let (_receiver_shutdown_tx, receiver_shutdown_rx) = oneshot::channel();
+        let (auth_challenge_tx, _auth_challenge_rx) = mpsc::unbounded();
+
+        message_tx
+            .unbounded_send(Ok(super::messages::ping()))
+            .unwrap();
+
+        tokio::spawn(Box::pin(Receiver::new(
+            message_rx,
+            control_tx,
+            error.clone(),
+            registrations_rx,
+            receiver_shutdown_rx,
+            auth_challenge_tx,
+        )));
+
+        let pong = tokio::time::timeout(Duration::from_secs(1), control_rx.recv())
+            .await
+            .expect("timed out waiting for pong on control channel")
+            .expect("control channel closed unexpectedly");
+
+        assert!(
+            pong.command.pong.is_some(),
+            "expected pong response on control channel, got {:?}",
+            pong.command
+        );
+        assert!(!error.is_set(), "receiver should not set error on ping");
     }
 
     struct TestAuthentication {
@@ -1667,7 +1999,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(feature = "tokio-runtime")]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
     async fn connection_auth_challenge_test() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
 
@@ -1720,6 +2056,7 @@ mod tests {
             None,
             TokioExecutor.into(),
             Duration::from_secs(10),
+            100,
         )
         .await;
 
