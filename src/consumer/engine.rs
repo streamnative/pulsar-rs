@@ -579,6 +579,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                         payload: data,
                         properties,
                         partition_key: metadata.partition_key,
+                        partition_key_b64_encoded: metadata.partition_key_b64_encoded,
                         ordering_key: metadata.ordering_key,
                         event_time: metadata.event_time,
                         ..Default::default()

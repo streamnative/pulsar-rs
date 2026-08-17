@@ -1596,6 +1596,7 @@ pub(crate) mod messages {
                     publish_time: Utc::now().timestamp_millis() as u64,
                     replicated_from: None,
                     partition_key: message.partition_key,
+                    partition_key_b64_encoded: message.partition_key_b64_encoded,
                     ordering_key: message.ordering_key,
                     replicate_to: message.replicate_to,
                     compression: message.compression,
