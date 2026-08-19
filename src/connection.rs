@@ -1260,11 +1260,11 @@ impl<Exe: Executor> Connection<Exe> {
                 Some(error.message),
             )),
             Some(Ok(msg)) => {
-                trace!("received connection response: {:?}", &msg);
+                trace!("received connection response: {:?}", msg);
                 let Some(c) = msg.command.connected else {
                     return Err(ConnectionError::Unexpected(format!(
                         "Unexpected message from pulsar: {:?}",
-                        &msg.command
+                        msg.command
                     )));
                 };
 

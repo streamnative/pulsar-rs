@@ -962,13 +962,13 @@ where
         error!(
             "send_message: connection {} disconnected, reconnecting producer for topic: {}",
             connection.id(),
-            &topic
+            topic
         );
 
         if let Err(e) = connection.sender().close_producer(producer_id).await {
             error!(
                 "could not close producer {:?}({}) for topic {}: {:?}",
-                producer_name, producer_id, &topic, e
+                producer_name, producer_id, topic, e
             );
         }
 
@@ -1761,7 +1761,7 @@ mod tests {
                 Err(e) => panic!("failed to send {}: {}", i, e),
             }
         }
-        info!("Messages failed due to SlowDown: {:?}", &failed_indexes);
+        info!("Messages failed due to SlowDown: {:?}", failed_indexes);
         assert!(!failed_indexes.is_empty());
 
         let mut producer = pulsar

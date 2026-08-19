@@ -588,7 +588,7 @@ mod tests {
             debug!(
                 "connected topics for {}: {:?}",
                 consumer.subscription(),
-                &connected_topics
+                connected_topics
             );
             assert_eq!(connected_topics.len(), 2);
             assert!(connected_topics.iter().any(|t| t.ends_with(&topic1)));
