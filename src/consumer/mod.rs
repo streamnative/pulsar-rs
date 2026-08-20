@@ -1,5 +1,6 @@
 //! Topic subscriptions
 
+mod batch_acknowledgment;
 mod batched_message_iterator;
 pub mod builder;
 pub mod config;
@@ -17,6 +18,7 @@ use std::{
     time::Duration,
 };
 
+pub use batch_acknowledgment::BatchAcknowledgment;
 pub use builder::ConsumerBuilder;
 use chrono::{DateTime, Utc};
 pub use data::{DeadLetterPolicy, EngineMessage};
@@ -109,6 +111,8 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
     }
 
     /// acknowledges a single message
+    ///
+    /// For a message from a batched entry, see [`ConsumerBuilder::with_batch_acknowledgment`].
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         match &mut self.inner {
@@ -118,6 +122,9 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
     }
 
     /// acknowledges a single message with a given ID.
+    ///
+    /// An ID for a message inside a batched entry must carry the `batch_index` and
+    /// `batch_size` it was delivered with; without them the whole entry is acknowledged.
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn ack_with_id(
         &mut self,
@@ -131,6 +138,8 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
     }
 
     /// acknowledges a message and all the preceding messages
+    ///
+    /// For a message from a batched entry, see [`ConsumerBuilder::with_batch_acknowledgment`].
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn cumulative_ack(&mut self, msg: &Message<T>) -> Result<(), ConsumerError> {
         match &mut self.inner {
@@ -140,6 +149,9 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
     }
 
     /// acknowledges a message and all the preceding messages with a given ID.
+    ///
+    /// An ID for a message inside a batched entry must carry the `batch_index` and
+    /// `batch_size` it was delivered with; without them the whole entry is acknowledged.
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn cumulative_ack_with_id(
         &mut self,
@@ -1916,5 +1928,467 @@ mod tests {
         );
 
         consumer.ack(&msg).await.unwrap();
+    }
+
+    // Acks of messages inside batched entries. The `indexed_*` tests need
+    // `acknowledgmentAtBatchIndexLevelEnabled=true` on the broker, as set for the standalone
+    // container in CI; the others hold either way.
+
+    /// A fresh topic for batched entries, and the settings its consumers share.
+    struct BatchedTopic {
+        client: Pulsar<TokioExecutor>,
+        name: String,
+        sub_type: SubType,
+        mode: BatchAcknowledgment,
+    }
+
+    impl BatchedTopic {
+        async fn new(test: &str, sub_type: SubType, mode: BatchAcknowledgment) -> Self {
+            init_logger();
+            BatchedTopic {
+                client: new_client().await,
+                name: format!("batch_ack_{test}_{}", rand::random::<u16>()),
+                sub_type,
+                mode,
+            }
+        }
+
+        fn consumer(&self) -> ConsumerBuilder<TokioExecutor> {
+            self.client
+                .consumer()
+                .with_topic(&self.name)
+                .with_subscription("batch_ack")
+                .with_subscription_type(self.sub_type)
+                .with_batch_acknowledgment(self.mode)
+        }
+
+        async fn subscribe(&self) -> Consumer<TestData, TokioExecutor> {
+            self.consumer().build().await.unwrap()
+        }
+
+        /// Closes the consumer and subscribes again, so the broker redelivers whatever the
+        /// subscription still holds.
+        async fn resubscribe(
+            &self,
+            mut consumer: Consumer<TestData, TokioExecutor>,
+        ) -> Consumer<TestData, TokioExecutor> {
+            consumer.close().await.unwrap();
+            drop(consumer);
+            self.subscribe().await
+        }
+
+        async fn producer(&self, batch_size: u32) -> producer::Producer<TokioExecutor> {
+            self.client
+                .producer()
+                .with_topic(&self.name)
+                .with_options(producer::ProducerOptions {
+                    batch_size: Some(batch_size),
+                    ..Default::default()
+                })
+                .build()
+                .await
+                .unwrap()
+        }
+
+        /// Publishes `count` messages as one batched entry.
+        async fn publish_batch(
+            &self,
+            producer: &mut producer::Producer<TokioExecutor>,
+            first: u32,
+            count: u32,
+        ) -> Vec<TestData> {
+            let messages: Vec<TestData> = (first..first + count)
+                .map(|msg| TestData {
+                    topic: self.name.clone(),
+                    msg,
+                })
+                .collect();
+            let receipts = producer.send_all(&messages).await.unwrap();
+            producer.send_batch().await.unwrap();
+            try_join_all(receipts).await.unwrap();
+            messages
+        }
+    }
+
+    async fn receive(
+        consumer: &mut Consumer<TestData, TokioExecutor>,
+        count: usize,
+    ) -> Vec<Message<TestData>> {
+        let mut messages = Vec::with_capacity(count);
+        for _ in 0..count {
+            messages.push(recv_within(consumer, DEFAULT_RECV_TIMEOUT).await.unwrap());
+        }
+        messages
+    }
+
+    fn payloads(messages: &[Message<TestData>]) -> Vec<TestData> {
+        messages.iter().map(|m| m.deserialize().unwrap()).collect()
+    }
+
+    fn batch_indexes(messages: &[Message<TestData>]) -> Vec<Option<i32>> {
+        messages
+            .iter()
+            .map(|m| m.message_id().batch_index)
+            .collect()
+    }
+
+    async fn assert_nothing_left(consumer: &mut Consumer<TestData, TokioExecutor>) {
+        if let Ok(msg) = recv_within(consumer, Duration::from_secs(2)).await {
+            panic!(
+                "subscription still holds {:?} ({:?})",
+                msg.deserialize().unwrap(),
+                msg.message_id()
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
+    async fn tracked_entry_is_acked_once_every_message_is_acked() {
+        let topic = BatchedTopic::new("entry", SubType::Shared, BatchAcknowledgment::Tracked).await;
+        let mut consumer = topic.subscribe().await;
+        let mut producer = topic.producer(5).await;
+        let published = topic.publish_batch(&mut producer, 0, 5).await;
+
+        let received = receive(&mut consumer, 5).await;
+        assert_eq!(payloads(&received), published);
+        let entry = received[0].message_id().entry();
+        assert!(received
+            .iter()
+            .all(|m| m.message_id().entry() == entry && m.message_id().batch_size == Some(5)));
+
+        // Four of the five acked: the entry is not, and comes back whole.
+        for msg in &received[..4] {
+            consumer.ack(msg).await.unwrap();
+        }
+        let mut consumer = topic.resubscribe(consumer).await;
+        let redelivered = receive(&mut consumer, 5).await;
+        assert_eq!(payloads(&redelivered), published);
+        assert!(redelivered.iter().all(|m| m.message_id().entry() == entry));
+
+        for msg in &redelivered {
+            consumer.ack(msg).await.unwrap();
+        }
+        let mut consumer = topic.resubscribe(consumer).await;
+        assert_nothing_left(&mut consumer).await;
+    }
+
+    #[tokio::test]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
+    async fn indexed_ack_redelivers_only_unacked_messages() {
+        let topic =
+            BatchedTopic::new("indexed", SubType::Shared, BatchAcknowledgment::Indexed).await;
+        let mut consumer = topic.subscribe().await;
+        let mut producer = topic.producer(5).await;
+        let published = topic.publish_batch(&mut producer, 0, 5).await;
+
+        let received = receive(&mut consumer, 5).await;
+        assert_eq!(payloads(&received), published);
+        for index in [0, 1, 3] {
+            consumer.ack(&received[index]).await.unwrap();
+        }
+
+        let mut consumer = topic.resubscribe(consumer).await;
+        let redelivered = receive(&mut consumer, 2).await;
+        assert_eq!(batch_indexes(&redelivered), vec![Some(2), Some(4)]);
+        assert_eq!(
+            payloads(&redelivered),
+            vec![published[2].clone(), published[4].clone()]
+        );
+        assert_nothing_left(&mut consumer).await;
+
+        for msg in &redelivered {
+            consumer.ack(msg).await.unwrap();
+        }
+        let mut consumer = topic.resubscribe(consumer).await;
+        assert_nothing_left(&mut consumer).await;
+    }
+
+    #[tokio::test]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
+    async fn tracked_cumulative_ack_inside_an_entry_acks_the_preceding_entries() {
+        let topic = BatchedTopic::new(
+            "cumulative",
+            SubType::Exclusive,
+            BatchAcknowledgment::Tracked,
+        )
+        .await;
+        let mut consumer = topic.subscribe().await;
+        let mut producer = topic.producer(3).await;
+        let first = topic.publish_batch(&mut producer, 0, 3).await;
+        let second = topic.publish_batch(&mut producer, 3, 3).await;
+
+        let received = receive(&mut consumer, 6).await;
+        assert_eq!(payloads(&received), [first, second.clone()].concat());
+        assert_ne!(
+            received[0].message_id().entry(),
+            received[3].message_id().entry()
+        );
+
+        // Acking up to the middle of the second entry acks the first entry and leaves the
+        // second to be redelivered whole.
+        consumer.cumulative_ack(&received[4]).await.unwrap();
+        let mut consumer = topic.resubscribe(consumer).await;
+        let redelivered = receive(&mut consumer, 3).await;
+        assert_eq!(payloads(&redelivered), second);
+        assert_nothing_left(&mut consumer).await;
+
+        consumer.cumulative_ack(&redelivered[2]).await.unwrap();
+        let mut consumer = topic.resubscribe(consumer).await;
+        assert_nothing_left(&mut consumer).await;
+    }
+
+    #[tokio::test]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
+    async fn tracked_acks_by_id_count_toward_the_entry() {
+        let topic = BatchedTopic::new("by_id", SubType::Shared, BatchAcknowledgment::Tracked).await;
+        let mut consumer = topic.subscribe().await;
+        let mut producer = topic.producer(3).await;
+        let published = topic.publish_batch(&mut producer, 0, 3).await;
+
+        let received = receive(&mut consumer, 3).await;
+        assert_eq!(payloads(&received), published);
+        for msg in &received[..2] {
+            consumer
+                .ack_with_id(&topic.name, msg.message_id().clone())
+                .await
+                .unwrap();
+        }
+        let mut consumer = topic.resubscribe(consumer).await;
+        let redelivered = receive(&mut consumer, 3).await;
+        assert_eq!(payloads(&redelivered), published);
+
+        for msg in &redelivered {
+            consumer
+                .ack_with_id(&topic.name, msg.message_id().clone())
+                .await
+                .unwrap();
+        }
+        let mut consumer = topic.resubscribe(consumer).await;
+        assert_nothing_left(&mut consumer).await;
+    }
+
+    #[tokio::test]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
+    async fn tracked_nack_redelivers_the_whole_entry() {
+        let topic = BatchedTopic::new("nack", SubType::Shared, BatchAcknowledgment::Tracked).await;
+        let mut consumer = topic.subscribe().await;
+        let mut producer = topic.producer(4).await;
+        let published = topic.publish_batch(&mut producer, 0, 4).await;
+
+        let received = receive(&mut consumer, 4).await;
+        assert_eq!(payloads(&received), published);
+        for msg in &received[..3] {
+            consumer.ack(msg).await.unwrap();
+        }
+        consumer.nack(&received[3]).await.unwrap();
+
+        // The entry comes back whole, already acked messages included, and has to be acked
+        // whole again.
+        let redelivered = receive(&mut consumer, 4).await;
+        assert_eq!(payloads(&redelivered), published);
+        for msg in &redelivered {
+            consumer.ack(msg).await.unwrap();
+        }
+        let mut consumer = topic.resubscribe(consumer).await;
+        assert_nothing_left(&mut consumer).await;
+    }
+
+    #[tokio::test]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
+    async fn indexed_nack_redelivers_only_unacked_messages() {
+        let topic = BatchedTopic::new(
+            "indexed_nack",
+            SubType::Shared,
+            BatchAcknowledgment::Indexed,
+        )
+        .await;
+        let mut consumer = topic.subscribe().await;
+        let mut producer = topic.producer(5).await;
+        let published = topic.publish_batch(&mut producer, 0, 5).await;
+
+        let received = receive(&mut consumer, 5).await;
+        assert_eq!(payloads(&received), published);
+        for index in [0, 1, 3] {
+            consumer.ack(&received[index]).await.unwrap();
+        }
+        consumer.nack(&received[2]).await.unwrap();
+
+        let redelivered = receive(&mut consumer, 2).await;
+        assert_eq!(batch_indexes(&redelivered), vec![Some(2), Some(4)]);
+        assert_eq!(
+            payloads(&redelivered),
+            vec![published[2].clone(), published[4].clone()]
+        );
+        assert_nothing_left(&mut consumer).await;
+
+        for msg in &redelivered {
+            consumer.ack(msg).await.unwrap();
+        }
+        let mut consumer = topic.resubscribe(consumer).await;
+        assert_nothing_left(&mut consumer).await;
+    }
+
+    #[tokio::test]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
+    async fn indexed_cumulative_ack_redelivers_only_the_unacked_tail() {
+        let topic = BatchedTopic::new(
+            "indexed_cumulative",
+            SubType::Exclusive,
+            BatchAcknowledgment::Indexed,
+        )
+        .await;
+        let mut consumer = topic.subscribe().await;
+        let mut producer = topic.producer(3).await;
+        let first = topic.publish_batch(&mut producer, 0, 3).await;
+        let second = topic.publish_batch(&mut producer, 3, 3).await;
+
+        let received = receive(&mut consumer, 6).await;
+        assert_eq!(payloads(&received), [first, second.clone()].concat());
+        consumer.cumulative_ack(&received[4]).await.unwrap();
+
+        let mut consumer = topic.resubscribe(consumer).await;
+        let redelivered = receive(&mut consumer, 1).await;
+        assert_eq!(batch_indexes(&redelivered), vec![Some(2)]);
+        assert_eq!(payloads(&redelivered), vec![second[2].clone()]);
+        assert_nothing_left(&mut consumer).await;
+
+        consumer.cumulative_ack(&redelivered[0]).await.unwrap();
+        let mut consumer = topic.resubscribe(consumer).await;
+        assert_nothing_left(&mut consumer).await;
+    }
+
+    #[tokio::test]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
+    async fn tracked_unacked_entry_is_redelivered_after_the_resend_delay() {
+        let topic =
+            BatchedTopic::new("resend", SubType::Shared, BatchAcknowledgment::Tracked).await;
+        let mut consumer: Consumer<TestData, _> = topic
+            .consumer()
+            .with_unacked_message_resend_delay(Some(Duration::from_secs(1)))
+            .build()
+            .await
+            .unwrap();
+        let mut producer = topic.producer(3).await;
+        let published = topic.publish_batch(&mut producer, 0, 3).await;
+
+        let received = receive(&mut consumer, 3).await;
+        assert_eq!(payloads(&received), published);
+        for msg in &received[..2] {
+            consumer.ack(msg).await.unwrap();
+        }
+
+        // One message left unacked: the delay expires for the entry and it comes back
+        // whole.
+        let redelivered = receive(&mut consumer, 3).await;
+        assert_eq!(payloads(&redelivered), published);
+        for msg in &redelivered {
+            consumer.ack(msg).await.unwrap();
+        }
+        assert_nothing_left(&mut consumer).await;
+    }
+
+    #[tokio::test]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
+    async fn indexed_unacked_tail_is_redelivered_after_the_resend_delay() {
+        let topic = BatchedTopic::new(
+            "indexed_resend",
+            SubType::Exclusive,
+            BatchAcknowledgment::Indexed,
+        )
+        .await;
+        let mut consumer: Consumer<TestData, _> = topic
+            .consumer()
+            .with_unacked_message_resend_delay(Some(Duration::from_secs(1)))
+            .build()
+            .await
+            .unwrap();
+        let mut producer = topic.producer(3).await;
+        let published = topic.publish_batch(&mut producer, 0, 3).await;
+
+        let received = receive(&mut consumer, 3).await;
+        assert_eq!(payloads(&received), published);
+        consumer.cumulative_ack(&received[1]).await.unwrap();
+
+        // The last message is left unacked: the delay expires for the entry and only that
+        // message comes back, without resubscribing.
+        let redelivered = receive(&mut consumer, 1).await;
+        assert_eq!(batch_indexes(&redelivered), vec![Some(2)]);
+        assert_eq!(payloads(&redelivered), vec![published[2].clone()]);
+        consumer.ack(&redelivered[0]).await.unwrap();
+        assert_nothing_left(&mut consumer).await;
+    }
+
+    #[tokio::test]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
+    async fn tracked_cumulative_ack_inside_the_first_entry_of_a_ledger() {
+        let topic = BatchedTopic::new(
+            "first_entry",
+            SubType::Exclusive,
+            BatchAcknowledgment::Tracked,
+        )
+        .await;
+        let mut consumer = topic.subscribe().await;
+        let mut producer = topic.producer(3).await;
+        let published = topic.publish_batch(&mut producer, 0, 3).await;
+
+        let received = receive(&mut consumer, 3).await;
+        assert_eq!(payloads(&received), published);
+        assert_eq!(
+            received[0].message_id().entry_id,
+            0,
+            "a new topic starts a new ledger, whose first entry is 0"
+        );
+
+        // The preceding position is (ledger, -1), which the broker has to accept as a
+        // cumulative ack of nothing in this ledger.
+        consumer.cumulative_ack(&received[1]).await.unwrap();
+        let mut consumer = topic.resubscribe(consumer).await;
+        let redelivered = receive(&mut consumer, 3).await;
+        assert_eq!(payloads(&redelivered), published);
+
+        consumer.cumulative_ack(&redelivered[2]).await.unwrap();
+        let mut consumer = topic.resubscribe(consumer).await;
+        assert_nothing_left(&mut consumer).await;
     }
 }
