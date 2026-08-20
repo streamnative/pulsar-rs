@@ -55,6 +55,7 @@ jobs:
             -e PULSAR_PREFIX_brokerServicePort=6650 \
             -e PULSAR_PREFIX_webServicePort=8080 \
             -e PULSAR_PREFIX_topicLevelPoliciesEnabled=true \
+            -e PULSAR_PREFIX_acknowledgmentAtBatchIndexLevelEnabled=true \
             apachepulsar/pulsar:${{ matrix.pulsar-version }} \
             bash -c "bin/apply-config-from-env.py conf/standalone.conf && bin/pulsar standalone"
 

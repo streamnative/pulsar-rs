@@ -599,6 +599,45 @@ pub mod proto {
         }
     }
 
+    impl MessageIdData {
+        /// Batch index and batch size, when this id names a message inside a batch.
+        pub(crate) fn batch(&self) -> Option<(u32, u32)> {
+            match (self.batch_index, self.batch_size) {
+                (Some(index), Some(size)) if index >= 0 && size > 0 => {
+                    Some((index as u32, size as u32))
+                }
+                _ => None,
+            }
+        }
+
+        /// The id of the entry this message belongs to, with `partition` filled in (`-1` when
+        /// unset, as the broker sends it) so that ids differing only in whether they carry it
+        /// compare equal.
+        pub(crate) fn entry(&self) -> MessageIdData {
+            MessageIdData {
+                ledger_id: self.ledger_id,
+                entry_id: self.entry_id,
+                partition: Some(self.partition.unwrap_or(-1)),
+                ..Default::default()
+            }
+        }
+
+        /// The id of the preceding entry. Below entry 0 this wraps to the `-1` the broker reads
+        /// as the position before the ledger's first entry.
+        pub(crate) fn prev_entry(&self) -> MessageIdData {
+            MessageIdData {
+                entry_id: self.entry_id.wrapping_sub(1),
+                ..self.entry()
+            }
+        }
+
+        /// The entry's position as the broker orders it: `entry_id` is signed there, so a
+        /// ledger's `-1` sorts before its first entry.
+        pub(crate) fn position(&self) -> (u64, i64) {
+            (self.ledger_id, self.entry_id as i64)
+        }
+    }
+
     pub fn client_version() -> String {
         format!("{}-v{}", "pulsar-rs", env!("CARGO_PKG_VERSION"))
     }
@@ -623,7 +662,92 @@ mod tests {
     use bytes::BytesMut;
     use tokio_util::codec::{Decoder, Encoder};
 
-    use crate::message::Codec;
+    use crate::message::{proto::MessageIdData, Codec};
+
+    fn batched_id() -> MessageIdData {
+        MessageIdData {
+            ledger_id: 7,
+            entry_id: 3,
+            partition: Some(2),
+            batch_index: Some(1),
+            batch_size: Some(4),
+            ack_set: vec![0b1101],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn batch_needs_both_index_and_size() {
+        assert_eq!(batched_id().batch(), Some((1, 4)));
+        assert_eq!(batched_id().entry().batch(), None);
+        let index_only = MessageIdData {
+            batch_size: None,
+            ..batched_id()
+        };
+        assert_eq!(index_only.batch(), None);
+        let size_only = MessageIdData {
+            batch_index: None,
+            ..batched_id()
+        };
+        assert_eq!(size_only.batch(), None);
+    }
+
+    #[test]
+    fn entry_keeps_only_the_entry_fields() {
+        assert_eq!(
+            batched_id().entry(),
+            MessageIdData {
+                ledger_id: 7,
+                entry_id: 3,
+                partition: Some(2),
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn entry_fills_in_a_missing_partition() {
+        let unpartitioned = MessageIdData {
+            partition: None,
+            ..batched_id()
+        };
+        assert_eq!(unpartitioned.entry().partition, Some(-1));
+        assert_eq!(
+            unpartitioned.entry(),
+            MessageIdData {
+                partition: Some(-1),
+                ..batched_id()
+            }
+            .entry()
+        );
+    }
+
+    #[test]
+    fn prev_entry_wraps_below_the_first_entry() {
+        assert_eq!(
+            batched_id().prev_entry(),
+            MessageIdData {
+                entry_id: 2,
+                ..batched_id().entry()
+            }
+        );
+        let first = MessageIdData {
+            entry_id: 0,
+            ..batched_id()
+        };
+        assert_eq!(first.prev_entry().entry_id, u64::MAX);
+    }
+
+    #[test]
+    fn position_orders_the_wrapped_entry_before_the_first() {
+        assert_eq!(batched_id().position(), (7, 3));
+        let first = MessageIdData {
+            entry_id: 0,
+            ..batched_id()
+        };
+        assert_eq!(first.prev_entry().position(), (7, -1));
+        assert!(first.prev_entry().position() < first.position());
+    }
 
     #[test]
     fn parse_simple_command() {

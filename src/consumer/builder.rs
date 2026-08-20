@@ -9,8 +9,8 @@ use regex::Regex;
 
 use crate::{
     consumer::{
-        config::ConsumerConfig, data::DeadLetterPolicy, multi::MultiTopicConsumer,
-        options::ConsumerOptions, topic::TopicConsumer, InnerConsumer,
+        batch_acknowledgment::BatchAcknowledgment, config::ConsumerConfig, data::DeadLetterPolicy,
+        multi::MultiTopicConsumer, options::ConsumerOptions, topic::TopicConsumer, InnerConsumer,
     },
     message::proto::command_subscribe::SubType,
     reader::{Reader, State},
@@ -32,6 +32,7 @@ pub struct ConsumerBuilder<Exe: Executor> {
     batch_size: Option<u32>,
     unacked_message_resend_delay: Option<Duration>,
     dead_letter_policy: Option<DeadLetterPolicy>,
+    batch_acknowledgment: BatchAcknowledgment,
     consumer_options: Option<ConsumerOptions>,
     namespace: Option<String>,
     topic_refresh: Option<Duration>,
@@ -53,6 +54,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
             // TODO what should this default to? None seems incorrect..
             unacked_message_resend_delay: None,
             dead_letter_policy: None,
+            batch_acknowledgment: BatchAcknowledgment::default(),
             consumer_options: None,
             namespace: None,
             topic_refresh: None,
@@ -175,6 +177,29 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
         self
     }
 
+    /// How messages inside a batched entry are acknowledged.
+    ///
+    /// Defaults to [`BatchAcknowledgment::Entry`], which is what earlier releases did: the
+    /// first ack of any message acks the whole entry, unacked siblings included. See the enum
+    /// for the other modes; `Indexed` needs `acknowledgmentAtBatchIndexLevelEnabled` on the
+    /// broker, which is the default from Pulsar >= 4.1.
+    ///
+    /// [`BatchAcknowledgment::Tracked`] and [`BatchAcknowledgment::Indexed`] hold an entry
+    /// until every message in it is acked. An application that _never_ acks some of its messages
+    /// accumulates held entries, and can hit the broker's `maxUnackedMessagesPerConsumer`,
+    /// after which delivery stops. Applications should ack or nack every message rather than
+    /// dropping it.
+    ///
+    /// Under [`BatchAcknowledgment::Tracked`] a redelivered entry comes back as a whole, and has
+    /// to be acked again. A dead letter policy will move the entire entry, including messages
+    /// that were already acked. Under [`BatchAcknowledgment::Indexed`] only the messages still
+    /// outstanding come back or are moved.
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn with_batch_acknowledgment(mut self, batch_acknowledgment: BatchAcknowledgment) -> Self {
+        self.batch_acknowledgment = batch_acknowledgment;
+        self
+    }
+
     // Checks the builder for inconsistencies
     // returns a config and a list of topics with associated brokers
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
@@ -191,6 +216,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
             unacked_message_resend_delay,
             consumer_options,
             dead_letter_policy,
+            batch_acknowledgment,
             namespace: _,
             topic_refresh: _,
         } = self;
@@ -253,6 +279,14 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
             warn!("Subscription Type not specified. Defaulting to `Shared`.");
             SubType::Shared
         });
+        if batch_acknowledgment == BatchAcknowledgment::Tracked && dead_letter_policy.is_some() {
+            warn!(
+                "BatchAcknowledgment::Tracked with a dead letter policy moves whole \
+                 entries, including already acked messages. Use BatchAcknowledgment::Indexed \
+                 with `acknowledgmentAtBatchIndexLevelEnabled=true` on the broker to allow \
+                 individual messages to be sent to the DLQ."
+            );
+        }
 
         let config = ConsumerConfig {
             subscription,
@@ -263,6 +297,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
             unacked_message_redelivery_delay: unacked_message_resend_delay,
             options: consumer_options.unwrap_or_default(),
             dead_letter_policy,
+            batch_acknowledgment,
         };
         Ok((config, topics))
     }
