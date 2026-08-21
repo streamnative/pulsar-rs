@@ -52,12 +52,11 @@ jobs:
             -d \
             -e GITHUB_ACTIONS=true -e CI=true \
             -e PULSAR_PREFIX_advertisedAddress=127.0.0.1 \
-            -e PULSAR_PREFIX_advertisedListeners=pulsar://127.0.0.1:6650 \
             -e PULSAR_PREFIX_brokerServicePort=6650 \
             -e PULSAR_PREFIX_webServicePort=8080 \
             -e PULSAR_PREFIX_topicLevelPoliciesEnabled=true \
             apachepulsar/pulsar:${{ matrix.pulsar-version }} \
-            bin/pulsar standalone
+            bash -c "bin/apply-config-from-env.py conf/standalone.conf && bin/pulsar standalone"
 
       - name: Wait for Pulsar readiness
         timeout-minutes: 3
