@@ -1260,11 +1260,11 @@ impl<Exe: Executor> Connection<Exe> {
                 Some(error.message),
             )),
             Some(Ok(msg)) => {
-                trace!("received connection response: {:?}", &msg);
+                trace!("received connection response: {:?}", msg);
                 let Some(c) = msg.command.connected else {
                     return Err(ConnectionError::Unexpected(format!(
                         "Unexpected message from pulsar: {:?}",
-                        &msg.command
+                        msg.command
                     )));
                 };
 
@@ -1596,6 +1596,7 @@ pub(crate) mod messages {
                     publish_time: Utc::now().timestamp_millis() as u64,
                     replicated_from: None,
                     partition_key: message.partition_key,
+                    partition_key_b64_encoded: message.partition_key_b64_encoded,
                     ordering_key: message.ordering_key,
                     replicate_to: message.replicate_to,
                     compression: message.compression,

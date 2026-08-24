@@ -588,7 +588,7 @@ mod tests {
             debug!(
                 "connected topics for {}: {:?}",
                 consumer.subscription(),
-                &connected_topics
+                connected_topics
             );
             assert_eq!(connected_topics.len(), 2);
             assert!(connected_topics.iter().any(|t| t.ends_with(&topic1)));
@@ -1147,6 +1147,97 @@ mod tests {
             );
             dlq_consumer.ack(&dlq_msg).await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
+    async fn dead_letter_queue_preserves_key_bytes_flag() {
+        use base64::Engine;
+
+        let _result = log::set_logger(&TEST_LOGGER);
+        log::set_max_level(LevelFilter::Debug);
+        let addr = "pulsar://127.0.0.1:6650";
+
+        let test_id: u16 = rand::random();
+        let topic = format!("dead_letter_queue_key_bytes_test_{test_id}");
+        let raw_key = b"\x00\x01binary-dlq-key";
+        let encoded_key = base64::engine::general_purpose::STANDARD.encode(raw_key);
+
+        let message_data = TestData {
+            topic: topic.clone(),
+            msg: rand::random(),
+        };
+
+        let mut message = <&TestData>::serialize_message(&message_data).unwrap();
+        message.partition_key = Some(encoded_key.clone());
+        message.partition_key_b64_encoded = Some(true);
+        message.ordering_key = Some(b"ordering_key".to_vec());
+
+        let dead_letter_topic = format!("{topic}_dlq");
+        let dead_letter_policy = DeadLetterPolicy {
+            max_redeliver_count: 1,
+            dead_letter_topic: dead_letter_topic.clone(),
+        };
+
+        let client: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await.unwrap();
+
+        let mut consumer: Consumer<TestData, _> = client
+            .consumer()
+            .with_topic(topic.clone())
+            .with_subscription("nack_key_bytes")
+            .with_subscription_type(SubType::Shared)
+            .with_dead_letter_policy(dead_letter_policy)
+            .build()
+            .await
+            .unwrap();
+
+        let mut dlq_consumer: Consumer<TestData, _> = client
+            .clone()
+            .consumer()
+            .with_topic(dead_letter_topic)
+            .with_subscription("dead_letter_topic_key_bytes")
+            .with_subscription_type(SubType::Shared)
+            .build()
+            .await
+            .unwrap();
+
+        client.send(&topic, message).await.unwrap().await.unwrap();
+
+        let msg = recv_within(&mut consumer, DEFAULT_RECV_TIMEOUT)
+            .await
+            .unwrap();
+        assert_eq!(message_data, msg.deserialize().unwrap());
+        assert!(msg.has_base64_encoded_key());
+        assert_eq!(
+            msg.key_bytes().unwrap().as_deref(),
+            Some(raw_key.as_slice())
+        );
+        consumer.nack(&msg).await.unwrap();
+
+        let dlq_msg = recv_within(&mut dlq_consumer, DEFAULT_RECV_TIMEOUT)
+            .await
+            .unwrap();
+        assert_eq!(message_data, dlq_msg.deserialize().unwrap());
+        assert_eq!(
+            dlq_msg.metadata().partition_key.as_deref(),
+            Some(encoded_key.as_str()),
+            "Base64 partition key should be preserved when the message is sent to the DLQ"
+        );
+        assert_eq!(
+            dlq_msg.metadata().partition_key_b64_encoded,
+            Some(true),
+            "partition key b64 flag should be preserved when the message is sent to the DLQ"
+        );
+        assert!(dlq_msg.has_base64_encoded_key());
+        assert_eq!(
+            dlq_msg.key_bytes().unwrap().as_deref(),
+            Some(raw_key.as_slice())
+        );
+        dlq_consumer.ack(&dlq_msg).await.unwrap();
     }
 
     #[tokio::test]

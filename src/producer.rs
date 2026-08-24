@@ -10,6 +10,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use base64::Engine;
 use futures::{
     channel::{mpsc, oneshot},
     future::{self, try_join_all, Either},
@@ -74,6 +75,8 @@ pub struct Message {
     pub properties: HashMap<String, String>,
     /// key to decide partition for the message
     pub partition_key: ::std::option::Option<String>,
+    /// whether [`partition_key`](Self::partition_key) is a Base64 encoding of raw key bytes
+    pub partition_key_b64_encoded: ::std::option::Option<bool>,
     /// key to decide partition for the message
     pub ordering_key: ::std::option::Option<Vec<u8>>,
     /// Override namespace's replication
@@ -96,6 +99,8 @@ pub(crate) struct ProducerMessage {
     pub properties: HashMap<String, String>,
     ///key to decide partition for the msg
     pub partition_key: ::std::option::Option<String>,
+    /// whether [`partition_key`](Self::partition_key) is Base64-encoded raw key bytes
+    pub partition_key_b64_encoded: ::std::option::Option<bool>,
     ///key to decide partition for the msg
     pub ordering_key: ::std::option::Option<Vec<u8>>,
     /// Override namespace's replication
@@ -127,6 +132,7 @@ impl From<Message> for ProducerMessage {
             payload: m.payload,
             properties: m.properties,
             partition_key: m.partition_key,
+            partition_key_b64_encoded: m.partition_key_b64_encoded,
             ordering_key: m.ordering_key,
             replicate_to: m.replicate_to,
             event_time: m.event_time,
@@ -756,6 +762,7 @@ impl<Exe: Executor> TopicProducer<Exe> {
                     metadata: proto::SingleMessageMetadata {
                         properties,
                         partition_key: message.partition_key,
+                        partition_key_b64_encoded: message.partition_key_b64_encoded,
                         ordering_key: message.ordering_key,
                         payload_size: message.payload.len() as i32,
                         event_time: message.event_time,
@@ -955,13 +962,13 @@ where
         error!(
             "send_message: connection {} disconnected, reconnecting producer for topic: {}",
             connection.id(),
-            &topic
+            topic
         );
 
         if let Err(e) = connection.sender().close_producer(producer_id).await {
             error!(
                 "could not close producer {:?}({}) for topic {}: {:?}",
-                producer_name, producer_id, &topic, e
+                producer_name, producer_id, topic, e
             );
         }
 
@@ -1357,6 +1364,7 @@ pub struct MessageBuilder<'a, T, Exe: Executor> {
     producer: &'a mut Producer<Exe>,
     properties: HashMap<String, String>,
     partition_key: Option<String>,
+    partition_key_b64_encoded: Option<bool>,
     ordering_key: Option<Vec<u8>>,
     deliver_at_time: Option<i64>,
     event_time: Option<u64>,
@@ -1371,6 +1379,7 @@ impl<'a, Exe: Executor> MessageBuilder<'a, (), Exe> {
             producer,
             properties: HashMap::new(),
             partition_key: None,
+            partition_key_b64_encoded: None,
             ordering_key: None,
             deliver_at_time: None,
             event_time: None,
@@ -1387,6 +1396,7 @@ impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
             producer: self.producer,
             properties: self.properties,
             partition_key: self.partition_key,
+            partition_key_b64_encoded: self.partition_key_b64_encoded,
             ordering_key: self.ordering_key,
             deliver_at_time: self.deliver_at_time,
             event_time: self.event_time,
@@ -1394,10 +1404,12 @@ impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
         }
     }
 
-    /// sets the message's partition key
+    /// sets the message's partition key as a UTF-8 string
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_partition_key<S: Into<String>>(mut self, partition_key: S) -> Self {
-        self.partition_key = Some(partition_key.into());
+        let (key, b64) = utf8_partition_key(partition_key);
+        self.partition_key = Some(key);
+        self.partition_key_b64_encoded = Some(b64);
         self
     }
 
@@ -1408,13 +1420,27 @@ impl<'a, T, Exe: Executor> MessageBuilder<'a, T, Exe> {
         self
     }
 
-    /// sets the message's partition key
+    /// sets the message's partition key as a UTF-8 string
     ///
     /// this is the same as `with_partition_key`, this method is added for
     /// more consistency with other clients
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_key<S: Into<String>>(mut self, partition_key: S) -> Self {
-        self.partition_key = Some(partition_key.into());
+        let (key, b64) = utf8_partition_key(partition_key);
+        self.partition_key = Some(key);
+        self.partition_key_b64_encoded = Some(b64);
+        self
+    }
+
+    /// sets the message's partition key from raw bytes
+    ///
+    /// The bytes are Base64-encoded into `partition_key` and
+    /// `partition_key_b64_encoded` is set to `true`.
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn with_key_bytes<S: AsRef<[u8]>>(mut self, key: S) -> Self {
+        let (encoded, b64) = partition_key_from_bytes(key.as_ref());
+        self.partition_key = Some(encoded);
+        self.partition_key_b64_encoded = Some(b64);
         self
     }
 
@@ -1474,6 +1500,7 @@ impl<T: SerializeMessage + Sized, Exe: Executor> MessageBuilder<'_, T, Exe> {
             producer,
             properties,
             partition_key,
+            partition_key_b64_encoded,
             ordering_key,
             content,
             deliver_at_time,
@@ -1483,11 +1510,26 @@ impl<T: SerializeMessage + Sized, Exe: Executor> MessageBuilder<'_, T, Exe> {
         let mut message = T::serialize_message(content)?;
         message.properties = properties;
         message.partition_key = partition_key;
+        message.partition_key_b64_encoded = partition_key_b64_encoded;
         message.ordering_key = ordering_key;
         message.event_time = event_time;
         message.deliver_at_time = deliver_at_time;
         producer.send_non_blocking(message).await
     }
+}
+
+/// Encode raw key bytes for the partition key wire field.
+///
+/// Returns the Base64-encoded key string and `partition_key_b64_encoded = true`.
+pub(crate) fn partition_key_from_bytes(key: &[u8]) -> (String, bool) {
+    (base64::engine::general_purpose::STANDARD.encode(key), true)
+}
+
+/// Mark a UTF-8 partition key.
+///
+/// Returns the key string and `partition_key_b64_encoded = false`.
+pub(crate) fn utf8_partition_key(key: impl Into<String>) -> (String, bool) {
+    (key.into(), false)
 }
 
 #[cfg(test)]
@@ -1531,6 +1573,7 @@ mod tests {
             payload: b"hello".to_vec(),
             properties: props.clone(),
             partition_key: Some("key".into()),
+            partition_key_b64_encoded: Some(true),
             ordering_key: Some(vec![1, 2, 3]),
             replicate_to: vec!["r1".into(), "r2".into()],
             event_time: Some(42),
@@ -1543,6 +1586,7 @@ mod tests {
         assert_eq!(pm.payload, m.payload);
         assert_eq!(pm.properties, m.properties);
         assert_eq!(pm.partition_key, m.partition_key);
+        assert_eq!(pm.partition_key_b64_encoded, Some(true));
         assert_eq!(pm.ordering_key, m.ordering_key);
         assert_eq!(pm.replicate_to, m.replicate_to);
         assert_eq!(pm.event_time, m.event_time);
@@ -1553,6 +1597,139 @@ mod tests {
         assert!(pm.num_messages_in_batch.is_none());
         assert!(pm.compression.is_none());
         assert!(pm.uncompressed_size.is_none());
+    }
+
+    #[test]
+    fn partition_key_from_bytes_encodes_and_sets_b64_flag() {
+        let raw_key = b"\x00\x01binary-key";
+        let (encoded, b64) = partition_key_from_bytes(raw_key);
+        assert_eq!(
+            encoded,
+            base64::engine::general_purpose::STANDARD.encode(raw_key)
+        );
+        assert!(b64);
+
+        let message = Message {
+            payload: b"payload".to_vec(),
+            partition_key: Some(encoded.clone()),
+            partition_key_b64_encoded: Some(b64),
+            ..Default::default()
+        };
+        let pm: ProducerMessage = message.into();
+        assert_eq!(pm.partition_key.as_deref(), Some(encoded.as_str()));
+        assert_eq!(pm.partition_key_b64_encoded, Some(true));
+    }
+
+    #[test]
+    fn utf8_partition_key_sets_b64_flag_false() {
+        let (key, b64) = utf8_partition_key("plain-key");
+        assert_eq!(key, "plain-key");
+        assert!(!b64);
+
+        let message = Message {
+            payload: b"payload".to_vec(),
+            partition_key: Some(key),
+            partition_key_b64_encoded: Some(b64),
+            ..Default::default()
+        };
+        let pm: ProducerMessage = message.into();
+        assert_eq!(pm.partition_key.as_deref(), Some("plain-key"));
+        assert_eq!(pm.partition_key_b64_encoded, Some(false));
+    }
+
+    #[tokio::test]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
+    async fn key_bytes_round_trip() {
+        use crate::{
+            consumer::Consumer, message::proto::command_subscribe::SubType, DeserializeMessage,
+            Payload,
+        };
+        use futures::StreamExt;
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+        struct KeyBytesTestData {
+            data: String,
+        }
+
+        impl SerializeMessage for &KeyBytesTestData {
+            fn serialize_message(input: Self) -> Result<Message, Error> {
+                let payload =
+                    serde_json::to_vec(input).map_err(|e| Error::Custom(e.to_string()))?;
+                Ok(Message {
+                    payload,
+                    ..Default::default()
+                })
+            }
+        }
+
+        impl DeserializeMessage for KeyBytesTestData {
+            type Output = Result<KeyBytesTestData, serde_json::Error>;
+
+            fn deserialize_message(payload: &Payload) -> Self::Output {
+                serde_json::from_slice(&payload.data)
+            }
+        }
+
+        let _result = log::set_logger(&TEST_LOGGER);
+        log::set_max_level(LevelFilter::Debug);
+
+        let pulsar: Pulsar<_> = Pulsar::builder("pulsar://127.0.0.1:6650", TokioExecutor)
+            .build()
+            .await
+            .unwrap();
+        let topic = format!("key_bytes_round_trip_{}", rand::random::<u16>());
+        let raw_key = b"\x00\x01\x02avro-like-key";
+
+        let mut producer = pulsar.producer().with_topic(&topic).build().await.unwrap();
+
+        let mut consumer: Consumer<KeyBytesTestData, _> = pulsar
+            .consumer()
+            .with_topic(&topic)
+            .with_subscription(format!("sub_{}", rand::random::<u16>()))
+            .with_subscription_type(SubType::Exclusive)
+            .build()
+            .await
+            .unwrap();
+
+        let data = KeyBytesTestData {
+            data: "hello-key-bytes".to_string(),
+        };
+        producer
+            .create_message()
+            .with_content(&data)
+            .with_key_bytes(raw_key)
+            .send_non_blocking()
+            .await
+            .unwrap()
+            .await
+            .unwrap();
+
+        let msg = tokio::time::timeout(Duration::from_secs(5), consumer.next())
+            .await
+            .expect("timed out waiting for key_bytes round-trip message")
+            .unwrap()
+            .unwrap();
+        assert!(msg.has_base64_encoded_key());
+        assert_eq!(
+            msg.key_bytes().unwrap().as_deref(),
+            Some(raw_key.as_slice())
+        );
+        assert_eq!(
+            msg.key().as_deref(),
+            Some(
+                base64::engine::general_purpose::STANDARD
+                    .encode(raw_key)
+                    .as_str()
+            )
+        );
+        assert_eq!(msg.metadata().partition_key_b64_encoded, Some(true));
+        assert_eq!(msg.deserialize().unwrap(), data);
+        consumer.ack(&msg).await.unwrap();
     }
 
     #[tokio::test]
@@ -1584,7 +1761,7 @@ mod tests {
                 Err(e) => panic!("failed to send {}: {}", i, e),
             }
         }
-        info!("Messages failed due to SlowDown: {:?}", &failed_indexes);
+        info!("Messages failed due to SlowDown: {:?}", failed_indexes);
         assert!(!failed_indexes.is_empty());
 
         let mut producer = pulsar

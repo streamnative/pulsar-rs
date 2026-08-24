@@ -51,6 +51,7 @@ impl Iterator for BatchedMessageIterator {
             let metadata = Metadata {
                 properties: batched_message.metadata.properties,
                 partition_key: batched_message.metadata.partition_key,
+                partition_key_b64_encoded: batched_message.metadata.partition_key_b64_encoded,
                 ordering_key: batched_message.metadata.ordering_key,
                 event_time: batched_message.metadata.event_time,
                 ..self.metadata.clone()
@@ -65,5 +66,77 @@ impl Iterator for BatchedMessageIterator {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::message::proto::SingleMessageMetadata;
+
+    #[test]
+    fn per_message_b64_flag_not_taken_from_batch_envelope() {
+        let messages = [
+            BatchedMessage {
+                metadata: SingleMessageMetadata {
+                    partition_key: Some("plain-key".into()),
+                    partition_key_b64_encoded: Some(false),
+                    payload_size: 1,
+                    ..Default::default()
+                },
+                payload: b"a".to_vec(),
+            },
+            BatchedMessage {
+                metadata: SingleMessageMetadata {
+                    partition_key: Some("YmluYXJ5".into()),
+                    partition_key_b64_encoded: Some(true),
+                    payload_size: 1,
+                    ..Default::default()
+                },
+                payload: b"b".to_vec(),
+            },
+        ];
+
+        let mut data = Vec::new();
+        for message in &messages {
+            message.serialize(&mut data);
+        }
+
+        // Envelope flag deliberately disagrees with the first message. Before the
+        // fix, `..self.metadata.clone()` leaked this onto every batch member.
+        let payload = Payload {
+            metadata: Metadata {
+                producer_name: "test".into(),
+                sequence_id: 0,
+                publish_time: 0,
+                num_messages_in_batch: Some(2),
+                partition_key_b64_encoded: Some(true),
+                ..Default::default()
+            },
+            data,
+        };
+
+        let expanded: Vec<_> = BatchedMessageIterator::new(
+            MessageIdData {
+                ledger_id: 1,
+                entry_id: 2,
+                ..Default::default()
+            },
+            payload,
+        )
+        .unwrap()
+        .collect();
+
+        assert_eq!(expanded.len(), 2);
+        assert_eq!(
+            expanded[0].1.metadata.partition_key.as_deref(),
+            Some("plain-key")
+        );
+        assert_eq!(
+            expanded[0].1.metadata.partition_key_b64_encoded,
+            Some(false),
+            "per-message flag must win over the batch envelope"
+        );
+        assert_eq!(expanded[1].1.metadata.partition_key_b64_encoded, Some(true));
     }
 }
