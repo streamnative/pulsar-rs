@@ -438,7 +438,7 @@ mod tests {
 
             let data = msg.deserialize().unwrap();
             if data.as_str() != send_data {
-                panic!("Unexpected payload in &str test: {}", &data);
+                panic!("Unexpected payload in &str test: {}", data);
             }
         }
 
@@ -475,7 +475,7 @@ mod tests {
             consumer.ack(&msg).await.unwrap();
             let data = msg.deserialize();
             if data.as_slice() != send_data {
-                panic!("Unexpected payload in &[u8] test: {:?}", &data);
+                panic!("Unexpected payload in &[u8] test: {:?}", data);
             }
         }
     }
