@@ -1444,6 +1444,11 @@ pub(crate) mod messages {
         producer::{self, ProducerOptions},
     };
 
+    /// Protocol version advertised to the broker, in `CommandConnect` and in every
+    /// `CommandAuthResponse`. Both must report the same value: the broker feeds the
+    /// one on the auth response back through `doAuthentication`.
+    pub(crate) const PROTOCOL_VERSION: i32 = 12;
+
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn connect(auth: Option<Authentication>, proxy_to_broker_url: Option<String>) -> Message {
         let (auth_method_name, auth_data) = match auth {
@@ -1459,7 +1464,17 @@ pub(crate) mod messages {
                     auth_data,
                     proxy_to_broker_url,
                     client_version: proto::client_version(),
-                    protocol_version: Some(12),
+                    protocol_version: Some(PROTOCOL_VERSION),
+                    feature_flags: Some(proto::FeatureFlags {
+                        // Without this the broker closes the connection outright when
+                        // credentials expire ("client doesn't support auth credentials
+                        // refresh") instead of sending a CommandAuthChallenge, and the
+                        // challenge handling below never runs.
+                        supports_auth_refresh: Some(true),
+                        // Left at their defaults: the client neither parses broker entry
+                        // metadata nor implements partial producers.
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -1859,7 +1874,11 @@ pub(crate) mod messages {
                         auth_method_name: Some(auth.name),
                         auth_data: Some(auth.data),
                     }),
-                    ..Default::default()
+                    // The broker reads both of these off the auth response and passes
+                    // them into doAuthentication; omitting them left it defaulting the
+                    // protocol version to 0.
+                    client_version: Some(proto::client_version()),
+                    protocol_version: Some(PROTOCOL_VERSION),
                 }),
                 ..Default::default()
             },
@@ -1993,8 +2012,13 @@ mod tests {
             Ok(())
         }
         async fn auth_data(&mut self) -> Result<Vec<u8>, AuthenticationError> {
-            *self.count.write().await += 1;
-            Ok("test_auth_data".as_bytes().to_vec())
+            let mut count = self.count.write().await;
+            // Hand out a different token on every call, the way a rotating credential
+            // source does. A provider returning a constant here cannot tell a refresh
+            // that re-read its credentials apart from one that replayed a stale token.
+            let token = format!("test_auth_data-{count}");
+            *count += 1;
+            Ok(token.into_bytes())
         }
     }
 
@@ -2060,11 +2084,39 @@ mod tests {
         )
         .await;
 
-        let _ = server_stream.next().await;
+        let connect = server_stream.next().await.unwrap();
         let auth_challenge = server_stream.next().await.unwrap();
 
         assert!(connection.is_ok());
         assert_eq!(*auth_count.read().await, 2);
+
+        // The broker only sends a CommandAuthChallenge to clients that advertise
+        // supports_auth_refresh; without the flag it closes the connection instead.
+        match connect {
+            Ok(Message {
+                command:
+                    BaseCommand {
+                        connect: Some(connect),
+                        ..
+                    },
+                ..
+            }) => {
+                assert_eq!(
+                    connect
+                        .feature_flags
+                        .as_ref()
+                        .and_then(|f| f.supports_auth_refresh),
+                    Some(true),
+                    "CommandConnect must advertise supports_auth_refresh"
+                );
+                assert_eq!(
+                    String::from_utf8(connect.auth_data.unwrap()).unwrap(),
+                    "test_auth_data-0"
+                );
+            }
+            _ => panic!("Unexpected message"),
+        };
+
         match auth_challenge {
             Ok(Message {
                 command:
@@ -2076,19 +2128,75 @@ mod tests {
                                         auth_method_name,
                                         auth_data,
                                     }),
-                                ..
+                                client_version,
+                                protocol_version,
                             }),
                         ..
                     },
                 ..
             }) => {
                 assert_eq!(auth_method_name.unwrap(), "test_auth");
+                // The refreshed credentials, not the ones sent on CommandConnect.
                 assert_eq!(
                     String::from_utf8(auth_data.unwrap()).unwrap(),
-                    "test_auth_data"
+                    "test_auth_data-1"
                 );
+                assert_eq!(protocol_version, Some(super::messages::PROTOCOL_VERSION));
+                assert_eq!(client_version, Some(crate::proto::client_version()));
             }
             _ => panic!("Unexpected message"),
         };
+    }
+
+    #[test]
+    fn connect_advertises_auth_refresh_support() {
+        let msg = super::messages::connect(None, None);
+        let connect = msg.command.connect.expect("expected a CommandConnect");
+
+        assert_eq!(
+            connect
+                .feature_flags
+                .as_ref()
+                .and_then(|f| f.supports_auth_refresh),
+            Some(true),
+            "without this the broker closes the connection when credentials expire \
+             instead of sending a CommandAuthChallenge"
+        );
+        assert_eq!(
+            connect.protocol_version,
+            Some(super::messages::PROTOCOL_VERSION)
+        );
+        // Not implemented by this client; advertising either would change the wire
+        // payload the broker sends us.
+        let flags = connect.feature_flags.unwrap();
+        assert_ne!(flags.supports_broker_entry_metadata, Some(true));
+        assert_ne!(flags.supports_partial_producer, Some(true));
+    }
+
+    #[test]
+    fn auth_response_reports_client_and_protocol_version() {
+        let msg = super::messages::auth_challenge(super::Authentication {
+            name: "token".to_string(),
+            data: b"a-token".to_vec(),
+        });
+        let response = msg
+            .command
+            .auth_response
+            .expect("expected a CommandAuthResponse");
+
+        // The broker reads both of these off the auth response and feeds them back
+        // through doAuthentication.
+        assert_eq!(
+            response.protocol_version,
+            Some(super::messages::PROTOCOL_VERSION)
+        );
+        assert_eq!(
+            response.client_version,
+            Some(crate::proto::client_version())
+        );
+
+        let data = response.response.expect("expected AuthData");
+        assert_eq!(data.auth_method_name.unwrap(), "token");
+        assert_eq!(data.auth_data.unwrap(), b"a-token".to_vec());
     }
 }
