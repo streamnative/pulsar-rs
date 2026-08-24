@@ -495,12 +495,47 @@ pub struct PulsarBuilder<Exe: Executor> {
 }
 
 impl<Exe: Executor> PulsarBuilder<Exe> {
-    /// Authentication parameters (JWT, Biscuit, etc)
+    /// Fixed authentication parameters (JWT, Biscuit, etc)
+    ///
+    /// These credentials are captured once and replayed unchanged on every auth
+    /// challenge and every reconnection, so they must outlive the client. **For a
+    /// token that expires or rotates, use [`with_auth_provider`] instead** — with a
+    /// fixed token the client stops working when the token expires and cannot recover.
+    ///
+    /// [`TokenAuthentication::from_file`] covers the common case of a token file that
+    /// something else rotates in place, such as a Kubernetes projected ServiceAccount
+    /// token:
+    ///
+    /// ```no_run
+    /// # async fn run() -> Result<(), pulsar::Error> {
+    /// use pulsar::{authentication::token::TokenAuthentication, Pulsar, TokioExecutor};
+    ///
+    /// let client: Pulsar<_> = Pulsar::builder("pulsar://localhost:6650", TokioExecutor)
+    ///     .with_auth_provider(TokenAuthentication::from_file(
+    ///         "/var/run/secrets/pulsar/token",
+    ///     ))
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// [`with_auth_provider`]: PulsarBuilder::with_auth_provider
+    /// [`TokenAuthentication::from_file`]: crate::authentication::token::TokenAuthentication::from_file
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_auth(self, auth: Authentication) -> Self {
         self.with_auth_provider(Box::new(auth))
     }
 
+    /// Authentication provider, consulted every time the broker asks for credentials
+    ///
+    /// Unlike [`with_auth`], the provider is called again on each auth challenge and
+    /// each reconnection, so it can supply credentials that expire and rotate. See
+    /// [`TokenAuthentication::from_file`] and [`TokenAuthentication::from_supplier`].
+    ///
+    /// [`with_auth`]: PulsarBuilder::with_auth
+    /// [`TokenAuthentication::from_file`]: crate::authentication::token::TokenAuthentication::from_file
+    /// [`TokenAuthentication::from_supplier`]: crate::authentication::token::TokenAuthentication::from_supplier
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn with_auth_provider(
         mut self,
