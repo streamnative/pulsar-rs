@@ -86,7 +86,12 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
             .await?;
 
         for consumer in self.consumers.values_mut() {
-            consumer.connection().await?.sender().send_ping().await?;
+            consumer
+                .query_connection()
+                .await?
+                .sender()
+                .send_ping()
+                .await?;
         }
 
         Ok(())

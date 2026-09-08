@@ -1641,6 +1641,162 @@ mod tests {
             .unwrap()
     }
 
+    async fn backpressured_consumer(
+        client: &Pulsar<TokioExecutor>,
+        topic: &str,
+    ) -> Consumer<Vec<u8>, TokioExecutor> {
+        client
+            .consumer()
+            .with_topic(topic)
+            .with_subscription("backpressure")
+            .with_subscription_type(SubType::Shared)
+            .with_options(
+                ConsumerOptions::default()
+                    .with_receiver_queue_size(1)
+                    .with_initial_position(InitialPosition::Earliest),
+            )
+            .build()
+            .await
+            .unwrap()
+    }
+
+    async fn publish_backpressure_batch(client: &Pulsar<TokioExecutor>, topic: &str) {
+        let mut producer = client
+            .producer()
+            .with_topic(topic)
+            .with_options(producer::ProducerOptions {
+                batch_size: Some(32),
+                ..Default::default()
+            })
+            .build()
+            .await
+            .unwrap();
+        let mut receipts = Vec::new();
+        for index in 0..32 {
+            receipts.push(
+                producer
+                    .send_non_blocking(format!("message-{index}"))
+                    .await
+                    .unwrap(),
+            );
+        }
+        timeout(
+            DEFAULT_RECV_TIMEOUT,
+            futures::future::try_join_all(receipts),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        producer.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
+    async fn read_only_queries_progress_with_backpressured_batch() {
+        let client = new_client().await;
+        let topic = format!("backpressured_queries_{}", rand::random::<u64>());
+        let mut consumer = backpressured_consumer(&client, &topic).await;
+        publish_backpressure_batch(&client, &topic).await;
+        let first = recv_within(&mut consumer, DEFAULT_RECV_TIMEOUT)
+            .await
+            .unwrap();
+
+        timeout(DEFAULT_RECV_TIMEOUT, async {
+            consumer.get_schema(&topic, None).await.unwrap();
+            consumer.check_connection().await.unwrap();
+            assert_eq!(consumer.get_stats().await.unwrap().len(), 1);
+            let last_ids = consumer.get_last_message_id().await.unwrap();
+            assert_eq!(last_ids.len(), 1);
+            assert_eq!(last_ids[0].ledger_id, first.message_id().ledger_id);
+            assert_eq!(last_ids[0].entry_id, first.message_id().entry_id);
+        })
+        .await
+        .expect("read-only queries must progress while batch delivery is paused");
+
+        let mut messages = vec![first];
+        for _ in 1..32 {
+            messages.push(
+                recv_within(&mut consumer, DEFAULT_RECV_TIMEOUT)
+                    .await
+                    .unwrap(),
+            );
+        }
+        for (index, message) in messages.iter().enumerate() {
+            assert_eq!(message.payload.data, format!("message-{index}").as_bytes());
+            assert_eq!(message.message_id().batch_index, Some(index as i32));
+            assert_eq!(
+                message.message_id().ledger_id,
+                messages[0].message_id().ledger_id
+            );
+            assert_eq!(
+                message.message_id().entry_id,
+                messages[0].message_id().entry_id
+            );
+        }
+        consumer.ack(messages.last().unwrap()).await.unwrap();
+        timeout(DEFAULT_RECV_TIMEOUT, consumer.close())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
+    async fn backpressured_partial_batch_survives_ack_and_reconnect() {
+        let client = new_client().await;
+        let topic = format!("backpressured_ack_{}", rand::random::<u64>());
+        let mut consumer = backpressured_consumer(&client, &topic).await;
+        publish_backpressure_batch(&client, &topic).await;
+        let first = recv_within(&mut consumer, DEFAULT_RECV_TIMEOUT)
+            .await
+            .unwrap();
+        assert_eq!(first.message_id().batch_index, Some(0));
+        consumer.ack(&first).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(consumer);
+
+        let mut consumer = backpressured_consumer(&client, &topic).await;
+        for index in 0..32 {
+            let message = recv_within(&mut consumer, DEFAULT_RECV_TIMEOUT)
+                .await
+                .unwrap();
+            assert_eq!(message.payload.data, format!("message-{index}").as_bytes());
+            assert_eq!(message.message_id().batch_index, Some(index));
+            assert_eq!(message.message_id().ledger_id, first.message_id().ledger_id);
+            assert_eq!(message.message_id().entry_id, first.message_id().entry_id);
+            if index == 31 {
+                consumer.ack(&message).await.unwrap();
+            }
+        }
+        timeout(DEFAULT_RECV_TIMEOUT, consumer.close())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut consumer = backpressured_consumer(&client, &topic).await;
+        timeout(DEFAULT_RECV_TIMEOUT, async {
+            loop {
+                let stats = consumer.get_stats().await.unwrap();
+                assert_eq!(stats.len(), 1);
+                if stats[0].msg_backlog == Some(0) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("acknowledgement must reach the broker before close");
+        consumer.unsubscribe().await.unwrap();
+        consumer.close().await.unwrap();
+    }
+
     // ── schema_version tests ────────────────────────────────────────
 
     #[tokio::test]
