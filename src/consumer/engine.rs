@@ -644,6 +644,9 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
     ) -> Result<(), mpsc::SendError> {
         let send = self.tx.send(message).fuse();
         futures::pin_mut!(send);
+        if let std::task::Poll::Ready(result) = futures::poll!(send.as_mut()) {
+            return result;
+        }
         loop {
             futures::select! {
                 result = send => return result,
@@ -753,5 +756,135 @@ impl<Exe: Executor> std::ops::Drop for ConsumerEngine<Exe> {
                 );
             }
         }));
+    }
+}
+
+#[cfg(all(
+    test,
+    any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    )
+))]
+mod tests {
+    use super::*;
+    use crate::{consumer::data::MessageIdDataReceiver, test_utils::new_pulsar, TokioExecutor};
+
+    async fn delivery_engine(
+        capacity: usize,
+    ) -> (ConsumerEngine<TokioExecutor>, MessageIdDataReceiver) {
+        let client = new_pulsar().await;
+        let connection = client.manager.get_base_connection().await.unwrap();
+        let (tx, rx) = mpsc::channel(capacity);
+        let (_, messages_rx) = mpsc::unbounded();
+        let (_, engine_rx) = mpsc::unbounded();
+        let engine = ConsumerEngine::new(
+            client,
+            connection,
+            "delivery-test".into(),
+            "delivery-test".into(),
+            SubType::Exclusive,
+            u64::MAX,
+            None,
+            tx,
+            messages_rx,
+            engine_rx,
+            1,
+            Some(Duration::from_secs(60)),
+            None,
+            ConsumerOptions::default(),
+        );
+        (engine, rx)
+    }
+
+    fn message() -> (MessageIdData, Payload) {
+        (
+            MessageIdData {
+                ledger_id: 1,
+                entry_id: 2,
+                batch_index: Some(3),
+                ..Default::default()
+            },
+            Payload {
+                metadata: proto::MessageMetadata::default(),
+                data: b"pending delivery".to_vec(),
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn pending_delivery_answers_queries_without_starting_redelivery_timer() {
+        let (mut engine, mut output) = delivery_engine(0).await;
+        let mut queries = engine.connection_sender();
+        let connection = engine.connection.clone();
+        let (id, payload) = message();
+        {
+            let mut send = Box::pin(engine.send_to_consumer(id.clone(), payload));
+            assert!(futures::poll!(send.as_mut()).is_pending());
+            let (resolver, response) = oneshot::channel();
+            queries.send(resolver).await.unwrap();
+            assert!(futures::poll!(send.as_mut()).is_pending());
+            let received_connection = tokio::time::timeout(Duration::from_secs(1), response)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(Arc::ptr_eq(&connection, &received_connection));
+        }
+        assert!(engine.unacked_messages.is_empty());
+        let (received_id, received_payload) = output.next().await.unwrap().unwrap();
+        assert_eq!(received_id, id);
+        assert_eq!(received_payload.data, b"pending delivery");
+        assert!(output.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn closed_query_channel_preserves_pending_flush_and_timer_timestamp() {
+        let (mut engine, mut output) = delivery_engine(0).await;
+        engine.connection_rx.close();
+        let (id, payload) = message();
+        let before_send = Instant::now();
+        let after_pending;
+        {
+            let mut send = Box::pin(engine.send_to_consumer(id.clone(), payload));
+            assert!(futures::poll!(send.as_mut()).is_pending());
+            after_pending = Instant::now();
+            let (received_id, _) = output.next().await.unwrap().unwrap();
+            assert_eq!(received_id, id);
+            tokio::time::timeout(Duration::from_secs(1), send)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        let deadline = engine.unacked_messages[&id];
+        assert!(deadline >= before_send + Duration::from_secs(60));
+        assert!(deadline <= after_pending + Duration::from_secs(60));
+        assert_eq!(engine.unacked_messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn closed_output_does_not_start_redelivery_timer() {
+        let (mut engine, output) = delivery_engine(0).await;
+        drop(output);
+        let (id, payload) = message();
+        assert!(engine.send_to_consumer(id, payload).await.is_err());
+        assert!(engine.unacked_messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ready_delivery_completes_and_starts_redelivery_timer() {
+        let (mut engine, mut output) = delivery_engine(1).await;
+        let (id, payload) = message();
+        {
+            let mut send = Box::pin(engine.send_to_consumer(id.clone(), payload));
+            assert!(matches!(
+                futures::poll!(send.as_mut()),
+                std::task::Poll::Ready(Ok(()))
+            ));
+        }
+        assert!(engine.unacked_messages.contains_key(&id));
+        let (received_id, received_payload) = output.next().await.unwrap().unwrap();
+        assert_eq!(received_id, id);
+        assert_eq!(received_payload.data, b"pending delivery");
     }
 }

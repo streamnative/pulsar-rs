@@ -167,7 +167,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         })
     }
 
-    async fn query_connection(&mut self) -> Result<Arc<Connection<Exe>>, Error> {
+    pub(super) async fn query_connection(&mut self) -> Result<Arc<Connection<Exe>>, Error> {
         let (resolver, response) = oneshot::channel();
         self.connection_tx
             .send(resolver)
