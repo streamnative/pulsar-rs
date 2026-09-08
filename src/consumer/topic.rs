@@ -3,7 +3,7 @@ use std::{
     pin::Pin,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     task::{Context, Poll},
     time::Duration,
@@ -20,7 +20,7 @@ use crate::{
     consumer::{
         config::ConsumerConfig,
         data::{DeadLetterPolicy, EngineMessage, MessageData, MessageIdDataReceiver},
-        engine::ConsumerEngine,
+        engine::{ConnectionSnapshot, ConsumerEngine},
         message::Message,
     },
     error::{ConnectionError, ConsumerError},
@@ -37,7 +37,7 @@ pub struct TopicConsumer<T: DeserializeMessage, Exe: Executor> {
     topic: String,
     messages: Pin<Box<MessageIdDataReceiver>>,
     engine_tx: mpsc::UnboundedSender<EngineMessage<Exe>>,
-    connection_tx: mpsc::UnboundedSender<oneshot::Sender<Arc<Connection<Exe>>>>,
+    connection_snapshot: Arc<Mutex<ConnectionSnapshot<Exe>>>,
     data_type: PhantomData<fn(Payload) -> T::Output>,
     pub(crate) dead_letter_policy: Option<DeadLetterPolicy>,
     pub(super) last_message_received: Option<DateTime<Utc>>,
@@ -122,7 +122,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
             dead_letter_policy.clone(),
             options.clone(),
         );
-        let connection_tx = c.connection_sender();
+        let connection_snapshot = c.connection_snapshot();
         let engine_task = client.executor.spawn(Box::pin(async move {
             c.engine()
                 .map(|res| {
@@ -140,7 +140,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
             topic,
             messages: Box::pin(rx),
             engine_tx,
-            connection_tx,
+            connection_snapshot,
             data_type: PhantomData,
             dead_letter_policy,
             last_message_received: None,
@@ -168,12 +168,17 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
     }
 
     pub(super) async fn query_connection(&mut self) -> Result<Arc<Connection<Exe>>, Error> {
-        let (resolver, response) = oneshot::channel();
-        self.connection_tx
-            .send(resolver)
-            .await
-            .map_err(|_| ConsumerError::Connection(ConnectionError::Disconnected))?;
-
+        let response = {
+            let snapshot = self
+                .connection_snapshot
+                .lock()
+                .map_err(|_| ConnectionError::Disconnected)?;
+            match &*snapshot {
+                ConnectionSnapshot::Ready(connection) => return Ok(connection.clone()),
+                ConnectionSnapshot::Reconnecting(receiver) => receiver.clone(),
+                ConnectionSnapshot::Closed => return Err(ConnectionError::Disconnected.into()),
+            }
+        };
         response.await.map_err(|oneshot::Canceled| {
             error!("the consumer engine dropped the request");
             ConnectionError::Disconnected.into()

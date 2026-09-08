@@ -1,12 +1,13 @@
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 use futures::{
     channel::{mpsc, mpsc::UnboundedSender, oneshot},
+    future::Shared,
     FutureExt, SinkExt, StreamExt,
 };
 
@@ -32,9 +33,16 @@ use crate::{
 const SYSTEM_PROPERTY_REAL_TOPIC: &str = "REAL_TOPIC";
 const SYSTEM_PROPERTY_ORIGIN_MESSAGE_ID: &str = "ORIGIN_MESSAGE_ID";
 
+pub(crate) enum ConnectionSnapshot<Exe: Executor> {
+    Ready(Arc<Connection<Exe>>),
+    Reconnecting(Shared<oneshot::Receiver<Arc<Connection<Exe>>>>),
+    Closed,
+}
+
 pub struct ConsumerEngine<Exe: Executor> {
     client: Pulsar<Exe>,
     connection: Arc<Connection<Exe>>,
+    connection_snapshot: Arc<Mutex<ConnectionSnapshot<Exe>>>,
     topic: String,
     subscription: String,
     sub_type: SubType,
@@ -45,8 +53,6 @@ pub struct ConsumerEngine<Exe: Executor> {
     engine_rx: Option<mpsc::UnboundedReceiver<EngineMessage<Exe>>>,
     event_rx: mpsc::UnboundedReceiver<EngineEvent<Exe>>,
     event_tx: UnboundedSender<EngineEvent<Exe>>,
-    connection_rx: mpsc::UnboundedReceiver<oneshot::Sender<Arc<Connection<Exe>>>>,
-    connection_tx: mpsc::UnboundedSender<oneshot::Sender<Arc<Connection<Exe>>>>,
     batch_size: u32,
     remaining_messages: i64,
     unacked_message_redelivery_delay: Option<Duration>,
@@ -74,9 +80,11 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         options: ConsumerOptions,
     ) -> ConsumerEngine<Exe> {
         let (event_tx, event_rx) = mpsc::unbounded();
-        let (connection_tx, connection_rx) = mpsc::unbounded();
         ConsumerEngine {
             client,
+            connection_snapshot: Arc::new(Mutex::new(ConnectionSnapshot::Ready(
+                connection.clone(),
+            ))),
             connection,
             topic,
             subscription,
@@ -88,8 +96,6 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             engine_rx: Some(engine_rx),
             event_rx,
             event_tx,
-            connection_rx,
-            connection_tx,
             batch_size,
             remaining_messages: batch_size as i64,
             unacked_message_redelivery_delay,
@@ -99,10 +105,8 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         }
     }
 
-    pub(crate) fn connection_sender(
-        &self,
-    ) -> mpsc::UnboundedSender<oneshot::Sender<Arc<Connection<Exe>>>> {
-        self.connection_tx.clone()
+    pub(crate) fn connection_snapshot(&self) -> Arc<Mutex<ConnectionSnapshot<Exe>>> {
+        self.connection_snapshot.clone()
     }
 
     fn register_source<E, M>(&self, mut rx: mpsc::UnboundedReceiver<E>, mapper: M) -> Result<(), ()>
@@ -210,19 +214,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 self.remaining_messages = self.batch_size as i64;
             }
 
-            let event = Self::timeout(
-                async {
-                    futures::select! {
-                        event = self.event_rx.next().fuse() => event,
-                        sender = self.connection_rx.next().fuse() => sender.map(|sender| {
-                            EngineEvent::EngineMessage(Some(EngineMessage::GetConnection(sender)))
-                        }),
-                    }
-                },
-                Duration::from_secs(1),
-            )
-            .await;
-            match event {
+            match Self::timeout(self.event_rx.next(), Duration::from_secs(1)).await {
                 Err(_) => {
                     // If you are reading this comment, you may have an issue where you have
                     // received a batched message that is greater that the batch
@@ -287,7 +279,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                     // End of Topic
                     Ok(false) => Some(Ok(())),
                     Err(e) => {
-                        if let Err(e) = self.send_with_connection_requests(Err(e)).await {
+                        if let Err(e) = self.tx.send(Err(e)).await {
                             error!("cannot send a message from the consumer engine to the consumer({}), stopping the engine", self.id);
                             Some(Err(Error::Consumer(e.into())))
                         } else {
@@ -352,7 +344,12 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 true
             }
             Some(EngineMessage::GetConnection(sender)) => {
-                Self::respond_connection(&self.connection, sender);
+                let _ = sender.send(self.connection.clone()).map_err(|_| {
+                    error!(
+                        "consumer requested the engine's connection but dropped the \
+                                     channel before receiving"
+                    );
+                });
                 true
             }
         }
@@ -626,7 +623,8 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         payload: Payload,
     ) -> Result<(), Error> {
         let now = Instant::now();
-        self.send_with_connection_requests(Ok((message_id.clone(), payload)))
+        self.tx
+            .send(Ok((message_id.clone(), payload)))
             .await
             .map_err(|e| {
                 error!("tx returned {:?}", e);
@@ -638,42 +636,14 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         Ok(())
     }
 
-    async fn send_with_connection_requests(
-        &mut self,
-        message: Result<(MessageIdData, Payload), Error>,
-    ) -> Result<(), mpsc::SendError> {
-        let send = self.tx.send(message).fuse();
-        futures::pin_mut!(send);
-        if let std::task::Poll::Ready(result) = futures::poll!(send.as_mut()) {
-            return result;
-        }
-        loop {
-            futures::select! {
-                result = send => return result,
-                sender = self.connection_rx.next().fuse() => {
-                    match sender {
-                        Some(sender) => Self::respond_connection(&self.connection, sender),
-                        None => return send.await,
-                    }
-                }
-            }
-        }
-    }
-
-    fn respond_connection(
-        connection: &Arc<Connection<Exe>>,
-        sender: oneshot::Sender<Arc<Connection<Exe>>>,
-    ) {
-        let _ = sender.send(connection.clone()).map_err(|_| {
-            error!(
-                "consumer requested the engine's connection but dropped the \
-                                     channel before receiving"
-            );
-        });
-    }
-
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn reconnect(&mut self) -> Result<(), Error> {
+        let (sender, receiver) = oneshot::channel();
+        *self
+            .connection_snapshot
+            .lock()
+            .map_err(|_| ConnectionError::Disconnected)? =
+            ConnectionSnapshot::Reconnecting(receiver.shared());
         debug!("reconnecting consumer for topic: {}", self.topic);
 
         // send CloseConsumer to server
@@ -705,7 +675,12 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
 
         self.remaining_messages = self.batch_size as i64;
         self.messages_rx = Some(messages);
-
+        *self
+            .connection_snapshot
+            .lock()
+            .map_err(|_| ConnectionError::Disconnected)? =
+            ConnectionSnapshot::Ready(self.connection.clone());
+        let _ = sender.send(self.connection.clone());
         Ok(())
     }
 
@@ -744,6 +719,14 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
 
 impl<Exe: Executor> std::ops::Drop for ConsumerEngine<Exe> {
     fn drop(&mut self) {
+        let previous = std::mem::replace(
+            &mut *self
+                .connection_snapshot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ConnectionSnapshot::Closed,
+        );
+        drop(previous);
         let conn = self.connection.clone();
         let id = self.id;
         let name = self.name.clone();
@@ -771,7 +754,7 @@ mod tests {
     use super::*;
     use crate::{consumer::data::MessageIdDataReceiver, test_utils::new_pulsar, TokioExecutor};
 
-    async fn delivery_engine(
+    async fn snapshot_engine(
         capacity: usize,
     ) -> (ConsumerEngine<TokioExecutor>, MessageIdDataReceiver) {
         let client = new_pulsar().await;
@@ -779,11 +762,12 @@ mod tests {
         let (tx, rx) = mpsc::channel(capacity);
         let (_, messages_rx) = mpsc::unbounded();
         let (_, engine_rx) = mpsc::unbounded();
+        let suffix: u64 = rand::random();
         let engine = ConsumerEngine::new(
             client,
             connection,
-            "delivery-test".into(),
-            "delivery-test".into(),
+            format!("persistent://public/default/connection-snapshot-{suffix}"),
+            format!("snapshot-{suffix}"),
             SubType::Exclusive,
             u64::MAX,
             None,
@@ -798,6 +782,118 @@ mod tests {
         (engine, rx)
     }
 
+    #[tokio::test]
+    async fn engine_drop_invalidates_retained_snapshot() {
+        let (engine, _output) = snapshot_engine(1).await;
+        let snapshot = engine.connection_snapshot();
+        assert!(matches!(
+            &*snapshot.lock().unwrap(),
+            ConnectionSnapshot::Ready(connection) if Arc::ptr_eq(connection, &engine.connection)
+        ));
+        drop(engine);
+        assert!(matches!(
+            *snapshot.lock().unwrap(),
+            ConnectionSnapshot::Closed
+        ));
+    }
+
+    #[tokio::test]
+    async fn aborting_owning_task_invalidates_snapshot() {
+        let (mut engine, _output) = snapshot_engine(1).await;
+        let (commands, receiver) = mpsc::unbounded();
+        engine.engine_rx = Some(receiver);
+        let snapshot = engine.connection_snapshot();
+        let task = tokio::spawn(async move { engine.engine().await });
+        tokio::task::yield_now().await;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(matches!(
+            *snapshot.lock().unwrap(),
+            ConnectionSnapshot::Closed
+        ));
+        drop(commands);
+    }
+
+    #[tokio::test]
+    async fn reconnect_only_publishes_connection_after_subscription_completes() {
+        let (mut engine, _output) = snapshot_engine(1).await;
+        let snapshot = engine.connection_snapshot();
+        let mut response;
+        {
+            let mut reconnect = Box::pin(engine.reconnect());
+            assert!(futures::poll!(reconnect.as_mut()).is_pending());
+            response = match &*snapshot.lock().unwrap() {
+                ConnectionSnapshot::Reconnecting(receiver) => receiver.clone(),
+                _ => panic!("expected reconnecting snapshot"),
+            };
+            drop(response.clone());
+            assert!(futures::poll!(&mut response).is_pending());
+            tokio::time::timeout(Duration::from_secs(10), reconnect)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        let connection = tokio::time::timeout(Duration::from_secs(1), response)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(Arc::ptr_eq(&connection, &engine.connection));
+        assert!(matches!(
+            &*snapshot.lock().unwrap(),
+            ConnectionSnapshot::Ready(connection) if Arc::ptr_eq(connection, &engine.connection)
+        ));
+    }
+
+    #[tokio::test]
+    async fn canceling_reconnect_cancels_queries() {
+        let (mut engine, _output) = snapshot_engine(1).await;
+        let snapshot = engine.connection_snapshot();
+        let response;
+        {
+            let mut reconnect = Box::pin(engine.reconnect());
+            assert!(futures::poll!(reconnect.as_mut()).is_pending());
+            response = match &*snapshot.lock().unwrap() {
+                ConnectionSnapshot::Reconnecting(receiver) => receiver.clone(),
+                _ => panic!("expected reconnecting snapshot"),
+            };
+        }
+        assert!(tokio::time::timeout(Duration::from_secs(1), response)
+            .await
+            .unwrap()
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn reconnect_failure_cancels_queries_before_error_delivery() {
+        let (mut engine, _output) = snapshot_engine(1).await;
+        engine.topic = "invalid://topic".into();
+        let snapshot = engine.connection_snapshot();
+        let response;
+        {
+            let mut reconnect = Box::pin(engine.reconnect());
+            assert!(futures::poll!(reconnect.as_mut()).is_pending());
+            response = match &*snapshot.lock().unwrap() {
+                ConnectionSnapshot::Reconnecting(receiver) => receiver.clone(),
+                _ => panic!("expected reconnecting snapshot"),
+            };
+            assert!(tokio::time::timeout(Duration::from_secs(10), reconnect)
+                .await
+                .unwrap()
+                .is_err());
+        }
+        assert!(tokio::time::timeout(Duration::from_secs(1), response)
+            .await
+            .unwrap()
+            .is_err());
+        let later_query = match &*snapshot.lock().unwrap() {
+            ConnectionSnapshot::Reconnecting(receiver) => receiver.clone(),
+            _ => panic!("expected failed reconnect snapshot"),
+        };
+        assert!(tokio::time::timeout(Duration::from_secs(1), later_query)
+            .await
+            .unwrap()
+            .is_err());
+    }
     fn message() -> (MessageIdData, Payload) {
         (
             MessageIdData {
@@ -814,34 +910,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_delivery_answers_queries_without_starting_redelivery_timer() {
-        let (mut engine, mut output) = delivery_engine(0).await;
-        let mut queries = engine.connection_sender();
-        let connection = engine.connection.clone();
-        let (id, payload) = message();
-        {
-            let mut send = Box::pin(engine.send_to_consumer(id.clone(), payload));
-            assert!(futures::poll!(send.as_mut()).is_pending());
-            let (resolver, response) = oneshot::channel();
-            queries.send(resolver).await.unwrap();
-            assert!(futures::poll!(send.as_mut()).is_pending());
-            let received_connection = tokio::time::timeout(Duration::from_secs(1), response)
-                .await
-                .unwrap()
-                .unwrap();
-            assert!(Arc::ptr_eq(&connection, &received_connection));
-        }
-        assert!(engine.unacked_messages.is_empty());
-        let (received_id, received_payload) = output.next().await.unwrap().unwrap();
-        assert_eq!(received_id, id);
-        assert_eq!(received_payload.data, b"pending delivery");
-        assert!(output.try_recv().is_err());
-    }
-
-    #[tokio::test]
-    async fn closed_query_channel_preserves_pending_flush_and_timer_timestamp() {
-        let (mut engine, mut output) = delivery_engine(0).await;
-        engine.connection_rx.close();
+    async fn pending_flush_preserves_timer_timestamp() {
+        let (mut engine, mut output) = snapshot_engine(0).await;
         let (id, payload) = message();
         let before_send = Instant::now();
         let after_pending;
@@ -864,7 +934,7 @@ mod tests {
 
     #[tokio::test]
     async fn closed_output_does_not_start_redelivery_timer() {
-        let (mut engine, output) = delivery_engine(0).await;
+        let (mut engine, output) = snapshot_engine(0).await;
         drop(output);
         let (id, payload) = message();
         assert!(engine.send_to_consumer(id, payload).await.is_err());
@@ -873,7 +943,7 @@ mod tests {
 
     #[tokio::test]
     async fn ready_delivery_completes_and_starts_redelivery_timer() {
-        let (mut engine, mut output) = delivery_engine(1).await;
+        let (mut engine, mut output) = snapshot_engine(1).await;
         let (id, payload) = message();
         {
             let mut send = Box::pin(engine.send_to_consumer(id.clone(), payload));
