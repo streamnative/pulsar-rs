@@ -6,8 +6,8 @@ use std::{
 };
 
 use futures::{
-    channel::{mpsc, mpsc::UnboundedSender},
-    SinkExt, StreamExt,
+    channel::{mpsc, mpsc::UnboundedSender, oneshot},
+    FutureExt, SinkExt, StreamExt,
 };
 
 use crate::{
@@ -45,6 +45,8 @@ pub struct ConsumerEngine<Exe: Executor> {
     engine_rx: Option<mpsc::UnboundedReceiver<EngineMessage<Exe>>>,
     event_rx: mpsc::UnboundedReceiver<EngineEvent<Exe>>,
     event_tx: UnboundedSender<EngineEvent<Exe>>,
+    connection_rx: mpsc::UnboundedReceiver<oneshot::Sender<Arc<Connection<Exe>>>>,
+    connection_tx: mpsc::UnboundedSender<oneshot::Sender<Arc<Connection<Exe>>>>,
     batch_size: u32,
     remaining_messages: i64,
     unacked_message_redelivery_delay: Option<Duration>,
@@ -72,6 +74,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         options: ConsumerOptions,
     ) -> ConsumerEngine<Exe> {
         let (event_tx, event_rx) = mpsc::unbounded();
+        let (connection_tx, connection_rx) = mpsc::unbounded();
         ConsumerEngine {
             client,
             connection,
@@ -85,6 +88,8 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             engine_rx: Some(engine_rx),
             event_rx,
             event_tx,
+            connection_rx,
+            connection_tx,
             batch_size,
             remaining_messages: batch_size as i64,
             unacked_message_redelivery_delay,
@@ -92,6 +97,12 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             dead_letter_policy,
             options,
         }
+    }
+
+    pub(crate) fn connection_sender(
+        &self,
+    ) -> mpsc::UnboundedSender<oneshot::Sender<Arc<Connection<Exe>>>> {
+        self.connection_tx.clone()
     }
 
     fn register_source<E, M>(&self, mut rx: mpsc::UnboundedReceiver<E>, mapper: M) -> Result<(), ()>
@@ -199,7 +210,19 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 self.remaining_messages = self.batch_size as i64;
             }
 
-            match Self::timeout(self.event_rx.next(), Duration::from_secs(1)).await {
+            let event = Self::timeout(
+                async {
+                    futures::select! {
+                        event = self.event_rx.next().fuse() => event,
+                        sender = self.connection_rx.next().fuse() => sender.map(|sender| {
+                            EngineEvent::EngineMessage(Some(EngineMessage::GetConnection(sender)))
+                        }),
+                    }
+                },
+                Duration::from_secs(1),
+            )
+            .await;
+            match event {
                 Err(_) => {
                     // If you are reading this comment, you may have an issue where you have
                     // received a batched message that is greater that the batch
@@ -264,7 +287,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                     // End of Topic
                     Ok(false) => Some(Ok(())),
                     Err(e) => {
-                        if let Err(e) = self.tx.send(Err(e)).await {
+                        if let Err(e) = self.send_with_connection_requests(Err(e)).await {
                             error!("cannot send a message from the consumer engine to the consumer({}), stopping the engine", self.id);
                             Some(Err(Error::Consumer(e.into())))
                         } else {
@@ -329,12 +352,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 true
             }
             Some(EngineMessage::GetConnection(sender)) => {
-                let _ = sender.send(self.connection.clone()).map_err(|_| {
-                    error!(
-                        "consumer requested the engine's connection but dropped the \
-                                     channel before receiving"
-                    );
-                });
+                Self::respond_connection(&self.connection, sender);
                 true
             }
         }
@@ -608,8 +626,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         payload: Payload,
     ) -> Result<(), Error> {
         let now = Instant::now();
-        self.tx
-            .send(Ok((message_id.clone(), payload)))
+        self.send_with_connection_requests(Ok((message_id.clone(), payload)))
             .await
             .map_err(|e| {
                 error!("tx returned {:?}", e);
@@ -619,6 +636,37 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             self.unacked_messages.insert(message_id, now + duration);
         }
         Ok(())
+    }
+
+    async fn send_with_connection_requests(
+        &mut self,
+        message: Result<(MessageIdData, Payload), Error>,
+    ) -> Result<(), mpsc::SendError> {
+        let send = self.tx.send(message).fuse();
+        futures::pin_mut!(send);
+        loop {
+            futures::select! {
+                result = send => return result,
+                sender = self.connection_rx.next().fuse() => {
+                    match sender {
+                        Some(sender) => Self::respond_connection(&self.connection, sender),
+                        None => return send.await,
+                    }
+                }
+            }
+        }
+    }
+
+    fn respond_connection(
+        connection: &Arc<Connection<Exe>>,
+        sender: oneshot::Sender<Arc<Connection<Exe>>>,
+    ) {
+        let _ = sender.send(connection.clone()).map_err(|_| {
+            error!(
+                "consumer requested the engine's connection but dropped the \
+                                     channel before receiving"
+            );
+        });
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
