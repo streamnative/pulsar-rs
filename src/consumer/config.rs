@@ -1,7 +1,9 @@
 use std::time::Duration;
 
 use crate::{
-    consumer::{data::DeadLetterPolicy, options::ConsumerOptions},
+    consumer::{
+        batch_acknowledgment::BatchAcknowledgment, data::DeadLetterPolicy, options::ConsumerOptions,
+    },
     message::proto::command_subscribe::SubType,
 };
 
@@ -28,4 +30,6 @@ pub struct ConsumerConfig {
     pub(crate) options: ConsumerOptions,
     /// dead letter policy
     pub(crate) dead_letter_policy: Option<DeadLetterPolicy>,
+    /// acknowledgment of messages inside batched entries
+    pub(crate) batch_acknowledgment: BatchAcknowledgment,
 }

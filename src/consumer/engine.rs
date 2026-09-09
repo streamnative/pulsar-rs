@@ -13,6 +13,7 @@ use futures::{
 use crate::{
     connection::Connection,
     consumer::{
+        batch_acknowledgment::{BatchAcknowledgment, BatchAcknowledgmentTracker},
         batched_message_iterator::BatchedMessageIterator,
         data::{DeadLetterPolicy, EngineEvent, EngineMessage},
         options::ConsumerOptions,
@@ -49,6 +50,7 @@ pub struct ConsumerEngine<Exe: Executor> {
     remaining_messages: i64,
     unacked_message_redelivery_delay: Option<Duration>,
     unacked_messages: HashMap<MessageIdData, Instant>,
+    batch_acknowledgments: BatchAcknowledgmentTracker,
     dead_letter_policy: Option<DeadLetterPolicy>,
     options: ConsumerOptions,
 }
@@ -69,6 +71,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         batch_size: u32,
         unacked_message_redelivery_delay: Option<Duration>,
         dead_letter_policy: Option<DeadLetterPolicy>,
+        batch_acknowledgment: BatchAcknowledgment,
         options: ConsumerOptions,
     ) -> ConsumerEngine<Exe> {
         let (event_tx, event_rx) = mpsc::unbounded();
@@ -89,6 +92,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
             remaining_messages: batch_size as i64,
             unacked_message_redelivery_delay,
             unacked_messages: HashMap::new(),
+            batch_acknowledgments: BatchAcknowledgmentTracker::new(batch_acknowledgment),
             dead_letter_policy,
             options,
         }
@@ -287,6 +291,15 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 true
             }
             Some(EngineMessage::Nack(message_id)) => {
+                // The broker redelivers whole entries.
+                let message_id = if self.batch_acknowledgments.tracks_entries() {
+                    let entry = message_id.entry();
+                    self.unacked_messages.remove(&entry);
+                    self.batch_acknowledgments.forget(&entry);
+                    entry
+                } else {
+                    message_id
+                };
                 if let Err(e) = self
                     .connection
                     .sender()
@@ -323,6 +336,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                     } else {
                         for i in h.iter() {
                             self.unacked_messages.remove(i);
+                            self.batch_acknowledgments.forget(i);
                         }
                     }
                 }
@@ -342,8 +356,28 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn ack(&mut self, message_id: MessageIdData, cumulative: bool) {
-        // FIXME: this does not handle cumulative acks
-        self.unacked_messages.remove(&message_id);
+        let Some(message_id) = self
+            .batch_acknowledgments
+            .acknowledge(message_id, cumulative)
+        else {
+            return;
+        };
+        // The redelivery timer is stopped based on what the ack completes:
+        // - every entry before the id for a cumulative ack
+        // - the id's own entry once no `ack_set` is left
+        let entry_done = message_id.ack_set.is_empty();
+        if cumulative {
+            let acked = message_id.position();
+            self.unacked_messages
+                .retain(|id, _| id.position() > acked || (id.position() == acked && !entry_done));
+        } else if entry_done {
+            self.unacked_messages.remove(&message_id);
+        }
+        self.send_ack(message_id, cumulative).await;
+    }
+
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    async fn send_ack(&mut self, message_id: MessageIdData, cumulative: bool) {
         let res = self
             .connection
             .sender()
@@ -536,7 +570,20 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
         };
 
         let payloads = if payload.metadata.num_messages_in_batch.is_some() {
-            BatchedMessageIterator::new(message.message_id, payload)?.collect()
+            let entry = message.message_id.entry();
+            let broker_ack_set = if self.batch_acknowledgments.tracks_entries() {
+                &message.ack_set[..]
+            } else {
+                &[]
+            };
+            let mut messages =
+                BatchedMessageIterator::new(message.message_id, payload, broker_ack_set)?;
+            let payloads: Vec<_> = messages.by_ref().collect();
+            // The broker charges no permits for the messages it reported as acked.
+            self.remaining_messages += messages.skipped() as i64;
+            self.batch_acknowledgments
+                .track(entry, messages.into_ack_set());
+            payloads
         } else {
             vec![(message.message_id, payload)]
         };
@@ -616,7 +663,13 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 Error::Custom("tx closed".to_string())
             })?;
         if let Some(duration) = self.unacked_message_redelivery_delay {
-            self.unacked_messages.insert(message_id, now + duration);
+            // Keyed per entry under tracking, as the broker redelivers whole entries.
+            let key = if self.batch_acknowledgments.tracks_entries() {
+                message_id.entry()
+            } else {
+                message_id
+            };
+            self.unacked_messages.insert(key, now + duration);
         }
         Ok(())
     }
@@ -654,6 +707,8 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
 
         self.remaining_messages = self.batch_size as i64;
         self.messages_rx = Some(messages);
+        // The new subscription redelivers everything still unacked.
+        self.batch_acknowledgments.clear();
 
         Ok(())
     }
