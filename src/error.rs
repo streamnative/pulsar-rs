@@ -95,6 +95,13 @@ pub enum ConnectionError {
     Encoding(String),
     SocketAddr(String),
     UnexpectedResponse(String),
+    /// The message is larger than the maximum message size the broker announced for this
+    /// connection, so it was not written. `size` counts the serialized message metadata and the
+    /// payload, the part of a message the broker's `maxMessageSize` bounds.
+    MessageTooLarge {
+        size: usize,
+        max_message_size: u32,
+    },
     #[cfg(any(feature = "tokio-runtime", feature = "async-std-runtime"))]
     Tls(native_tls::Error),
     #[cfg(all(
@@ -214,6 +221,14 @@ impl fmt::Display for ConnectionError {
             ConnectionError::Decoding(e) => write!(f, "Error decoding message: {e}"),
             ConnectionError::Encoding(e) => write!(f, "Error encoding message: {e}"),
             ConnectionError::SocketAddr(e) => write!(f, "Error obtaining socket address: {e}"),
+            ConnectionError::MessageTooLarge {
+                size,
+                max_message_size,
+            } => write!(
+                f,
+                "Message of {size} bytes exceeds the maximum message size of {max_message_size} \
+                 bytes the broker announced"
+            ),
             ConnectionError::Tls(e) => write!(f, "Error connecting TLS stream: {e}"),
             #[cfg(any(
                 feature = "tokio-rustls-runtime-aws-lc-rs",

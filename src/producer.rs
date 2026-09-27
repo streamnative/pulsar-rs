@@ -952,6 +952,12 @@ where
                         return Err(ProducerError::Connection(ConnectionError::Io(e)).into());
                     }
                 }
+                // The message itself is refused and the connection stays healthy, so neither a
+                // reconnection nor an error log is due; the caller receives the refusal.
+                Err(e @ ConnectionError::MessageTooLarge { .. }) => {
+                    debug!("send_message refused a message: {}", e);
+                    return Err(ProducerError::Connection(e).into());
+                }
                 Err(e) => {
                     error!("send_message got error: {:?}", e);
                     return Err(ProducerError::Connection(e).into());

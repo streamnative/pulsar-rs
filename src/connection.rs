@@ -315,6 +315,9 @@ pub struct ConnectionSender<Exe: Executor> {
     error: SharedError,
     executor: Arc<Exe>,
     operation_timeout: Duration,
+    /// The `max_message_size` the broker announced in `CommandConnected`, or `None` when it
+    /// announced none.
+    max_message_size: Option<u32>,
 }
 
 impl<Exe: Executor> ConnectionSender<Exe> {
@@ -329,6 +332,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         error: SharedError,
         executor: Arc<Exe>,
         operation_timeout: Duration,
+        max_message_size: Option<u32>,
     ) -> ConnectionSender<Exe> {
         ConnectionSender {
             connection_id,
@@ -340,7 +344,35 @@ impl<Exe: Executor> ConnectionSender<Exe> {
             error,
             executor,
             operation_timeout,
+            max_message_size,
         }
+    }
+
+    /// The maximum message size the broker announced when this connection was established, or
+    /// `None` when it announced none.
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn max_message_size(&self) -> Option<u32> {
+        self.max_message_size
+    }
+
+    /// Refuses a message the broker announced it does not accept, before it is written.
+    ///
+    /// The broker's `maxMessageSize` bounds the serialized message metadata and the payload, which
+    /// is the size the Java client checks. The broker itself closes a connection on a frame longer
+    /// than that limit plus its framing padding, which would fail every other request in flight
+    /// on the connection, so the message must never reach it.
+    fn admit(&self, msg: &Message) -> Result<(), ConnectionError> {
+        let (Some(max_message_size), Some(payload)) = (self.max_message_size, &msg.payload) else {
+            return Ok(());
+        };
+        let size = prost::Message::encoded_len(&payload.metadata) + payload.data.len();
+        if size > max_message_size as usize {
+            return Err(ConnectionError::MessageTooLarge {
+                size,
+                max_message_size,
+            });
+        }
+        Ok(())
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
@@ -360,6 +392,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
             sequence_id,
         };
         let msg = messages::send(producer_id, producer_name, sequence_id, message);
+        self.admit(&msg)?;
         let via = if block_if_queue_full {
             SendChannel::DataBlocking
         } else {
@@ -1248,7 +1281,7 @@ impl<Exe: Executor> Connection<Exe> {
             .await?;
 
         let msg = stream.next().await;
-        match msg {
+        let connected = match msg {
             Some(Ok(Message {
                 command:
                     proto::BaseCommand {
@@ -1273,6 +1306,11 @@ impl<Exe: Executor> Connection<Exe> {
             Some(Err(e)) => Err(e),
             None => Err(ConnectionError::Disconnected),
         }?;
+        // A broker leaves the field out rather than announce a negative size, so a negative one
+        // limits nothing.
+        let max_message_size = connected
+            .max_message_size
+            .and_then(|size| u32::try_from(size).ok());
 
         let (mut sink, stream) = stream.split();
         // Data plane: bounded so that producer Send commands experience natural
@@ -1367,6 +1405,7 @@ impl<Exe: Executor> Connection<Exe> {
             error,
             executor.clone(),
             operation_timeout,
+            max_message_size,
         );
 
         Ok(sender)
@@ -1415,6 +1454,13 @@ where
     F: FnOnce(Message) -> Option<T>,
 {
     if let Some(e) = message.command.error {
+        Err(ConnectionError::PulsarError(
+            crate::error::server_error(e.error),
+            Some(e.message),
+        ))
+    } else if let Some(e) = message.command.send_error {
+        // The broker refused one message it received, such as one above a topic's
+        // `maxMessageSize` policy, and keeps the connection and the producer open.
         Err(ConnectionError::PulsarError(
             crate::error::server_error(e.error),
             Some(e.message),
@@ -1883,7 +1929,7 @@ mod tests {
     use tokio::{net::TcpListener, sync::RwLock};
     use uuid::Uuid;
 
-    use super::{Connection, Receiver};
+    use super::{messages, Connection, ConnectionSender, Receiver};
     #[cfg(any(
         feature = "tokio-runtime",
         feature = "tokio-rustls-runtime-aws-lc-rs",
@@ -1892,9 +1938,13 @@ mod tests {
     use crate::TokioExecutor;
     use crate::{
         authentication::Authentication,
-        error::{AuthenticationError, SharedError},
+        error::{AuthenticationError, ConnectionError, SharedError},
         message::{BaseCommand, Codec, Message},
-        proto::{AuthData, CommandAuthChallenge, CommandAuthResponse, CommandConnected},
+        producer::ProducerMessage,
+        proto::{
+            base_command::Type as CommandType, AuthData, CommandAuthChallenge, CommandAuthResponse,
+            CommandConnected, CommandSendError, ServerError,
+        },
     };
 
     #[tokio::test]
@@ -2091,5 +2141,219 @@ mod tests {
             }
             _ => panic!("Unexpected message"),
         };
+    }
+    /// Connects a client to a loopback server that answers its handshake with `connected`, and
+    /// returns the client's sender and the server's end once the server has read the handshake.
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
+    async fn connect_to_server(
+        connected: CommandConnected,
+    ) -> (
+        ConnectionSender<TokioExecutor>,
+        tokio_util::codec::Framed<tokio::net::TcpStream, Codec>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stream = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .map(|stream| tokio_util::codec::Framed::new(stream, Codec))
+            .unwrap();
+        let mut server_stream = listener
+            .accept()
+            .await
+            .map(|(stream, _)| tokio_util::codec::Framed::new(stream, Codec))
+            .unwrap();
+        server_stream
+            .send(Message {
+                command: BaseCommand {
+                    r#type: CommandType::Connected as i32,
+                    connected: Some(connected),
+                    ..Default::default()
+                },
+                payload: None,
+            })
+            .await
+            .unwrap();
+
+        let sender = Connection::connect(
+            Uuid::new_v4(),
+            stream,
+            None,
+            None,
+            TokioExecutor.into(),
+            Duration::from_secs(10),
+            100,
+        )
+        .await
+        .unwrap();
+        let connect = server_stream.next().await.unwrap().unwrap();
+        assert!(connect.command.connect.is_some());
+        (sender, server_stream)
+    }
+
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
+    fn message_with_payload(len: usize) -> ProducerMessage {
+        ProducerMessage {
+            payload: vec![b'x'; len],
+            properties: [("source".to_string(), "test".to_string())].into(),
+            partition_key: Some("key".to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// The size of the metadata the connection writes in front of a message with `payload_len`
+    /// payload bytes.
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
+    fn metadata_len(sequence_id: u64, payload_len: usize) -> usize {
+        let message = messages::send(
+            1,
+            "producer".to_string(),
+            sequence_id,
+            message_with_payload(payload_len),
+        );
+        prost::Message::encoded_len(&message.payload.unwrap().metadata)
+    }
+
+    #[tokio::test]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
+    async fn connection_writes_only_messages_within_the_announced_max_message_size() {
+        let max_message_size = 256;
+        let (sender, mut server_stream) = connect_to_server(CommandConnected {
+            max_message_size: Some(max_message_size as i32),
+            ..Default::default()
+        })
+        .await;
+        assert_eq!(sender.max_message_size(), Some(max_message_size));
+
+        let fitting_payload = max_message_size as usize - metadata_len(0, 0);
+        let refused = sender
+            .send(
+                1,
+                "producer".to_string(),
+                0,
+                message_with_payload(fitting_payload + 1),
+                false,
+            )
+            .await;
+        match refused {
+            Err(ConnectionError::MessageTooLarge {
+                size,
+                max_message_size: announced,
+            }) => {
+                assert_eq!(size, max_message_size as usize + 1);
+                assert_eq!(announced, max_message_size);
+            }
+            Err(error) => panic!("expected MessageTooLarge, got {error:?}"),
+            Ok(_) => panic!("a message above the announced maximum was accepted"),
+        }
+
+        let _receipt = sender
+            .send(
+                1,
+                "producer".to_string(),
+                1,
+                message_with_payload(fitting_payload),
+                false,
+            )
+            .await
+            .unwrap();
+        // The refused message never reached the broker: the first message it reads is the one
+        // that fits exactly.
+        let written = server_stream.next().await.unwrap().unwrap();
+        assert_eq!(written.command.send.unwrap().sequence_id, 1);
+        let payload = written.payload.unwrap();
+        assert_eq!(
+            prost::Message::encoded_len(&payload.metadata) + payload.data.len(),
+            max_message_size as usize
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
+    async fn connection_without_an_announced_max_message_size_writes_any_message() {
+        let (sender, mut server_stream) = connect_to_server(CommandConnected::default()).await;
+        assert_eq!(sender.max_message_size(), None);
+
+        let _receipt = sender
+            .send(
+                1,
+                "producer".to_string(),
+                0,
+                message_with_payload(64 * 1024),
+                false,
+            )
+            .await
+            .unwrap();
+        let written = server_stream.next().await.unwrap().unwrap();
+        assert_eq!(written.payload.unwrap().data.len(), 64 * 1024);
+    }
+
+    #[tokio::test]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
+    async fn a_send_error_resolves_the_send_with_the_server_error() {
+        let (sender, mut server_stream) = connect_to_server(CommandConnected::default()).await;
+        let receipt = sender
+            .send(
+                7,
+                "producer".to_string(),
+                3,
+                message_with_payload(16),
+                false,
+            )
+            .await
+            .unwrap();
+        let written = server_stream.next().await.unwrap().unwrap();
+        assert!(written.command.send.is_some());
+
+        server_stream
+            .send(Message {
+                command: BaseCommand {
+                    r#type: CommandType::SendError as i32,
+                    send_error: Some(CommandSendError {
+                        producer_id: 7,
+                        sequence_id: 3,
+                        error: ServerError::NotAllowedError as i32,
+                        message: "Exceed maximum message size".to_string(),
+                    }),
+                    ..Default::default()
+                },
+                payload: None,
+            })
+            .await
+            .unwrap();
+
+        match tokio::time::timeout(Duration::from_secs(10), receipt).await {
+            Ok(Err(ConnectionError::PulsarError(Some(ServerError::NotAllowedError), message))) => {
+                assert_eq!(message.as_deref(), Some("Exceed maximum message size"));
+            }
+            Ok(other) => panic!("expected the broker's NotAllowedError, got {other:?}"),
+            Err(_) => panic!("the send error never resolved the send"),
+        }
+        assert!(
+            !sender.error.is_set(),
+            "a refused message leaves the connection usable"
+        );
     }
 }
