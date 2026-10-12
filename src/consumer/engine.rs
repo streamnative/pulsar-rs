@@ -117,7 +117,7 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 log::debug!("Error sending close event to channel - {err}");
             }
 
-            log::warn!("rx terminated");
+            log::trace!("rx terminated");
         }))
     }
 
