@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt::Debug,
     net::SocketAddr,
     pin::Pin,
@@ -49,6 +49,10 @@ pub(crate) enum Register {
     RemoveConsumer {
         consumer_id: u64,
     },
+    /// the producer is (re)created on this connection, forget an earlier close by the broker
+    Producer {
+        producer_id: u64,
+    },
     Ping {
         resolver: oneshot::Sender<()>,
     },
@@ -61,8 +65,12 @@ pub enum RequestKey {
     ProducerSend { producer_id: u64, sequence_id: u64 },
     Consumer { consumer_id: u64 },
     CloseConsumer { consumer_id: u64, request_id: u64 },
+    CloseProducer { producer_id: u64 },
     AuthChallenge,
 }
+
+/// ids of the producers closed by the broker on a connection
+type ClosedProducers = Arc<std::sync::Mutex<BTreeSet<u64>>>;
 
 /// Authentication parameters
 #[derive(Clone)]
@@ -102,6 +110,7 @@ pub(crate) struct Receiver<S: Stream<Item = Result<Message, ConnectionError>>> {
     shutdown: Pin<Box<oneshot::Receiver<()>>>,
     ping: Option<oneshot::Sender<()>>,
     auth_challenge: mpsc::UnboundedSender<()>,
+    closed_producers: ClosedProducers,
 }
 
 impl<S: Stream<Item = Result<Message, ConnectionError>>> Receiver<S> {
@@ -113,6 +122,7 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Receiver<S> {
         registrations: mpsc::UnboundedReceiver<Register>,
         shutdown: oneshot::Receiver<()>,
         auth_challenge: mpsc::UnboundedSender<()>,
+        closed_producers: ClosedProducers,
     ) -> Receiver<S> {
         Receiver {
             inbound: Box::pin(inbound),
@@ -125,6 +135,7 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Receiver<S> {
             shutdown: Box::pin(shutdown),
             ping: None,
             auth_challenge,
+            closed_producers,
         }
     }
 }
@@ -150,10 +161,22 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> 
                         Some(msg) => {
                             let _ = resolver.send(msg);
                         }
-                        None => {
-                            self.pending_requests.insert(key, resolver);
-                        }
+                        None => match key {
+                            // the broker already closed this producer, no receipt will come
+                            RequestKey::ProducerSend { producer_id, .. }
+                                if self.closed_producers.lock().unwrap().contains(&producer_id) =>
+                            {
+                                let _ =
+                                    resolver.send(messages::close_producer(producer_id, u64::MAX));
+                            }
+                            key => {
+                                self.pending_requests.insert(key, resolver);
+                            }
+                        },
                     }
+                }
+                Poll::Ready(Some(Register::Producer { producer_id })) => {
+                    self.closed_producers.lock().unwrap().remove(&producer_id);
                 }
                 Poll::Ready(Some(Register::Consumer {
                     consumer_id,
@@ -236,6 +259,37 @@ impl<S: Stream<Item = Result<Message, ConnectionError>>> Future for Receiver<S> 
                                     }
                                 }
                             }
+                            Some(RequestKey::CloseProducer { producer_id }) => {
+                                match &msg.command.send_error {
+                                    Some(e) => warn!("Producer {producer_id} send error: {e:?}"),
+                                    None => {
+                                        info!(
+                                            "Broker notification of closed producer: {producer_id}"
+                                        )
+                                    }
+                                }
+                                self.closed_producers.lock().unwrap().insert(producer_id);
+                                // no receipt will come for its pending sends: fail them so the
+                                // producer reconnects and resends them right away
+                                let first = RequestKey::ProducerSend {
+                                    producer_id,
+                                    sequence_id: 0,
+                                };
+                                let last = RequestKey::ProducerSend {
+                                    producer_id,
+                                    sequence_id: u64::MAX,
+                                };
+                                let keys: Vec<_> = self
+                                    .pending_requests
+                                    .range(first..=last)
+                                    .map(|(k, _)| k.clone())
+                                    .collect();
+                                for key in keys {
+                                    if let Some(resolver) = self.pending_requests.remove(&key) {
+                                        let _ = resolver.send(msg.clone());
+                                    }
+                                }
+                            }
                             Some(RequestKey::AuthChallenge) => {
                                 debug!("Received AuthChallenge");
                                 let _ = self.auth_challenge.unbounded_send(());
@@ -315,6 +369,7 @@ pub struct ConnectionSender<Exe: Executor> {
     error: SharedError,
     executor: Arc<Exe>,
     operation_timeout: Duration,
+    closed_producers: ClosedProducers,
 }
 
 impl<Exe: Executor> ConnectionSender<Exe> {
@@ -329,6 +384,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         error: SharedError,
         executor: Arc<Exe>,
         operation_timeout: Duration,
+        closed_producers: ClosedProducers,
     ) -> ConnectionSender<Exe> {
         ConnectionSender {
             connection_id,
@@ -340,6 +396,7 @@ impl<Exe: Executor> ConnectionSender<Exe> {
             error,
             executor,
             operation_timeout,
+            closed_producers,
         }
     }
 
@@ -473,6 +530,10 @@ impl<Exe: Executor> ConnectionSender<Exe> {
     ) -> Result<proto::CommandProducerSuccess, ConnectionError> {
         let request_id = self.request_id.get();
         let msg = messages::create_producer(topic, producer_name, producer_id, request_id, options);
+        // if this fails, send_message below fails with Disconnected too
+        let _ = self
+            .registrations
+            .unbounded_send(Register::Producer { producer_id });
         self.send_message(msg, RequestKey::RequestId(request_id), |resp| {
             resp.command.producer_success
         })
@@ -1285,6 +1346,7 @@ impl<Exe: Executor> Connection<Exe> {
         let error = SharedError::new();
         let (receiver_shutdown_tx, receiver_shutdown_rx) = oneshot::channel();
         let (auth_challenge_tx, mut auth_challenge_rx) = mpsc::unbounded();
+        let closed_producers = ClosedProducers::default();
 
         if executor
             .spawn(Box::pin(
@@ -1295,6 +1357,7 @@ impl<Exe: Executor> Connection<Exe> {
                     registrations_rx,
                     receiver_shutdown_rx,
                     auth_challenge_tx,
+                    closed_producers.clone(),
                 )
                 .map(|_| ()),
             ))
@@ -1367,6 +1430,7 @@ impl<Exe: Executor> Connection<Exe> {
             error,
             executor.clone(),
             operation_timeout,
+            closed_producers,
         );
 
         Ok(sender)
@@ -1385,6 +1449,15 @@ impl<Exe: Executor> Connection<Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub fn is_valid(&self) -> bool {
         !self.sender.error.is_set()
+    }
+
+    /// whether the broker closed this producer on this connection
+    pub fn is_producer_closed(&self, producer_id: u64) -> bool {
+        self.sender
+            .closed_producers
+            .lock()
+            .unwrap()
+            .contains(&producer_id)
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
@@ -1883,7 +1956,7 @@ mod tests {
     use tokio::{net::TcpListener, sync::RwLock};
     use uuid::Uuid;
 
-    use super::{Connection, Receiver};
+    use super::{Connection, Receiver, Register, RequestKey};
     #[cfg(any(
         feature = "tokio-runtime",
         feature = "tokio-rustls-runtime-aws-lc-rs",
@@ -1929,6 +2002,7 @@ mod tests {
             registrations_rx,
             receiver_shutdown_rx,
             auth_challenge_tx,
+            Default::default(),
         )));
 
         if error.is_set() {
@@ -1966,6 +2040,7 @@ mod tests {
             registrations_rx,
             receiver_shutdown_rx,
             auth_challenge_tx,
+            Default::default(),
         )));
 
         let pong = tokio::time::timeout(Duration::from_secs(1), control_rx.recv())
@@ -1979,6 +2054,70 @@ mod tests {
             pong.command
         );
         assert!(!error.is_set(), "receiver should not set error on ping");
+    }
+
+    #[tokio::test]
+    #[cfg(any(
+        feature = "tokio-runtime",
+        feature = "tokio-rustls-runtime-aws-lc-rs",
+        feature = "tokio-rustls-runtime-ring"
+    ))]
+    async fn receiver_fails_sends_of_producer_closed_by_broker() {
+        let (message_tx, message_rx) = mpsc::unbounded();
+        let (control_tx, _control_rx) = async_channel::unbounded();
+        let (registrations_tx, registrations_rx) = mpsc::unbounded();
+        let error = SharedError::new();
+        let (_receiver_shutdown_tx, receiver_shutdown_rx) = oneshot::channel();
+        let (auth_challenge_tx, _auth_challenge_rx) = mpsc::unbounded();
+        let closed_producers = super::ClosedProducers::default();
+
+        tokio::spawn(Box::pin(Receiver::new(
+            message_rx,
+            control_tx,
+            error.clone(),
+            registrations_rx,
+            receiver_shutdown_rx,
+            auth_challenge_tx,
+            closed_producers.clone(),
+        )));
+
+        let send = |producer_id, sequence_id| {
+            let (resolver, response) = oneshot::channel();
+            let key = RequestKey::ProducerSend {
+                producer_id,
+                sequence_id,
+            };
+            registrations_tx
+                .unbounded_send(Register::Request { key, resolver })
+                .unwrap();
+            response
+        };
+        let wait = Duration::from_millis(200);
+        let pending = send(1, 0);
+        let other_producer = send(2, 0);
+
+        // the broker sends request_id -1 when it closes a producer
+        message_tx
+            .unbounded_send(Ok(super::messages::close_producer(1, u64::MAX)))
+            .unwrap();
+
+        let msg = tokio::time::timeout(wait, pending).await.unwrap().unwrap();
+        assert!(msg.command.close_producer.is_some());
+        assert!(closed_producers.lock().unwrap().contains(&1));
+        // a send registered after the close does not wait for a receipt either
+        tokio::time::timeout(wait, send(1, 1))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(tokio::time::timeout(wait, other_producer).await.is_err());
+
+        // re-creating the producer forgets the close
+        registrations_tx
+            .unbounded_send(Register::Producer { producer_id: 1 })
+            .unwrap();
+        assert!(tokio::time::timeout(wait, send(1, 2)).await.is_err());
+        assert!(!closed_producers.lock().unwrap().contains(&1));
+        assert!(!error.is_set());
     }
 
     struct TestAuthentication {
