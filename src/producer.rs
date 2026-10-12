@@ -7,14 +7,15 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use base64::Engine;
 use futures::{
     channel::{mpsc, oneshot},
     future::{self, try_join_all, Either},
-    lock::Mutex,
+    lock::{Mutex, MutexGuard},
+    pin_mut,
     task::{Context, Poll},
     Future, SinkExt, StreamExt,
 };
@@ -24,7 +25,7 @@ use crate::{
     client::SerializeMessage,
     compression::Compression,
     connection::{Connection, SerialId},
-    error::{ConnectionError, ProducerError},
+    error::{ConnectionError, ProducerError, ServiceDiscoveryError},
     executor::Executor,
     message::{
         proto::{self, CommandSendReceipt, EncryptionKeys, Schema},
@@ -627,12 +628,11 @@ impl<Exe: Executor> TopicProducer<Exe> {
             name: producer_name.clone(),
             options: options.clone(),
             sequence_id: SerialId::new(),
+            pending: Default::default(),
             state: Mutex::new(ProducerState {
                 connection,
+                ready: true,
                 schema_version,
-                epoch: 0,
-                closed: false,
-                pending: BTreeMap::new(),
             }),
         });
 
@@ -706,7 +706,13 @@ impl<Exe: Executor> TopicProducer<Exe> {
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn check_connection(&self) -> Result<(), Error> {
-        let connection = self.connection.state.lock().await.connection.clone();
+        let deadline = Instant::now() + self.client.operation_retry_options.operation_timeout;
+        let connection = self
+            .connection
+            .lock_state(deadline)
+            .await?
+            .connection
+            .clone();
         connection.sender().send_ping().await?;
         Ok(())
     }
@@ -860,8 +866,10 @@ fn compress_message(
 }
 
 /// The producer's connection and its messages waiting for a receipt, shared with the tasks
-/// waiting for those receipts: when the broker closes the producer (e.g. on topic unload), they
-/// re-create it and resend the messages right away, even if the application stopped sending.
+/// waiting for those receipts: when the broker closes the producer (e.g. on topic unload) or the
+/// connection drops, they re-create it and resend the messages, even if the application stopped
+/// sending. Like Java's `sendTimeout`, a message fails once `operation_timeout` has passed since
+/// it was first sent, whatever the resends and re-creations.
 struct ProducerConnection<Exe: Executor> {
     client: Pulsar<Exe>,
     topic: String,
@@ -869,40 +877,61 @@ struct ProducerConnection<Exe: Executor> {
     name: ProducerName,
     options: ProducerOptions,
     sequence_id: SerialId,
+    /// a std mutex, never held across an await, so that messages can expire while a
+    /// re-creation holds `state`
+    pending: std::sync::Mutex<Pending>,
     state: Mutex<ProducerState<Exe>>,
 }
 
 struct ProducerState<Exe: Executor> {
     connection: Arc<Connection<Exe>>,
+    /// whether the producer exists on `connection`: false from the start of a re-creation
+    /// until it succeeds
+    ready: bool,
     /// Schema version returned by the broker in `CommandProducerSuccess`, used for the messages
     /// that do not set one
     schema_version: Option<Vec<u8>>,
+}
+
+#[derive(Default)]
+struct Pending {
     /// incremented each time the producer is re-created
     epoch: u64,
-    /// set on close, so that the broker closing the producer does not re-create it
+    /// set on close, so that the producer is not re-created anymore
     closed: bool,
     /// messages sent but not acknowledged yet, by sequence id, resent in order on re-creation
-    pending: BTreeMap<
-        u64,
-        (
-            ProducerMessage,
-            oneshot::Sender<Result<CommandSendReceipt, Error>>,
-        ),
-    >,
+    messages: BTreeMap<u64, PendingMessage>,
+}
+
+struct PendingMessage {
+    message: ProducerMessage,
+    tx: oneshot::Sender<Result<CommandSendReceipt, Error>>,
+    /// `operation_timeout` after the first send: resends do not extend it
+    deadline: Instant,
+}
+
+impl Pending {
+    fn complete(&mut self, sequence_id: u64, result: Result<CommandSendReceipt, Error>) {
+        if let Some(message) = self.messages.remove(&sequence_id) {
+            let _ = message.tx.send(result);
+        }
+    }
 }
 
 impl<Exe: Executor> ProducerConnection<Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn send(self: &Arc<Self>, mut message: ProducerMessage) -> Result<SendFuture, Error> {
-        let mut state = self.state.lock().await;
-        if message.schema_version.is_none() {
-            message.schema_version = state.schema_version.clone();
-        }
+        let deadline = Instant::now() + self.client.operation_retry_options.operation_timeout;
         let sequence_id = self.sequence_id.get();
         loop {
-            // Sending on a connection poisoned by a receipt timeout, or for a producer closed by
-            // the broker, would only wait for a receipt that never comes: reconnect first.
-            if state.connection.is_valid() && !state.connection.is_producer_closed(self.id) {
+            let state = self
+                .lock_state(deadline)
+                .await
+                .map_err(ProducerError::Connection)?;
+            if self.is_ready(&state) {
+                if message.schema_version.is_none() {
+                    message.schema_version = state.schema_version.clone();
+                }
                 match state
                     .connection
                     .sender()
@@ -917,8 +946,28 @@ impl<Exe: Executor> ProducerConnection<Exe> {
                 {
                     Ok(receipt) => {
                         let (tx, rx) = oneshot::channel();
-                        self.wait_for_receipt(sequence_id, state.epoch, receipt)?;
-                        state.pending.insert(sequence_id, (message, tx));
+                        let epoch = {
+                            let mut pending = self.pending.lock().unwrap();
+                            let message = PendingMessage {
+                                message,
+                                tx,
+                                deadline,
+                            };
+                            pending.messages.insert(sequence_id, message);
+                            pending.epoch
+                        };
+                        let connection = state.connection.clone();
+                        if let Err(e) = self.wait_for_receipt(
+                            sequence_id,
+                            epoch,
+                            deadline,
+                            false,
+                            connection,
+                            receipt,
+                        ) {
+                            self.pending.lock().unwrap().messages.remove(&sequence_id);
+                            return Err(e);
+                        }
                         return Ok(SendFuture(rx));
                     }
                     Err(ConnectionError::Disconnected) => {}
@@ -929,119 +978,329 @@ impl<Exe: Executor> ProducerConnection<Exe> {
                     }
                 }
             }
-            self.reconnect(&mut state).await?;
+            // Re-create in the background: waiting for it can time out, while cancelling it
+            // midway could leave the connection manager waiting forever on a half-created
+            // connection.
+            let epoch = self.pending.lock().unwrap().epoch;
+            drop(state);
+            let reconnected = self.spawn_reconnect(epoch)?;
+            match self.wait_until(reconnected, deadline).await {
+                Some(Ok(Err(e))) if is_permanent(&e) => return Err(e),
+                Some(Ok(_)) => {} // re-created, or failed for now: try again
+                Some(Err(oneshot::Canceled)) => return Err(Error::Executor),
+                None => {
+                    let error = timed_out("could not re-create the producer in time");
+                    return Err(ProducerError::Connection(error).into());
+                }
+            }
         }
+    }
+
+    fn is_ready(&self, state: &ProducerState<Exe>) -> bool {
+        state.ready && state.connection.is_valid() && !state.connection.is_producer_closed(self.id)
+    }
+
+    /// Waits for `fut`, but not past `deadline`.
+    async fn wait_until<T>(&self, fut: impl Future<Output = T>, deadline: Instant) -> Option<T> {
+        let expiry = self
+            .client
+            .executor
+            .delay(deadline.saturating_duration_since(Instant::now()));
+        pin_mut!(fut, expiry);
+        match future::select(fut, expiry).await {
+            Either::Left((output, _)) => Some(output),
+            Either::Right(_) => None,
+        }
+    }
+
+    /// Locks the state, waiting for a running re-creation at most until `deadline`.
+    async fn lock_state(
+        &self,
+        deadline: Instant,
+    ) -> Result<MutexGuard<'_, ProducerState<Exe>>, ConnectionError> {
+        self.wait_until(self.state.lock(), deadline)
+            .await
+            .ok_or_else(|| timed_out("timed out waiting for the producer to be re-created"))
+    }
+
+    /// Re-creates the producer in the background, unless another task did since `epoch`.
+    fn spawn_reconnect(
+        self: &Arc<Self>,
+        epoch: u64,
+    ) -> Result<oneshot::Receiver<Result<(), Error>>, Error> {
+        let (tx, rx) = oneshot::channel();
+        let this = self.clone();
+        self.client
+            .executor
+            .spawn(Box::pin(async move {
+                let mut state = this.state.lock().await;
+                let stale = this.pending.lock().unwrap().epoch != epoch;
+                let result = if stale {
+                    Ok(())
+                } else {
+                    this.reconnect(&mut state, false).await
+                };
+                let _ = tx.send(result);
+            }))
+            .map_err(|_| Error::Executor)?;
+        Ok(rx)
     }
 
     /// Re-creates the producer, then resends the pending messages in order, before any new one.
-    /// If that fails, the pending messages fail too.
+    /// With `retry`, a failed attempt is retried while messages are pending: they expire on
+    /// their own. After an error that retrying cannot fix, the pending messages fail right away.
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    async fn reconnect(self: &Arc<Self>, state: &mut ProducerState<Exe>) -> Result<(), Error> {
-        let result: Result<(), Error> = async {
-            if state.closed {
-                return Err(ProducerError::Closed.into());
-            }
-            if state.connection.is_producer_closed(self.id) {
-                // Like the Java client, give the broker a moment (e.g. to finish unloading the
-                // topic) and do not spin if it keeps closing the producer (e.g. bookies down).
-                // shortcut: fixed delay, use an exponential backoff if that is not enough
-                self.client.executor.delay(Duration::from_millis(100)).await;
-            }
-            warn!(
-                "reconnecting producer {:?}({}) for topic {}, connection {}",
-                self.name,
-                self.id,
-                self.topic,
-                state.connection.id()
-            );
-            if let Err(e) = state.connection.sender().close_producer(self.id).await {
-                error!(
-                    "could not close producer {:?}({}) for topic {}: {:?}",
-                    self.name, self.id, self.topic, e
-                );
-            }
-            let broker_address = self.client.lookup_topic(&self.topic).await?;
-            let (_producer_name, schema_version) = retry_create_producer(
-                &self.client,
-                &mut state.connection,
-                broker_address,
-                &self.topic,
-                self.id,
-                Some(self.name.clone()),
-                &self.options,
-            )
-            .await?;
-            // for future messages, the pending ones keep the schema version they were sent with
-            state.schema_version = schema_version;
-            state.epoch += 1;
-            for (sequence_id, (message, _)) in &state.pending {
-                let receipt = state
-                    .connection
-                    .sender()
-                    .send(
-                        self.id,
-                        self.name.clone(),
-                        *sequence_id,
-                        message.clone(),
-                        true,
-                    )
-                    .await
-                    .map_err(ProducerError::Connection)?;
-                self.wait_for_receipt(*sequence_id, state.epoch, receipt)?;
-            }
-            Ok(())
-        }
-        .await;
-        if let Err(e) = &result {
-            for (_, (_, tx)) in std::mem::take(&mut state.pending) {
-                let _ = tx.send(Err(ProducerError::Custom(format!(
-                    "could not reconnect the producer: {e}"
-                ))
-                .into()));
+    async fn reconnect(
+        self: &Arc<Self>,
+        state: &mut ProducerState<Exe>,
+        retry: bool,
+    ) -> Result<(), Error> {
+        loop {
+            match self.recreate(state).await {
+                Ok(()) => break,
+                Err(e) if is_permanent(&e) => {
+                    let messages = std::mem::take(&mut self.pending.lock().unwrap().messages);
+                    for (_, message) in messages {
+                        let error = match &e {
+                            Error::Producer(ProducerError::Closed) => ProducerError::Closed,
+                            e => ProducerError::Custom(format!(
+                                "could not re-create the producer: {e}"
+                            )),
+                        };
+                        let _ = message.tx.send(Err(error.into()));
+                    }
+                    return Err(e);
+                }
+                Err(e) => {
+                    if !retry || self.pending.lock().unwrap().messages.is_empty() {
+                        return Err(e);
+                    }
+                    warn!(
+                        "could not re-create producer {:?}({}) for topic {}, retrying: {:?}",
+                        self.name, self.id, self.topic, e
+                    );
+                }
             }
         }
-        result
+        let (epoch, to_resend) = {
+            let mut pending = self.pending.lock().unwrap();
+            pending.epoch += 1;
+            let now = Instant::now();
+            let expired_ids: Vec<u64> = pending
+                .messages
+                .iter()
+                .filter(|(_, message)| message.deadline <= now)
+                .map(|(sequence_id, _)| *sequence_id)
+                .collect();
+            for sequence_id in expired_ids {
+                pending.complete(sequence_id, Err(expired()));
+            }
+            let to_resend: Vec<(u64, Instant)> = pending
+                .messages
+                .iter()
+                .map(|(sequence_id, message)| (*sequence_id, message.deadline))
+                .collect();
+            (pending.epoch, to_resend)
+        };
+        for (sequence_id, deadline) in to_resend {
+            let message = self
+                .pending
+                .lock()
+                .unwrap()
+                .messages
+                .get(&sequence_id)
+                .map(|pending| pending.message.clone());
+            let Some(message) = message else {
+                continue; // acknowledged meanwhile
+            };
+            let connection = state.connection.clone();
+            let receipt = connection
+                .sender()
+                .send(self.id, self.name.clone(), sequence_id, message, true)
+                .await;
+            // a failed resend is handled by its receipt task, like a failed receipt
+            let receipt = async move { receipt?.await };
+            self.wait_for_receipt(sequence_id, epoch, deadline, true, connection, receipt)?;
+        }
+        Ok(())
     }
 
-    /// Waits for a receipt in the background. If the broker closed the producer meanwhile, the
-    /// producer is re-created and the pending messages are resent instead of failing.
+    /// One attempt at re-creating the producer.
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    async fn recreate(self: &Arc<Self>, state: &mut ProducerState<Exe>) -> Result<(), Error> {
+        state.ready = false;
+        // Like the Java client's first backoff step, give the broker a moment (e.g. to finish
+        // unloading the topic), and do not spin if it keeps closing the producer (e.g. bookies
+        // down) or cannot be reached.
+        // shortcut: fixed delay, use an exponential backoff if that is not enough
+        self.client.executor.delay(Duration::from_millis(100)).await;
+        let closed = self.pending.lock().unwrap().closed;
+        if closed {
+            return Err(ProducerError::Closed.into());
+        }
+        warn!(
+            "reconnecting producer {:?}({}) for topic {}, connection {}",
+            self.name,
+            self.id,
+            self.topic,
+            state.connection.id()
+        );
+        if let Err(e) = state.connection.sender().close_producer(self.id).await {
+            error!(
+                "could not close producer {:?}({}) for topic {}: {:?}",
+                self.name, self.id, self.topic, e
+            );
+        }
+        let broker_address = self.client.lookup_topic(&self.topic).await?;
+        let (_producer_name, schema_version) = retry_create_producer(
+            &self.client,
+            &mut state.connection,
+            broker_address,
+            &self.topic,
+            self.id,
+            Some(self.name.clone()),
+            &self.options,
+        )
+        .await?;
+        // for future messages, the pending ones keep the schema version they were sent with
+        state.schema_version = schema_version;
+        let closed = self.pending.lock().unwrap().closed;
+        if closed {
+            // closed meanwhile: do not leave the producer open on the broker
+            let _ = state.connection.sender().close_producer(self.id).await;
+            return Err(ProducerError::Closed.into());
+        }
+        state.ready = true;
+        Ok(())
+    }
+
+    /// Waits for a receipt in the background. If the broker closed the producer or the
+    /// connection dropped meanwhile, the producer is re-created and the pending messages are
+    /// resent, instead of failing this message.
     fn wait_for_receipt(
         self: &Arc<Self>,
         sequence_id: u64,
         epoch: u64,
+        deadline: Instant,
+        resent: bool,
+        connection: Arc<Connection<Exe>>,
         receipt: impl Future<Output = Result<CommandSendReceipt, ConnectionError>> + Send + 'static,
     ) -> Result<(), Error> {
         let this = self.clone();
         self.client
             .executor
             .spawn(Box::pin(async move {
-                let result = receipt.await;
-                let mut state = this.state.lock().await;
-                if state.epoch != epoch {
+                // The first send keeps the connection's receipt timeout, which marks the
+                // connection broken when it expires; a resend gets what is left before the
+                // deadline.
+                let result = if resent {
+                    match this.wait_until(receipt, deadline).await {
+                        Some(result) => result,
+                        None => return this.expire(sequence_id),
+                    }
+                } else {
+                    receipt.await
+                };
+                let error = match result {
+                    Ok(receipt) => return this.complete(sequence_id, Ok(receipt)),
+                    Err(e) => e,
+                };
+                let stale = this.pending.lock().unwrap().epoch != epoch;
+                if stale {
                     return; // resent since then, a newer task waits for its receipt
                 }
-                if result.is_err() && state.connection.is_producer_closed(this.id) {
-                    let _ = this.reconnect(&mut state).await;
-                } else if let Some((_, tx)) = state.pending.remove(&sequence_id) {
-                    let _ = tx.send(result.map_err(|e| {
-                        error!("wait send receipt got error: {:?}", e);
-                        ProducerError::Connection(e).into()
-                    }));
+                let lost = connection.is_producer_closed(this.id)
+                    || matches!(error, ConnectionError::Disconnected);
+                if !lost {
+                    error!("wait send receipt got error: {:?}", error);
+                    return this
+                        .complete(sequence_id, Err(ProducerError::Connection(error).into()));
                 }
+                this.recover(sequence_id, epoch, deadline).await;
             }))
             .map_err(|_| Error::Executor)
     }
 
-    /// Closes the producer, which is then no longer re-created when the broker closes it.
+    /// Re-creates the producer after a receipt was lost with the producer or its connection.
+    /// This message fails if its deadline passes first.
+    async fn recover(self: &Arc<Self>, sequence_id: u64, epoch: u64, deadline: Instant) {
+        let Ok(mut state) = self.lock_state(deadline).await else {
+            return self.expire(sequence_id);
+        };
+        let done = {
+            let pending = self.pending.lock().unwrap();
+            pending.epoch != epoch || !pending.messages.contains_key(&sequence_id)
+        };
+        if done {
+            return; // re-created by another task meanwhile, or completed
+        }
+        let reconnect = self.reconnect(&mut state, true);
+        pin_mut!(reconnect);
+        if self
+            .wait_until(reconnect.as_mut(), deadline)
+            .await
+            .is_none()
+        {
+            self.expire(sequence_id);
+            // an attempt cannot be cancelled safely, and other messages may still be resent
+            let _ = reconnect.await;
+        }
+    }
+
+    fn complete(&self, sequence_id: u64, result: Result<CommandSendReceipt, Error>) {
+        self.pending.lock().unwrap().complete(sequence_id, result);
+    }
+
+    fn expire(&self, sequence_id: u64) {
+        self.complete(sequence_id, Err(expired()));
+    }
+
+    /// Closes the producer, which is then no longer re-created.
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     async fn close(&self) -> Result<CommandSuccess, ConnectionError> {
-        let connection = {
-            let mut state = self.state.lock().await;
-            state.closed = true;
-            state.connection.clone()
-        };
+        self.pending.lock().unwrap().closed = true;
+        // a re-creation running longer than that closes the producer itself when it ends
+        let deadline = Instant::now() + self.client.operation_retry_options.operation_timeout;
+        let connection = self.lock_state(deadline).await?.connection.clone();
         connection.sender().close_producer(self.id).await
     }
+}
+
+fn timed_out(message: &'static str) -> ConnectionError {
+    ConnectionError::Io(std::io::Error::new(std::io::ErrorKind::TimedOut, message))
+}
+
+/// The error of a message not acknowledged within `operation_timeout` of its first send.
+fn expired() -> Error {
+    ProducerError::Connection(timed_out(
+        "the message was not acknowledged within the operation timeout",
+    ))
+    .into()
+}
+
+/// Errors after which re-creating the producer cannot succeed.
+fn is_permanent(error: &Error) -> bool {
+    use proto::ServerError as E;
+    let kind = match error {
+        Error::Producer(ProducerError::Closed) => return true,
+        Error::Connection(ConnectionError::PulsarError(kind, _))
+        | Error::Producer(ProducerError::Connection(ConnectionError::PulsarError(kind, _)))
+        | Error::ServiceDiscovery(ServiceDiscoveryError::Query(kind, _)) => kind,
+        _ => return false,
+    };
+    matches!(
+        kind,
+        Some(
+            E::TopicNotFound
+                | E::TopicTerminatedError
+                | E::AuthenticationError
+                | E::AuthorizationError
+                | E::ProducerFenced
+                | E::IncompatibleSchema
+                | E::NotAllowedError
+                | E::InvalidTopicName
+        )
+    )
 }
 
 impl<Exe: Executor> std::ops::Drop for TopicProducer<Exe> {
@@ -1821,8 +2080,6 @@ mod tests {
 
     #[tokio::test]
     async fn producer_resends_pending_messages_after_topic_unload() {
-        use std::collections::HashSet;
-
         use crate::{consumer::Consumer, OperationRetryOptions};
 
         let _result = log::set_logger(&TEST_LOGGER);
@@ -1861,38 +2118,110 @@ mod tests {
             // unloading the topic makes the broker send CommandCloseProducer
             let unload_topic = topic.clone();
             let unload = tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
                 test_utils::unload_topic("public", "default", &unload_topic).await;
             });
-            let count = 300;
+            // keep sending until the unload is done, then a bit more, so it lands mid-stream
             let mut receipts = Vec::new();
-            for i in 0..count {
-                receipts.push(
-                    producer
-                        .send_non_blocking(format!("msg-{i}"))
-                        .await
-                        .unwrap(),
-                );
+            let mut after_unload = 0;
+            while after_unload < 20 {
+                if unload.is_finished() {
+                    after_unload += 1;
+                }
+                let message = format!("msg-{}", receipts.len());
+                receipts.push(producer.send_non_blocking(message).await.unwrap());
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
             unload.await.unwrap();
+            let count = receipts.len();
             // without handling the close, sends wait for the 30s operation timeout and fail
             tokio::time::timeout(Duration::from_secs(10), try_join_all(receipts))
                 .await
                 .expect("receipts timed out")
                 .unwrap();
 
-            let mut received = HashSet::new();
-            while received.len() < count {
+            // every message arrives, first in send order: resends may add duplicates when the
+            // broker does not deduplicate
+            let mut next = 0;
+            while next < count {
                 let msg = tokio::time::timeout(Duration::from_secs(10), consumer.next())
                     .await
                     .expect("message lost")
                     .unwrap()
                     .unwrap();
                 consumer.ack(&msg).await.unwrap();
-                received.insert(msg.deserialize().unwrap());
+                let i: usize = msg.deserialize().unwrap()["msg-".len()..].parse().unwrap();
+                assert!(i <= next, "msg-{i} arrived before msg-{next}");
+                if i == next {
+                    next += 1;
+                }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn producer_send_times_out_when_it_cannot_be_recreated() {
+        use crate::OperationRetryOptions;
+
+        let _result = log::set_logger(&TEST_LOGGER);
+        log::set_max_level(LevelFilter::Debug);
+        let operation_timeout = Duration::from_secs(2);
+        let pulsar: Pulsar<_> = Pulsar::builder("pulsar://127.0.0.1:6650", TokioExecutor)
+            .with_operation_retry_options(OperationRetryOptions {
+                operation_timeout,
+                retry_delay: Duration::from_millis(100),
+                ..Default::default()
+            })
+            .build()
+            .await
+            .unwrap();
+        let topic = format!("producer_recreate_timeout_{}", rand::random::<u32>());
+        let mut producer = pulsar.producer().with_topic(&topic).build().await.unwrap();
+        producer
+            .send_non_blocking("before")
+            .await
+            .unwrap()
+            .await
+            .unwrap();
+
+        // after the unload, an exclusive producer takes the topic: ours cannot be re-created
+        test_utils::unload_topic("public", "default", &topic).await;
+        let exclusive = ProducerOptions {
+            access_mode: Some(proto::ProducerAccessMode::Exclusive as i32),
+            ..Default::default()
+        };
+        let mut exclusive = pulsar
+            .producer()
+            .with_topic(&topic)
+            .with_options(exclusive)
+            .build()
+            .await
+            .unwrap();
+
+        let start = Instant::now();
+        let blocked = async { producer.send_non_blocking("blocked").await?.await };
+        let result = tokio::time::timeout(Duration::from_secs(10), blocked)
+            .await
+            .expect("the send hangs while the producer cannot be re-created");
+        assert!(result.is_err());
+        assert!(
+            start.elapsed() < 2 * operation_timeout,
+            "{:?}",
+            start.elapsed()
+        );
+
+        // once the topic is free again, the producer is re-created
+        exclusive.close().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            producer
+                .send_non_blocking("after")
+                .await
+                .unwrap()
+                .await
+                .unwrap()
+        })
+        .await
+        .expect("the send after the exclusive producer closed timed out");
     }
 
     #[tokio::test]
