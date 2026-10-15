@@ -3,7 +3,7 @@ use std::{
     pin::Pin,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     task::{Context, Poll},
     time::Duration,
@@ -20,7 +20,7 @@ use crate::{
     consumer::{
         config::ConsumerConfig,
         data::{DeadLetterPolicy, EngineMessage, MessageData, MessageIdDataReceiver},
-        engine::ConsumerEngine,
+        engine::{ConnectionSnapshot, ConsumerEngine},
         message::Message,
     },
     error::{ConnectionError, ConsumerError},
@@ -37,6 +37,7 @@ pub struct TopicConsumer<T: DeserializeMessage, Exe: Executor> {
     topic: String,
     messages: Pin<Box<MessageIdDataReceiver>>,
     engine_tx: mpsc::UnboundedSender<EngineMessage<Exe>>,
+    connection_snapshot: Arc<Mutex<ConnectionSnapshot<Exe>>>,
     data_type: PhantomData<fn(Payload) -> T::Output>,
     pub(crate) dead_letter_policy: Option<DeadLetterPolicy>,
     pub(super) last_message_received: Option<DateTime<Utc>>,
@@ -121,6 +122,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
             dead_letter_policy.clone(),
             options.clone(),
         );
+        let connection_snapshot = c.connection_snapshot();
         let engine_task = client.executor.spawn(Box::pin(async move {
             c.engine()
                 .map(|res| {
@@ -138,6 +140,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
             topic,
             messages: Box::pin(rx),
             engine_tx,
+            connection_snapshot,
             data_type: PhantomData,
             dead_letter_policy,
             last_message_received: None,
@@ -164,17 +167,35 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         })
     }
 
+    pub(super) async fn query_connection(&mut self) -> Result<Arc<Connection<Exe>>, Error> {
+        let response = {
+            let snapshot = self
+                .connection_snapshot
+                .lock()
+                .map_err(|_| ConnectionError::Disconnected)?;
+            match &*snapshot {
+                ConnectionSnapshot::Ready(connection) => return Ok(connection.clone()),
+                ConnectionSnapshot::Reconnecting(receiver) => receiver.clone(),
+                ConnectionSnapshot::Closed => return Err(ConnectionError::Disconnected.into()),
+            }
+        };
+        response.await.map_err(|oneshot::Canceled| {
+            error!("the consumer engine dropped the request");
+            ConnectionError::Disconnected.into()
+        })
+    }
+
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn get_stats(&mut self) -> Result<CommandConsumerStatsResponse, Error> {
         let consumer_id = self.consumer_id;
-        let conn = self.connection().await?;
+        let conn = self.query_connection().await?;
         let consumer_stats_response = conn.sender().get_consumer_stats(consumer_id).await?;
         Ok(consumer_stats_response)
     }
 
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn check_connection(&mut self) -> Result<(), Error> {
-        let conn = self.connection().await?;
+        let conn = self.query_connection().await?;
         info!("check connection for id {}", conn.id());
         conn.sender().send_ping().await?;
         Ok(())
@@ -274,7 +295,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub async fn get_last_message_id(&mut self) -> Result<MessageIdData, Error> {
         let consumer_id = self.consumer_id;
-        let conn = self.connection().await?;
+        let conn = self.query_connection().await?;
         let get_last_message_id_response = conn.sender().get_last_message_id(consumer_id).await?;
         Ok(get_last_message_id_response.last_message_id)
     }
@@ -308,7 +329,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
         &mut self,
         version: Option<Vec<u8>>,
     ) -> Result<Option<Schema>, Error> {
-        let conn = self.connection().await?;
+        let conn = self.query_connection().await?;
         let schema_response = conn.sender().get_schema(&self.topic, version).await?;
         Ok(schema_response.schema)
     }
