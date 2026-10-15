@@ -19,8 +19,7 @@ pub enum Compression {
 #[cfg(feature = "lz4")]
 #[derive(Debug, Default, Clone)]
 pub struct CompressionLz4 {
-    /// compression mode of lz4 to be used
-    pub mode: lz4::block::CompressionMode,
+    // compression mode of lz4 to be used. Empty because lz4_flex library does not have a CompressionMode method
 }
 
 /// Options of the [zlib](https://www.zlib.net/) algorithm
@@ -35,15 +34,16 @@ pub struct CompressionZlib {
 #[cfg(feature = "zstd")]
 #[derive(Clone, Copy, Debug)]
 pub struct CompressionZstd {
-    /// compression level of zstd to be used ([`zstd::compression_level_range()`])
-    pub level: i32,
+    /// currently only Fastest is supported for compression;
+    /// Default/Better/Best panic are marked as unimplemented in ruzstd
+    pub level: zstd::encoding::CompressionLevel,
 }
 
 #[cfg(feature = "zstd")]
 impl Default for CompressionZstd {
     fn default() -> Self {
         CompressionZstd {
-            level: zstd::DEFAULT_COMPRESSION_LEVEL,
+            level: zstd::encoding::CompressionLevel::Fastest,
         }
     }
 }

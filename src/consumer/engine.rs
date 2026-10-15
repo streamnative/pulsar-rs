@@ -463,9 +463,9 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
                 {
                     let decompressed_payload = lz4::block::decompress(
                         &payload.data[..],
-                        payload.metadata.uncompressed_size.map(|i| i as i32),
+                        payload.metadata.uncompressed_size() as usize,
                     )
-                    .map_err(ConsumerError::Io)?;
+                    .map_err(|e| ConsumerError::Io(std::io::Error::other(e)))?;
 
                     payload.data = decompressed_payload;
                     payload
@@ -504,8 +504,14 @@ impl<Exe: Executor> ConsumerEngine<Exe> {
 
                 #[cfg(feature = "zstd")]
                 {
-                    let decompressed_payload =
-                        zstd::decode_all(&payload.data[..]).map_err(ConsumerError::Io)?;
+                    use std::io::Read;
+
+                    let mut d = zstd::decoding::StreamingDecoder::new(&payload.data[..])
+                        .map_err(|e| ConsumerError::Io(std::io::Error::other(e)))?;
+
+                    let mut decompressed_payload = Vec::new();
+                    d.read_to_end(&mut decompressed_payload)
+                        .map_err(ConsumerError::Io)?;
 
                     payload.data = decompressed_payload;
                     payload
