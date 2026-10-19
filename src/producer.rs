@@ -814,10 +814,8 @@ fn compress_message(
     let compressed_message = match compression {
         None | Some(Compression::None) => message,
         #[cfg(feature = "lz4")]
-        Some(Compression::Lz4(compression)) => {
-            let compressed_payload: Vec<u8> =
-                lz4::block::compress(&message.payload[..], Some(compression.mode), false)
-                    .map_err(ProducerError::Io)?;
+        Some(Compression::Lz4(..)) => {
+            let compressed_payload: Vec<u8> = lz4::block::compress(&message.payload[..]);
 
             message.uncompressed_size = Some(message.payload.len() as u32);
             message.payload = compressed_payload;
@@ -838,8 +836,8 @@ fn compress_message(
         }
         #[cfg(feature = "zstd")]
         Some(Compression::Zstd(compression)) => {
-            let compressed_payload = zstd::encode_all(&message.payload[..], compression.level)
-                .map_err(ProducerError::Io)?;
+            let compressed_payload =
+                zstd::encoding::compress_to_vec(&message.payload[..], compression.level);
             message.uncompressed_size = Some(message.payload.len() as u32);
             message.payload = compressed_payload;
             message.compression = Some(proto::CompressionType::Zstd.into());
