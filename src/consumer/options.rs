@@ -33,6 +33,10 @@ pub struct ConsumerOptions {
     /// }
     /// ```
     pub initial_position: InitialPosition,
+    /// Mark the subscription as "replicated". Pulsar will make sure
+    /// to periodically sync the state of replicated subscriptions
+    /// across different clusters (when using geo-replication).
+    pub replicate_subscription_state: Option<bool>,
 }
 
 impl ConsumerOptions {
@@ -83,6 +87,12 @@ impl ConsumerOptions {
     pub fn with_receiver_queue_size(mut self, size: u32) -> Self {
         // todo: support zero_queue_size consumer
         self.receiver_queue_size = Some(if size == 0 { 1000 } else { size });
+        self
+    }
+  
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn with_replicate_subscription_state(mut self, replicate_subscription_state: bool) -> Self {
+        self.replicate_subscription_state = Some(replicate_subscription_state);
         self
     }
 }
