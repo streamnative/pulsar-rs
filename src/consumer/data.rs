@@ -20,6 +20,12 @@ pub enum EngineMessage<Exe: Executor> {
     Nack(MessageIdData),
     UnackedRedelivery,
     GetConnection(oneshot::Sender<Arc<Connection<Exe>>>),
+    /// The consumer seeked to a new position: the engine must resubscribe
+    /// from there on reconnect instead of any previously recorded position.
+    /// `None` for timestamp seeks, where no message id is available — a
+    /// reconnect then falls back to the subscription's default initial
+    /// position rather than a stale pre-seek one.
+    SeekPosition(Option<MessageIdData>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

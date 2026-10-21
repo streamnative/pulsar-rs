@@ -33,6 +33,19 @@ pub struct ConsumerOptions {
     /// }
     /// ```
     pub initial_position: InitialPosition,
+    /// If specified (and non-zero), the subscription will reset its cursor
+    /// back by this many seconds at subscribe time and replay messages from
+    /// that point (the broker's `startMessageRollbackDurationInSec`).
+    ///
+    /// This is the protocol-native way to "start N seconds back" for
+    /// readers and non-durable consumers, without a separate `seek()` after
+    /// creation (which forces a broker-side consumer close + reconnect).
+    ///
+    /// The rollback is applied at subscribe time and on resubscribes only
+    /// while the consumer has made no progress; once messages have been
+    /// dequeued, reconnects no longer send it (matching the Java client),
+    /// so a network blip does not rewind the cursor by the whole window.
+    pub start_message_rollback_duration_secs: Option<u64>,
 }
 
 impl ConsumerOptions {
@@ -83,6 +96,15 @@ impl ConsumerOptions {
     pub fn with_receiver_queue_size(mut self, size: u32) -> Self {
         // todo: support zero_queue_size consumer
         self.receiver_queue_size = Some(if size == 0 { 1000 } else { size });
+        self
+    }
+
+    /// within options, rolls the subscription cursor back by the given
+    /// number of seconds at subscribe time (the broker replays messages
+    /// published within that window)
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub fn with_start_message_rollback_duration_secs(mut self, seconds: u64) -> Self {
+        self.start_message_rollback_duration_secs = Some(seconds);
         self
     }
 }

@@ -200,6 +200,10 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
             InnerConsumer::Multi(c) => {
                 c.seek(consumer_ids, message_id, timestamp).await?;
                 let topics = c.topics();
+                // The central config stays untouched: it only seeds topics
+                // this consumer has never subscribed to (update_topics()
+                // discoveries), and for those a configured rollback
+                // legitimately applies — it is their first subscribe.
                 let config = c.config().clone();
 
                 //currently, pulsar only supports seek for non partitioned topics
@@ -210,7 +214,21 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
                 let topic_addr_pair = c.topics.iter().cloned().zip(addrs.iter().cloned());
 
                 let consumers = try_join_all(topic_addr_pair.map(|(topic, addr)| {
-                    TopicConsumer::new(client.clone(), topic, addr, config.clone())
+                    // Rebuild each topic from its own consumer's config, as
+                    // is: TopicConsumer::seek already rebased the seeked
+                    // topics' configs (seek target in, one-shot rollback
+                    // out), and the topics that were NOT seeked keep their
+                    // original options — including a configured rollback,
+                    // whose bounded window replay is at-least-once for
+                    // non-durable consumers, whereas dropping it would
+                    // resubscribe them at the default position and skip
+                    // messages. The shared config is only the fallback.
+                    let topic_config = c
+                        .consumers
+                        .get(&topic)
+                        .map(|old| old.config().clone())
+                        .unwrap_or_else(|| config.clone());
+                    TopicConsumer::new(client.clone(), topic, addr, topic_config)
                 }))
                 .await?;
 
@@ -223,7 +241,6 @@ impl<T: DeserializeMessage, Exe: Executor> Consumer<T, Exe> {
                 let topic_refresh = Duration::from_secs(30);
                 let refresh = Box::pin(client.executor.interval(topic_refresh).map(drop));
                 let namespace = c.namespace.clone();
-                let config = c.config().clone();
                 let topic_regex = c.topic_regex.clone();
                 InnerConsumer::Multi(MultiTopicConsumer {
                     namespace,
