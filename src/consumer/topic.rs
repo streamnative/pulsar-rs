@@ -62,6 +62,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
             unacked_message_redelivery_delay,
             options,
             dead_letter_policy,
+            batch_acknowledgment,
         } = config.clone();
         let consumer_id =
             consumer_id.unwrap_or_else(|| CONSUMER_ID_GENERATOR.fetch_add(1, Ordering::SeqCst));
@@ -119,6 +120,7 @@ impl<T: DeserializeMessage, Exe: Executor> TopicConsumer<T, Exe> {
             batch_size,
             unacked_message_redelivery_delay,
             dead_letter_policy.clone(),
+            batch_acknowledgment,
             options.clone(),
         );
         let engine_task = client.executor.spawn(Box::pin(async move {

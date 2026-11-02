@@ -12,7 +12,7 @@ Features:
 - TLS connection;
 - Configurable executor (Tokio or async-std);
 - Automatic reconnection with exponential back off;
-- Message batching;
+- Message batching, with per-message acknowledgment of batched entries and batch-index acknowledgment where the broker supports it;
 - Compression with LZ4, zlib, zstd or Snappy (can be deactivated with Cargo features);
 - Telemetry using [tracing](https://github.com/tokio-rs/tracing) crate (can be activated with Cargo features).
 
