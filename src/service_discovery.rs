@@ -94,7 +94,7 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
                 }
 
                 error!(
-                    "tried to lookup a topic but error occured[{:?}]: {:?}",
+                    "tried to lookup a topic but error occurred[{:?}]: {:?}",
                     line!(),
                     error
                 );
