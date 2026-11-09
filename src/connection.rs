@@ -21,7 +21,7 @@ use futures::{
     Future, FutureExt, Sink, SinkExt, Stream, StreamExt,
 };
 use proto::MessageIdData;
-use rand::{seq::SliceRandom, thread_rng};
+use rand::{rng, seq::SliceRandom};
 use url::Url;
 use uuid::Uuid;
 
@@ -960,7 +960,7 @@ impl<Exe: Executor> Connection<Exe> {
                 })
                 .ok()
                 .map(|mut v| {
-                    v.shuffle(&mut thread_rng());
+                    v.shuffle(&mut rng());
                     v
                 })
             })

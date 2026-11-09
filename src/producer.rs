@@ -1409,7 +1409,7 @@ impl<Exe: Executor> ProducerBuilder<Exe> {
             1 => ProducerInner::Single(producers.into_iter().next().unwrap()),
             len => ProducerInner::Partitioned(PartitionedProducer {
                 producers,
-                last_used_producer_index: rand::thread_rng().gen_range(0..len),
+                last_used_producer_index: rand::rng().random_range(0..len),
                 topic,
                 options,
             }),
