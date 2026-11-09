@@ -408,14 +408,6 @@ impl<Exe: Executor> ConnectionSender<Exe> {
         }
     }
 
-    // Tears down the connection's reader task immediately, cancelling every pending request/send waiting on a response
-    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
-    pub(crate) fn force_disconnect(&self) {
-        if let Some(shutdown) = self.receiver_shutdown.lock().unwrap().take() {
-            let _ = shutdown.send(());
-        }
-    }
-
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     pub(crate) async fn send(
         &self,
