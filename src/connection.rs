@@ -21,7 +21,7 @@ use futures::{
     Future, FutureExt, Sink, SinkExt, Stream, StreamExt,
 };
 use proto::MessageIdData;
-use rand::{seq::SliceRandom, thread_rng};
+use rand::{rng, seq::SliceRandom};
 use url::Url;
 use uuid::Uuid;
 
@@ -364,7 +364,7 @@ pub struct ConnectionSender<Exe: Executor> {
     data_tx: async_channel::Sender<Message>,
     control_tx: async_channel::Sender<Message>,
     registrations: mpsc::UnboundedSender<Register>,
-    receiver_shutdown: Option<oneshot::Sender<()>>,
+    receiver_shutdown: Arc<std::sync::Mutex<Option<oneshot::Sender<()>>>>,
     request_id: SerialId,
     error: SharedError,
     executor: Arc<Exe>,
@@ -391,12 +391,20 @@ impl<Exe: Executor> ConnectionSender<Exe> {
             data_tx,
             control_tx,
             registrations,
-            receiver_shutdown: Some(receiver_shutdown),
+            receiver_shutdown: Arc::new(std::sync::Mutex::new(Some(receiver_shutdown))),
             request_id,
             error,
             executor,
             operation_timeout,
             closed_producers,
+        }
+    }
+
+    // Tears down the connection's reader task immediately, cancelling every pending request/send waiting on a response
+    #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
+    pub(crate) fn force_disconnect(&self) {
+        if let Some(shutdown) = self.receiver_shutdown.lock().unwrap().take() {
+            let _ = shutdown.send(());
         }
     }
 
@@ -952,7 +960,7 @@ impl<Exe: Executor> Connection<Exe> {
                 })
                 .ok()
                 .map(|mut v| {
-                    v.shuffle(&mut thread_rng());
+                    v.shuffle(&mut rng());
                     v
                 })
             })
@@ -1476,9 +1484,7 @@ impl<Exe: Executor> Drop for Connection<Exe> {
     #[cfg_attr(feature = "telemetry", tracing::instrument(skip_all))]
     fn drop(&mut self) {
         debug!("dropping connection {} for {}", self.id, self.url);
-        if let Some(shutdown) = self.sender.receiver_shutdown.take() {
-            let _ = shutdown.send(());
-        }
+        self.sender.force_disconnect();
     }
 }
 

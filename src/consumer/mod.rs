@@ -728,7 +728,7 @@ mod tests {
         feature = "tokio-rustls-runtime-ring"
     ))]
     async fn consumer_dropped_with_lingering_acks() {
-        use rand::{distributions::Alphanumeric, Rng};
+        use rand::{distr::Alphanumeric, Rng};
         let _result = log::set_logger(&TEST_LOGGER);
         log::set_max_level(LevelFilter::Debug);
         let addr = "pulsar://127.0.0.1:6650";
@@ -742,7 +742,7 @@ mod tests {
 
         let message = TestData {
             topic: iter::repeat(())
-                .map(|()| rand::thread_rng().sample(Alphanumeric) as char)
+                .map(|()| rand::rng().sample(Alphanumeric) as char)
                 .take(8)
                 .collect(),
             msg: 1,
