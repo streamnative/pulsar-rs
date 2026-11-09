@@ -169,7 +169,7 @@ impl<T: DeserializeMessage, Exe: Executor> MultiTopicConsumer<T, Exe> {
                     .filter(|t| regex.is_match(t))
                     .collect();
 
-                trace!("matched topics {:?} (regex: {})", matched_topics, &regex);
+                trace!("matched topics {:?} (regex: {})", matched_topics, regex);
 
                 topics.append(&mut matched_topics);
             }
@@ -380,19 +380,19 @@ impl<T: 'static + DeserializeMessage, Exe: Executor> Stream for MultiTopicConsum
                     Poll::Pending => {}
                     Poll::Ready(Some(Ok(msg))) => result = Some(msg),
                     Poll::Ready(None) => {
-                        error!("Unexpected end of stream for pulsar topic {}", &topic);
+                        error!("Unexpected end of stream for pulsar topic {}", topic);
                         topics_to_remove.push(topic.clone());
                     }
                     Poll::Ready(Some(Err(e))) => {
                         error!(
                             "Unexpected error consuming from pulsar topic {}: {}",
-                            &topic, e
+                            topic, e
                         );
                         topics_to_remove.push(topic.clone());
                     }
                 }
             } else {
-                eprintln!("BUG: Missing consumer for topic {}", &topic);
+                eprintln!("BUG: Missing consumer for topic {}", topic);
             }
             self.existing_topics.push_back(topic);
         }

@@ -228,7 +228,7 @@ mod tests {
         let topic = format!("test_reader_{}", rand::random::<u16>());
         let dead_letter_policy = DeadLetterPolicy {
             max_redeliver_count: 1,
-            dead_letter_topic: format!("{}_dead_letter", &topic),
+            dead_letter_topic: format!("{}_dead_letter", topic),
         };
         let client: Pulsar<_> = Pulsar::builder(addr, TokioExecutor).build().await.unwrap();
         let mut reader: Reader<TestData, _> = client
@@ -252,7 +252,7 @@ mod tests {
 
         let policy = reader.dead_letter_policy().unwrap();
         assert_eq!(policy.max_redeliver_count, 1);
-        assert_eq!(policy.dead_letter_topic, format!("{}_dead_letter", &topic));
+        assert_eq!(policy.dead_letter_topic, format!("{}_dead_letter", topic));
         assert_eq!(reader.subscription(), "test_reader_subscription");
         assert_eq!(reader.sub_type(), SubType::Exclusive);
         assert_eq!(reader.batch_size(), None);

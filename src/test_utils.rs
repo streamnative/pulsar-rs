@@ -43,3 +43,13 @@ pub(crate) async fn create_partitioned_topic(
         .unwrap();
     assert!(response.status().is_success());
 }
+
+/// Unloads a topic, which makes the broker close its producers and consumers.
+#[cfg(test)]
+pub(crate) async fn unload_topic(tenant: &str, namespace: &str, topic_name: &str) {
+    let url = format!(
+        "http://127.0.0.1:8080/admin/v2/persistent/{tenant}/{namespace}/{topic_name}/unload"
+    );
+    let response = reqwest::Client::new().put(url).send().await.unwrap();
+    assert!(response.status().is_success());
+}

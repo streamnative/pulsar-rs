@@ -71,10 +71,6 @@ impl Message {
                 ..
             }
             | BaseCommand {
-                close_producer: Some(CommandCloseProducer { request_id, .. }),
-                ..
-            }
-            | BaseCommand {
                 success: Some(CommandSuccess { request_id, .. }),
                 ..
             }
@@ -116,6 +112,19 @@ impl Message {
                 get_schema_response: Some(CommandGetSchemaResponse { request_id, .. }),
                 ..
             } => Some(RequestKey::RequestId(*request_id)),
+            // the broker fails the sends it gets after fencing the topic (e.g. to unload it),
+            // right before closing the producer: handle both alike
+            BaseCommand {
+                send_error:
+                    Some(CommandSendError {
+                        producer_id, error, ..
+                    }),
+                ..
+            } if *error == ServerError::PersistenceError as i32 => {
+                Some(RequestKey::CloseProducer {
+                    producer_id: *producer_id,
+                })
+            }
             BaseCommand {
                 send:
                     Some(CommandSend {
@@ -183,6 +192,12 @@ impl Message {
             } => Some(RequestKey::CloseConsumer {
                 consumer_id: *consumer_id,
                 request_id: *request_id,
+            }),
+            BaseCommand {
+                close_producer: Some(CommandCloseProducer { producer_id, .. }),
+                ..
+            } => Some(RequestKey::CloseProducer {
+                producer_id: *producer_id,
             }),
             BaseCommand {
                 auth_challenge: Some(CommandAuthChallenge { .. }),
@@ -623,7 +638,40 @@ mod tests {
     use bytes::BytesMut;
     use tokio_util::codec::{Decoder, Encoder};
 
-    use crate::message::Codec;
+    use crate::{
+        connection::RequestKey,
+        message::{
+            proto::{BaseCommand, CommandSendError, ServerError},
+            Codec, Message,
+        },
+    };
+
+    #[test]
+    fn send_persistence_error_is_handled_as_producer_close() {
+        let send_error = |error: ServerError| Message {
+            command: BaseCommand {
+                send_error: Some(CommandSendError {
+                    producer_id: 1,
+                    sequence_id: 2,
+                    error: error as i32,
+                    message: "fenced".to_string(),
+                }),
+                ..Default::default()
+            },
+            payload: None,
+        };
+        assert_eq!(
+            send_error(ServerError::PersistenceError).request_key(),
+            Some(RequestKey::CloseProducer { producer_id: 1 })
+        );
+        assert_eq!(
+            send_error(ServerError::NotAllowedError).request_key(),
+            Some(RequestKey::ProducerSend {
+                producer_id: 1,
+                sequence_id: 2
+            })
+        );
+    }
 
     #[test]
     fn parse_simple_command() {

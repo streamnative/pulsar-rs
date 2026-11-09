@@ -282,7 +282,7 @@ impl<Exe: Executor> ServiceDiscovery<Exe> {
         let topics = match partitions {
             0 => vec![topic],
             _ => (0..partitions)
-                .map(|n| format!("{}-partition-{}", &topic, n))
+                .map(|n| format!("{}-partition-{}", topic, n))
                 .collect(),
         };
         try_join_all(topics.into_iter().map(|topic| {
