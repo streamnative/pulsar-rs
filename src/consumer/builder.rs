@@ -1,7 +1,4 @@
-use std::{
-    collections::{BTreeMap, VecDeque},
-    time::Duration,
-};
+use std::{collections::VecDeque, time::Duration};
 
 use futures::{future::try_join_all, StreamExt};
 use rand::{distributions::Alphanumeric, Rng};
@@ -10,7 +7,7 @@ use regex::Regex;
 use crate::{
     consumer::{
         config::ConsumerConfig, data::DeadLetterPolicy, multi::MultiTopicConsumer,
-        options::ConsumerOptions, topic::TopicConsumer, InnerConsumer,
+        options::ConsumerOptions, ready_streams::ReadyStreams, topic::TopicConsumer, InnerConsumer,
     },
     message::proto::command_subscribe::SubType,
     reader::{Reader, State},
@@ -282,7 +279,7 @@ impl<Exe: Executor> ConsumerBuilder<Exe> {
             let consumer = consumers.into_iter().next().unwrap();
             InnerConsumer::Single(consumer)
         } else {
-            let consumers: BTreeMap<_, _> = consumers
+            let consumers: ReadyStreams<_> = consumers
                 .into_iter()
                 .map(|c| (c.topic(), Box::pin(c)))
                 .collect();

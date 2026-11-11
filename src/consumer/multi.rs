@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::VecDeque,
     fmt::Debug,
     future::Future,
     iter,
@@ -12,7 +12,9 @@ use futures::{future::try_join_all, Stream};
 use regex::Regex;
 
 use crate::{
-    consumer::{config::ConsumerConfig, message::Message, topic::TopicConsumer},
+    consumer::{
+        config::ConsumerConfig, message::Message, ready_streams::ReadyStreams, topic::TopicConsumer,
+    },
     error::{ConnectionError, ConsumerError},
     message::proto::{MessageIdData, Schema},
     proto,
@@ -26,7 +28,7 @@ pub struct MultiTopicConsumer<T: DeserializeMessage, Exe: Executor> {
     pub(super) namespace: String,
     pub(super) topic_regex: Option<Regex>,
     pub(super) pulsar: Pulsar<Exe>,
-    pub(super) consumers: BTreeMap<String, Pin<Box<TopicConsumer<T, Exe>>>>,
+    pub(super) consumers: ReadyStreams<Pin<Box<TopicConsumer<T, Exe>>>>,
     pub(super) topics: VecDeque<String>,
     pub(super) existing_topics: VecDeque<String>,
     #[allow(clippy::type_complexity)]
@@ -364,43 +366,25 @@ impl<T: 'static + DeserializeMessage, Exe: Executor> Stream for MultiTopicConsum
             return self.poll_next(cx);
         }
 
-        let mut topics_to_remove = Vec::new();
-        let mut result = None;
-        for _ in 0..self.existing_topics.len() {
-            if result.is_some() {
-                break;
-            }
-            let topic = self.existing_topics.pop_front().unwrap();
-            if let Some(item) = self
-                .consumers
-                .get_mut(&topic)
-                .map(|c| c.as_mut().poll_next(cx))
-            {
-                match item {
-                    Poll::Pending => {}
-                    Poll::Ready(Some(Ok(msg))) => result = Some(msg),
-                    Poll::Ready(None) => {
-                        error!("Unexpected end of stream for pulsar topic {}", topic);
-                        topics_to_remove.push(topic.clone());
-                    }
-                    Poll::Ready(Some(Err(e))) => {
-                        error!(
-                            "Unexpected error consuming from pulsar topic {}: {}",
-                            topic, e
-                        );
-                        topics_to_remove.push(topic.clone());
-                    }
+        loop {
+            let (topic, item) = match self.consumers.poll_next(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(next) => next,
+            };
+            match item {
+                Some(Ok(msg)) => return Poll::Ready(Some(Ok(msg))),
+                None => {
+                    error!("Unexpected end of stream for pulsar topic {}", topic);
+                    self.remove_consumers(&[topic.to_string()]);
                 }
-            } else {
-                eprintln!("BUG: Missing consumer for topic {}", topic);
+                Some(Err(e)) => {
+                    error!(
+                        "Unexpected error consuming from pulsar topic {}: {}",
+                        topic, e
+                    );
+                    self.remove_consumers(&[topic.to_string()]);
+                }
             }
-            self.existing_topics.push_back(topic);
         }
-        self.remove_consumers(&topics_to_remove);
-        if let Some(result) = result {
-            return Poll::Ready(Some(Ok(result)));
-        }
-
-        Poll::Pending
     }
 }
